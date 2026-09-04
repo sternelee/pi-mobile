@@ -163,9 +163,17 @@ pi-mobile/
 **运行时模型**：
 
 - Android：`libpi_bun.so` 进 `gen/android` jniLibs，Rust 宿主 FFI/JNI 加载；
-- iOS：`libpi_bun.a` 静态链接进 Swift 壳（JIT 合规约束 → M5 专项评估，静态 bundle + 禁动态代码下载为默认姿态）；
-- 通信：C ABI —— **hostcall**（bun→Rust：凭证、审批、open、通知）+ **事件回调**（Rust→bun：审批结果、UI 指令）；Rust 核心同时把 agent 事件 emit 给 WebView UI。
+- iOS：`libpi_bun.a` 静态链接进 Swift 壳；**JSC 以 interpreter + bytecode cache 模式运行（无 JIT）即满足 App Store 约束**——skal 已验证此路径（React Native 同款先例），.jsc 字节码缓存同时解决冷启动解析成本；
+- 体积预期：bun + JSC 静态链 ≈ 87 MB（Android arm64，skal 实测口径）；App 体积是可接受代价，记录在案；
+- 通信：C ABI —— **hostcall**（bun→Rust：凭证、审批、open、通知）+ **事件回调**（Rust→bun：审批结果、UI 指令）；Rust 核心同时把 agent 事件 emit 给 WebView UI；
 - 桥分两级：v1 JSON 消息通道（可调试、够用）；v2 skal 式零拷贝共享内存环（接口不变，纯优化）。
+
+**构建工艺（复刻 skal 实践）**：
+
+- `vendor/`：clone bun fork（pin 到 fork 的专用分支 tip，gitignored，setup 脚本可复现拉取）+ WebKit/JSC 源；
+- `patches/`：fork 分支上的 commits（platform-lib 入口 `pi_entry.zig`、Android/iOS 链接配置）——不在本仓库维护 diff 文件，而是维护 fork 分支引用；
+- `build/`：各平台 link inputs（gitignored）；`build-libpi-bun.sh` 一键产出 .so/.a 并放进 gen/ 工程；
+- JSC 版本耦合：.jsc 字节码缓存与 JSC 版本强绑定（skal 教训），bundle 与运行时同版本构建。
 
 ### D2：桥协议（bun ↔ Rust ↔ UI）
 
@@ -274,10 +282,11 @@ pi-mobile/
 - [x] `bun tauri android init` → gen/android 入库（**优先 Android**；ios init 顺延至 M5 前）
 - [x] CI 骨架：biome + typecheck + cargo fmt/clippy/test + aarch64-android 交叉检查 + 桌面 build 矩阵（`.github/workflows/ci.yml`）
 - [x] 插件接线：http / fs / opener / os / store（依赖、注册、capabilities）
-- [ ] Android **真机**跑通模板（adb 已连 MEY-AN00 / arm64 / Android 16，`tauri android dev` 构建进行中）
-- **出口条件**：真机显示模板 UI
+- [x] Android **真机**跑通模板（MEY-AN00 / arm64 / Android 16：Rust aarch64 交叉编译 + Gradle 8.14.3 构建 + 安装启动 + WebView 加载 Vite dev server，用户确认首页显示正常）
+- **出口条件**：真机显示模板 UI ✅（2026-09-04 达成）
 
 ### M1 —— libpi-bun PoC（~3 周，最高风险前置，skal 挑战复刻）
+- [x] skal 工艺研究 → `docs/LIBPI-BUN-NOTES.md`（入口形态、构建链接、符号守卫、JSC 合规路径）
 - [ ] `scripts/setup-bun-fork.sh`：vendor bun fork（参照 skal 补丁工艺），锁定版本，全自动可复现
 - [ ] zig 交叉编译 aarch64-android → `libpi_bun.so`，一键脚本产物进 `gen/android` jniLibs
 - [ ] Rust `pi_bun/` 模块：FFI 装载、生命周期、消息泵；宿主注入 HOME/TMPDIR=app_data 子目录（沙箱语义对齐）
@@ -318,7 +327,7 @@ pi-mobile/
 | 风险 | 等级 | 缓解 |
 |------|------|------|
 | **bun fork/补丁链维护成本**（skal 同款挑战：zig 构建、上游 bun 月度发版、补丁冲突） | 高 | 锁定 bun 版本；补丁最小化（只加 platform-lib 入口与链接配置）；`setup-bun-fork.sh` 全自动可复现；每月跟进上游 rebase 作业 |
-| iOS 审核（嵌入式 bun JIT、动态加载） | 中-高 | iOS 用静态库 + 只执行打包 bundle、禁动态代码下载；上架前 App Store 问询；TestFlight 先行 |
+| iOS 审核（嵌入式 JS 运行时） | 中 | **skal 已验证路径**：JSC interpreter + bytecode cache（无 JIT）合规，React Native 同款先例；静态库 + 只执行打包 bundle；TestFlight 先行验证 |
 | zig/android-ndk/gradle 构建管线复杂 | 中 | `build-libpi-bun.sh` 一键产出；CI 缓存 zig/gradle；产物哈希入库 |
 | libpi-bun 与 App 沙箱的文件系统语义差异（bun 假设 $HOME、/tmp） | 中 | 启动时由宿主注入 HOME/TMPDIR=app_data 子目录；PoC 阶段验证 |
 | pi 上游破坏性变更 | 中 | 锁定版本 + 契约测试 + 每周 canary 升级作业 |
