@@ -32,3 +32,23 @@
 | worker 线程 | 必须（UI 帧率隔离） | 同样必须（Rust 消息泵不阻塞 Tauri 主线程） |
 | 入口 JS | 渲染器 | `pi-bundle/entry.ts`（pi-coding-agent headless） |
 | bridge 内容 | 渲染 op ring + store | `agent:delta/tool/done` 事件 + hostcall（凭证/审批） |
+
+## 5. M1 PoC 策略与 pin 记录（2026-09-04）
+
+**两段式**：先复用 skal CI 预构建产物在真机打通「dlopen → VM 启动 → JS 执行 → logcat」全链路（`scripts/fetch-libpi-bun.sh` + `src-tauri/src/pi_bun/mod.rs`，skal ABI 4 符号：create_runtime / evaluate / free_string / runtime_was_reused）；验证通过后再切自有 `pi_entry.zig` + `pi_bun_*` ABI 从源码构建。理由：网络慢时从源码构建需下载数 GB（bun + WebKit + ICU），而预构建产物 92MB 一步到位验证架构。
+
+**预构建产物 pin（`libskal-dev` release manifest，从源码复刻时必须对齐）**：
+
+```
+skal_commit       = 19a7721180cf1e09e52db7b378dbc6feea2042d8
+bun_pin           = dfcbb2bc610ac55b9dcb08e10bf482d8d87373bd   # bun 1.3.14
+webkit_pin        = c1bdd50c5ead2dca7f582013b74ec154ca7f5dfc
+skal_entry_sha256 = ebfd913481b7a700766893fb9e5383c5c1bea98bfff966660fc9fbe2a7f68962
+so_sha256         = 5cdc391b6834268e61b182c3e1565a2edf8eed5fe57d47fba2ea574b091ce77e
+so_size           = 91,935,608 bytes（≈87MB，与 ENGINE_CHOICE 口径一致）
+```
+
+**Android 15+/16 真机注意**：16KB 页对齐要求——产物装入 jniLibs 前检测 ELF `p_align`（LOAD 段须为 0x4000 或以 16KB 对齐）；若不满足需从源码用 NDK r28+ 重链。
+
+**Dart doorbell 不适用**：`skal_init_dart_api` / `skal_set_host_port` 是 Dart native-port 专用，Rust 宿主跳过；我们的 hostcall 走自有 `pi_bun_*` ABI（pi_bun.h 草案）。
+

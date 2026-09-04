@@ -1,16 +1,31 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createSignal } from "solid-js";
+import { createSignal, onMount } from "solid-js";
 import logo from "./assets/logo.svg";
 import "./App.css";
 
 function App() {
   const [greetMsg, setGreetMsg] = createSignal("");
   const [name, setName] = createSignal("");
+  // M1 PoC：嵌入式 bun 运行时（libpi-bun / libskal）冒烟结果
+  const [bunResult, setBunResult] = createSignal("(not run)");
 
   async function greet() {
     // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
     setGreetMsg(await invoke("greet", { name: name() }));
   }
+
+  async function runBunSmoke() {
+    setBunResult("running…");
+    try {
+      setBunResult(await invoke<string>("pi_bun_smoke"));
+    } catch (e) {
+      setBunResult(`ERROR: ${e}`);
+    }
+  }
+
+  onMount(() => {
+    runBunSmoke();
+  });
 
   return (
     <main class="container">
@@ -44,6 +59,26 @@ function App() {
         <button type="submit">Greet</button>
       </form>
       <p>{greetMsg()}</p>
+
+      <h2>libpi-bun PoC (M1)</h2>
+      <p>
+        Embedded bun+JSC runtime smoke test. Result also lands in logcat (tag:
+        pi-bun).
+      </p>
+      <div class="row">
+        <button type="button" onClick={() => runBunSmoke()}>
+          Run bun smoke
+        </button>
+      </div>
+      <pre
+        style={{
+          "text-align": "left",
+          "white-space": "pre-wrap",
+          "font-size": "0.8rem",
+        }}
+      >
+        {bunResult()}
+      </pre>
     </main>
   );
 }
