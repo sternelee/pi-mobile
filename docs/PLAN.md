@@ -290,8 +290,11 @@ pi-mobile/
 - [x] **PoC 两段式启动**：第一段用 skal CI 预构建产物（`scripts/fetch-libpi-bun.sh`，pin 记录见 NOTES §5）+ Rust dlopen（`pi_bun/mod.rs`，skal ABI 4 符号）真机打通；第二段切自有 pi_entry.zig 从源码构建
 - [x] Rust `pi_bun/` 模块 + `pi_bun_smoke` 命令（libloading dlopen、spawn_blocking、logcat 输出）+ UI 冒烟入口（App.tsx）
 - [x] aarch64-linux-android 交叉编译检查通过（含 libloading）
-- [ ] 预构建 .so（92MB）下载完成 → sha256 校验 → 16KB 对齐检测 → 装入 jniLibs
-- [ ] 真机验证：App 内 `pi_bun_smoke` 显示嵌入式 bun 执行结果 + logcat（tag: pi-bun）可见输出
+- [x] 预构建 .so（92MB）下载完成 → sha256 校验通过（`5cdc391b…`）→ 16KB 对齐检测通过（p_align 0x4000/0x10000，NDK readelf 复核）→ 装入 jniLibs
+- [x] **真机验证 ✅（2026-09-04，MEY-AN00）**：`pi_bun_smoke` 在 App 内显示结果 + logcat（tag: pi-bun）：VM 启动、`Bun.version=1.3.14`、fetch/TextEncoder 可用、JS 求值首跑 5ms / 热路径 0ms——**出口条件（logcat 输出 + 桥往返 <5ms）达成**
+- [ ] 第二段：自有 `pi_entry.zig`（`pi_bun_*` ABI，见 pi_bun.h）从源码构建替换预构建产物（vendor bun fork，pins 见 NOTES §5）
+- [ ] 网络注意：手机与宿主必须同网段（devUrl 走 LAN IP；不要设 TAURI_DEV_HOST=localhost——Android WebView 的 tauri.localhost 不走 adb reverse）
+
 - [ ] `scripts/setup-bun-fork.sh`：vendor bun fork（参照 skal 补丁工艺），锁定版本，全自动可复现
 - [ ] zig 交叉编译 aarch64-android → `libpi_bun.so`，一键脚本产物进 `gen/android` jniLibs
 - [ ] Rust `pi_bun/` 模块：FFI 装载、生命周期、消息泵；宿主注入 HOME/TMPDIR=app_data 子目录（沙箱语义对齐）

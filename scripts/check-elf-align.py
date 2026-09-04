@@ -20,12 +20,11 @@ def main(path: str) -> int:
             print(f"{path}: 32-bit ELF (armv7) — 4KB 页即可")
             return 0
         f.seek(0)
-        ident = f.read(16)
-        e_phoff = struct.unpack_from("<Q", f.read(8), 0)[0] if False else None
-        # 重读 ELF64 头
-        f.seek(0)
         header = f.read(64)
-        e_phoff, e_phentsize, e_phnum = struct.unpack_from("<QHH", header, 32)
+        # ELF64 头布局：e_phoff@32(8B)、e_phentsize@54(2B)、e_phnum@56(2B)
+        e_phoff = struct.unpack_from("<Q", header, 32)[0]
+        e_phentsize = struct.unpack_from("<H", header, 54)[0]
+        e_phnum = struct.unpack_from("<H", header, 56)[0]
         f.seek(e_phoff)
         loads = []
         for _ in range(e_phnum):
