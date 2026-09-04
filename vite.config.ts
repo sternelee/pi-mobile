@@ -8,6 +8,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [solid()],
 
+  // 依赖扫描只看应用入口（vendor/ 里有 bun fork 的上千个 html/js，
+  // 会被 dev 模式的扫描器误爬并报语法错误）
+  optimizeDeps: {
+    entries: ["index.html", "src/**/*.{js,ts,tsx}"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

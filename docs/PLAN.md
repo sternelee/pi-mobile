@@ -292,8 +292,15 @@ pi-mobile/
 - [x] aarch64-linux-android 交叉编译检查通过（含 libloading）
 - [x] 预构建 .so（92MB）下载完成 → sha256 校验通过（`5cdc391b…`）→ 16KB 对齐检测通过（p_align 0x4000/0x10000，NDK readelf 复核）→ 装入 jniLibs
 - [x] **真机验证 ✅（2026-09-04，MEY-AN00）**：`pi_bun_smoke` 在 App 内显示结果 + logcat（tag: pi-bun）：VM 启动、`Bun.version=1.3.14`、fetch/TextEncoder 可用、JS 求值首跑 5ms / 热路径 0ms——**出口条件（logcat 输出 + 桥往返 <5ms）达成**
-- [ ] 第二段：自有 `pi_entry.zig`（`pi_bun_*` ABI，见 pi_bun.h）从源码构建替换预构建产物（vendor bun fork，pins 见 NOTES §5）
-- [ ] 网络注意：手机与宿主必须同网段（devUrl 走 LAN IP；不要设 TAURI_DEV_HOST=localhost——Android WebView 的 tauri.localhost 不走 adb reverse）
+### M1 第二段（调整 2026-09-04）：预构建产物上直接进 M2，从源码构建降为后台任务
+
+> 决策：WebKit（JSC 源码）克隆暂停。理由：它是 bun 在 Android 上的 JS 引擎编译期依赖（非 UI 组件），但 M1 第一段已用预构建 libskal 打通全链路；M2 的桥接需求可用「skal_evaluate（Rust→JS）+ HTTP loopback fetch（JS→Rust）」在预构建 ABI 上完整实现，无需重构建。从源码构建（scripts/ 已就绪）择机后台补做，产物通过符号守卫后无缝替换。
+
+- [x] M1 第一段出口条件达成（见上）
+- [x] `patches/pi_entry.zig` + 从源码构建流水线已备好（`setup-bun-fork.sh` / `build-libpi-bun.sh`，WebKit 克隆暂停，随时可恢复）
+- [ ] **M2 桥（预构建 ABI）**：Rust loopback HTTP 微服务（127.0.0.1，hostcall 通道）+ `skal_evaluate` 事件注入 + JS `bridge.ts`（fetch 封装）
+- [ ] （后台/择机）WebKit 克隆 + `build-libpi-bun.sh` 从源码构建 → 符号守卫 → 替换预构建产物为自有 `pibun_*` ABI
+- ⚠️ 网络注意：手机与宿主必须同网段（devUrl 走 LAN IP；不要设 TAURI_DEV_HOST=localhost——Android WebView 的 tauri.localhost 不走 adb reverse）
 
 - [ ] `scripts/setup-bun-fork.sh`：vendor bun fork（参照 skal 补丁工艺），锁定版本，全自动可复现
 - [ ] zig 交叉编译 aarch64-android → `libpi_bun.so`，一键脚本产物进 `gen/android` jniLibs

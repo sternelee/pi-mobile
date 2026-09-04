@@ -2,18 +2,26 @@
 //!
 //! 当前阶段：dlopen skal 官方预构建产物（`libskal-android-arm64.so`，skal ABI），
 //! 在真机上验证「嵌入式 bun + JSC 运行时」执行 JS 的完整链路。
-//! 后续（M1 后半）：换成我们自己的 pi_entry.zig + `pi_bun_*` C ABI（见
-//! `src-tauri/pi_bun/include/pi_bun.h`），接口形态不变。
+//! M2 桥（预构建 ABI 阶段）：Rust loopback HTTP（JS→Rust hostcall）
+//! + skal_evaluate 事件注入（Rust→JS）。详见 docs/CONTRACTS.md §2。
+//! 后续：换成我们自己的 pi_entry.zig + `pi_bun_*` C ABI（见
+//! `src-tauri/pi_bun/include/pi_bun.h`），桥协议不变。
 //!
 //! 参考文档：docs/LIBPI-BUN-NOTES.md、docs/CONTRACTS.md §2、skal.h（skal 仓）。
+
+pub mod loopback;
 
 use std::ffi::{c_char, c_int, CString};
 use std::sync::{Mutex, OnceLock};
 
 use libloading::Library;
 
-/// PoC 负载：与桌面 bun 同版本、无依赖的探测脚本。
+/// M1 冒烟负载：同步探测嵌入式运行时能力面。
 const HELLO_JS: &str = include_str!("../../../pi-bundle/hello.js");
+/// M2 桥：JS→Rust hostcall（fetch → loopback）
+const BRIDGE_JS: &str = include_str!("../../../pi-bundle/bridge.js");
+/// M2 桥冒烟：异步（skal_evaluate 等待 Promise 落定）
+const SMOKE2_JS: &str = include_str!("../../../pi-bundle/smoke2.js");
 
 // ── skal C ABI（只用 PoC 需要的 4 个符号）──────────────────────────
 
@@ -56,7 +64,7 @@ fn runtime_lock() -> &'static Mutex<Option<PiBunRuntime>> {
 
 /// Android 上把消息打进 logcat（M1 出口条件要求 logcat 可见 bun 执行输出）。
 #[cfg(target_os = "android")]
-fn logcat(msg: &str) {
+pub(crate) fn logcat(msg: &str) {
     use std::ffi::CString;
     extern "C" {
         fn __android_log_print(prio: i32, tag: *const c_char, text: *const c_char) -> i32;
@@ -72,7 +80,7 @@ fn logcat(msg: &str) {
 }
 
 #[cfg(not(target_os = "android"))]
-fn logcat(msg: &str) {
+pub(crate) fn logcat(msg: &str) {
     println!("[pi-bun] {msg}");
 }
 
@@ -160,17 +168,65 @@ fn evaluate_blocking(js: &str, url: &str) -> Result<(String, bool), String> {
     Ok((text, out_is_error != 0))
 }
 
-/// PoC 冒烟：初始化（如需）→ 执行 hello.js → 回传结果给 UI/logcat。
-/// 注意：`skal_evaluate` 同步阻塞，调用方须在 blocking 线程（本函数由
-/// async command 经 spawn_blocking 调用）。
+/// PoC 冒烟 v2：初始化 → 注入配置 → 安装桥 → loopback hostcall 往返。
+/// 注意：`skal_evaluate` 同步阻塞（会等待 Promise 落定），调用方须在
+/// blocking 线程（本函数由 async command 经 spawn_blocking 调用）。
 pub fn smoke(data_dir: &str) -> Result<String, String> {
+    let port = loopback::start()?;
     init(data_dir)?;
-    let t0 = std::time::Instant::now();
-    let (result, is_error) = evaluate_blocking(HELLO_JS, "pi-bundle/hello.js")?;
-    let dt = t0.elapsed().as_millis();
-    logcat(&format!("evaluate ok in {dt}ms -> {result}"));
-    if is_error {
-        return Err(format!("JS threw: {result}"));
+
+    // 1. 注入配置（桥与负载都从这里读端口/数据目录）
+    let cfg_json = serde_json::json!({ "port": port, "dataDir": data_dir });
+    let (r, err) = evaluate_blocking(
+        &format!("globalThis.__pi_config = {};", cfg_json),
+        "pi:config",
+    )?;
+    if err {
+        return Err(format!("config eval threw: {r}"));
     }
-    Ok(result)
+
+    // 2. 安装桥（__pi_hostcall / __pi_on / __pi_dispatch）
+    let (r, err) = evaluate_blocking(BRIDGE_JS, "pi-bundle/bridge.js")?;
+    if err {
+        return Err(format!("bridge eval threw: {r}"));
+    }
+    let ready = evaluate_blocking("String(globalThis.__pi_bridge_ready)", "pi:check")?;
+    if ready.0 != "true" {
+        return Err(format!("bridge not ready: {}", ready.0));
+    }
+
+    // 3. M1 同步冒烟（能力面探测）
+    let (hello, hello_err) = evaluate_blocking(HELLO_JS, "pi-bundle/hello.js")?;
+
+    // 4. M2 桥冒烟：立即返回 "started"，异步结果写 __smoke2，宿主轮询。
+    //    （不能从 eval 返回 Promise —— waitForPromise 会阻塞 VM 线程，
+    //     而 fetch 的 I/O 完成需要该线程 tick，实测死锁。）
+    let (r, err) = evaluate_blocking(SMOKE2_JS, "pi-bundle/smoke2.js")?;
+    if err || r.trim() != "started" {
+        return Err(format!("smoke2 kick failed: err={err} r={r}"));
+    }
+    let mut smoke2 = String::from("{\"state\":\"timeout\"}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let (s, e) = evaluate_blocking("JSON.stringify(globalThis.__smoke2)", "pi:poll")?;
+        if e {
+            return Err(format!("poll threw: {s}"));
+        }
+        if s.contains("\"done\"") || s.contains("\"error\"") {
+            smoke2 = s;
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            smoke2 = format!("{{\"state\":\"timeout\",\"last\":{s}}}");
+            break;
+        }
+    }
+    logcat(&format!("smoke2 -> {smoke2}"));
+
+    if hello_err {
+        return Err(format!("hello_err: {hello}"));
+    }
+    Ok(format!("{{\"hello\":{hello},\"smoke2\":{smoke2}}}"))
 }
+
