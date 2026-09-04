@@ -291,7 +291,8 @@ pi-mobile/
 - [x] Rust `pi_bun/` 模块 + `pi_bun_smoke` 命令（libloading dlopen、spawn_blocking、logcat 输出）+ UI 冒烟入口（App.tsx）
 - [x] aarch64-linux-android 交叉编译检查通过（含 libloading）
 - [x] 预构建 .so（92MB）下载完成 → sha256 校验通过（`5cdc391b…`）→ 16KB 对齐检测通过（p_align 0x4000/0x10000，NDK readelf 复核）→ 装入 jniLibs
-- [x] **真机验证 ✅（2026-09-04，MEY-AN00）**：`pi_bun_smoke` 在 App 内显示结果 + logcat（tag: pi-bun）：VM 启动、`Bun.version=1.3.14`、fetch/TextEncoder 可用、JS 求值首跑 5ms / 热路径 0ms——**出口条件（logcat 输出 + 桥往返 <5ms）达成**
+- [x] **M1 完成标记（2026-09-04）**：第一段真机验证 + M2 桥打通后，从源码构建降为后台任务（脚本就绪：`setup-bun-fork.sh`/`build-libpi-bun.sh`，WebKit 克隆暂停可恢复；产物过符号守卫后无缝替换预构建 .so）
+- [x] **M2 桥 ✅ 真机验证**：JS→Rust = bun 原生 fetch → loopback HTTP 微服务（`loopback.rs`，**13ms 往返**）；Rust→JS = `skal_evaluate` 注入。**关键发现：eval 返回 Promise + waitForPromise 会死锁 VM 线程（阻塞了 fetch I/O 依赖的 tick），必须用 kick+轮询/事件模式**——验证了 `pibun_*` ABI（start/post_event/wake）的设计正确性
 ### M1 第二段（调整 2026-09-04）：预构建产物上直接进 M2，从源码构建降为后台任务
 
 > 决策：WebKit（JSC 源码）克隆暂停。理由：它是 bun 在 Android 上的 JS 引擎编译期依赖（非 UI 组件），但 M1 第一段已用预构建 libskal 打通全链路；M2 的桥接需求可用「skal_evaluate（Rust→JS）+ HTTP loopback fetch（JS→Rust）」在预构建 ABI 上完整实现，无需重构建。从源码构建（scripts/ 已就绪）择机后台补做，产物通过符号守卫后无缝替换。
