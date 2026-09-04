@@ -1,84 +1,192 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createSignal, onMount } from "solid-js";
-import logo from "./assets/logo.svg";
+import { listen } from "@tauri-apps/api/event";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = createSignal("");
-  const [name, setName] = createSignal("");
-  // M1 PoC：嵌入式 bun 运行时（libpi-bun / libskal）冒烟结果
-  const [bunResult, setBunResult] = createSignal("(not run)");
+type ChatItem = {
+  role: "user" | "assistant" | "tool" | "status";
+  text: string;
+};
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name: name() }));
+function App() {
+  const [items, setItems] = createSignal<ChatItem[]>([
+    { role: "status", text: "booting embedded pi agent…" },
+  ]);
+  const [input, setInput] = createSignal("");
+  const [apiKey, setApiKey] = createSignal("");
+  const [ready, setReady] = createSignal(false);
+
+  const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
+
+  onMount(async () => {
+    // agent 事件流（bundle → loopback → Rust emit → 这里）
+    const un = await listen<string>("pi-agent-event", (e) => {
+      let ev: any;
+      try {
+        ev = JSON.parse(e.payload);
+      } catch {
+        return;
+      }
+      switch (ev.type) {
+        case "agent_ready":
+          setReady(true);
+          push({
+            role: "status",
+            text: `agent ready — tools: ${(ev.tools ?? []).join(", ")}`,
+          });
+          break;
+        case "boot_error":
+          push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
+          break;
+        case "agent_error":
+          push({ role: "status", text: `ERROR: ${ev.error}` });
+          break;
+        case "agent_start":
+          break;
+        case "agent_end":
+          break;
+        case "message_start":
+        case "message_update":
+        case "message_end": {
+          // 流式 assistant 消息：把 delta 汇总进最后一条 assistant 项
+          const msg = ev.message ?? {};
+          const text =
+            msg.content
+              ?.filter((c: any) => c.type === "text")
+              .map((c: any) => c.text)
+              .join("") ?? "";
+          if (ev.type === "message_update" && !text) break;
+          setItems((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.role === "assistant" && ev.type !== "message_start") {
+              return [...prev.slice(0, -1), { ...last, text }];
+            }
+            return [...prev, { role: "assistant", text }];
+          });
+          break;
+        }
+        case "tool_execution_start":
+          push({
+            role: "tool",
+            text: `⚒ ${ev.toolName}(${JSON.stringify(ev.args ?? {}).slice(0, 120)})`,
+          });
+          break;
+        case "tool_execution_end": {
+          const out =
+            ev.result?.content
+              ?.filter((c: any) => c.type === "text")
+              .map((c: any) => c.text)
+              .join("") ?? "";
+          push({ role: "tool", text: `↳ ${String(out).slice(0, 300)}` });
+          break;
+        }
+        default:
+          break;
+      }
+    });
+    onCleanup(un);
+
+    try {
+      await invoke("agent_init");
+    } catch (e) {
+      push({ role: "status", text: `agent_init failed: ${e}` });
+    }
+  });
+
+  async function saveKey(e: Event) {
+    e.preventDefault();
+    if (!apiKey().trim()) return;
+    await invoke("set_creds", {
+      provider: "anthropic",
+      apiKey: apiKey().trim(),
+    });
+    setApiKey("");
+    push({ role: "status", text: "API key saved (anthropic)" });
   }
 
-  async function runBunSmoke() {
-    setBunResult("running…");
+  async function send(e: Event) {
+    e.preventDefault();
+    const text = input().trim();
+    if (!text || !ready()) return;
+    setInput("");
+    push({ role: "user", text });
     try {
-      setBunResult(await invoke<string>("pi_bun_smoke"));
+      const r = await invoke<string>("agent_prompt", { text });
+      if (r !== "started") push({ role: "status", text: `prompt kick: ${r}` });
     } catch (e) {
-      setBunResult(`ERROR: ${e}`);
+      push({ role: "status", text: `prompt failed: ${e}` });
     }
   }
 
-  onMount(() => {
-    runBunSmoke();
-  });
-
   return (
-    <main class="container">
-      <h1>Welcome to Tauri + Solid</h1>
+    <main
+      class="container"
+      style={{ display: "flex", "flex-direction": "column", height: "100vh" }}
+    >
+      <h1 style={{ "font-size": "1.1rem" }}>pi-mobile</h1>
 
-      <div class="row">
-        <a href="https://vite.dev" target="_blank" rel="noopener">
-          <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank" rel="noopener">
-          <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://solidjs.com" target="_blank" rel="noopener">
-          <img src={logo} class="logo solid" alt="Solid logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and Solid logos to learn more.</p>
+      <Show when={!ready()}>
+        <form class="row" onSubmit={saveKey}>
+          <input
+            type="password"
+            placeholder="Anthropic API key…"
+            value={apiKey()}
+            onInput={(e) => setApiKey(e.currentTarget.value)}
+          />
+          <button type="submit">Save</button>
+        </form>
+      </Show>
 
-      <form
-        class="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg()}</p>
-
-      <h2>libpi-bun PoC (M1)</h2>
-      <p>
-        Embedded bun+JSC runtime smoke test. Result also lands in logcat (tag:
-        pi-bun).
-      </p>
-      <div class="row">
-        <button type="button" onClick={() => runBunSmoke()}>
-          Run bun smoke
-        </button>
-      </div>
-      <pre
+      <div
+        id="chat"
         style={{
+          flex: "1",
+          overflow: "auto",
           "text-align": "left",
-          "white-space": "pre-wrap",
-          "font-size": "0.8rem",
+          padding: "0.5rem",
         }}
       >
-        {bunResult()}
-      </pre>
+        <For each={items()}>
+          {(item) => (
+            <div
+              style={{
+                margin: "0.4rem 0",
+                padding: "0.45rem 0.6rem",
+                "border-radius": "0.6rem",
+                "white-space": "pre-wrap",
+                "word-break": "break-word",
+                "font-size": "0.85rem",
+                ...(item.role === "user"
+                  ? { background: "#2f6feb", color: "#fff" }
+                  : item.role === "assistant"
+                    ? { background: "#24313f" }
+                    : item.role === "tool"
+                      ? {
+                          background: "#1c2530",
+                          color: "#9fb3c8",
+                          "font-family": "monospace",
+                          "font-size": "0.75rem",
+                        }
+                      : { color: "#7d8b99", "font-style": "italic" }),
+              }}
+            >
+              {item.text}
+            </div>
+          )}
+        </For>
+      </div>
+
+      <form class="row" onSubmit={send} style={{ "padding-bottom": "0.8rem" }}>
+        <input
+          placeholder={ready() ? "Ask pi to do something…" : "agent booting…"}
+          disabled={!ready()}
+          value={input()}
+          onInput={(e) => setInput(e.currentTarget.value)}
+        />
+        <button type="submit" disabled={!ready() || !input().trim()}>
+          Send
+        </button>
+      </form>
     </main>
   );
 }

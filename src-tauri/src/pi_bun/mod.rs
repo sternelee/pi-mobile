@@ -168,6 +168,61 @@ fn evaluate_blocking(js: &str, url: &str) -> Result<(String, bool), String> {
     Ok((text, out_is_error != 0))
 }
 
+/// M2 agent bundle（bun build 单文件产物，kick 模式加载）。
+const AGENT_JS: &str = include_str!("../../../pi-bundle/dist/agent.js");
+
+/// 初始化 agent：配置注入 + bundle 加载（同步 kick，立即返回）。
+pub fn agent_init(data_dir: &str) -> Result<(), String> {
+    let port = loopback::start()?;
+    init(data_dir)?;
+
+    let workspace = format!("{data_dir}/workspace");
+    std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace: {e}"))?;
+    let creds_path = format!("{data_dir}/creds.json");
+    loopback::configure(&workspace, &creds_path);
+
+    let cfg_json = serde_json::json!({ "port": port, "dataDir": data_dir });
+    let (r, err) = evaluate_blocking(
+        &format!("globalThis.__PI_CONFIG = {};", cfg_json),
+        "pi:agent-config",
+    )?;
+    if err {
+        return Err(format!("agent config eval threw: {r}"));
+    }
+
+    let (r, err) = evaluate_blocking(AGENT_JS, "pi-bundle/dist/agent.js")?;
+    if err {
+        return Err(format!("agent bundle eval threw: {r}"));
+    }
+    if r.trim() != "agent-main kicked" {
+        return Err(format!("agent bundle unexpected return: {r}"));
+    }
+    logcat("agent bundle kicked");
+    Ok(())
+}
+
+/// 向 agent 提交一条 prompt（kick；结果经 agent_event 异步流回）。
+pub fn agent_prompt(text: &str) -> Result<String, String> {
+    let arg = serde_json::to_string(text).map_err(|e| format!("serialize: {e}"))?;
+    let (r, err) = evaluate_blocking(
+        &format!("globalThis.__pi_prompt({arg})"),
+        "pi:prompt",
+    )?;
+    if err {
+        return Err(format!("prompt eval threw: {r}"));
+    }
+    Ok(r)
+}
+
+/// 轮询 agent 状态（busy/lastError/queued）。
+pub fn agent_status() -> Result<String, String> {
+    let (r, err) = evaluate_blocking("globalThis.__pi_status()", "pi:status")?;
+    if err {
+        return Err(format!("status eval threw: {r}"));
+    }
+    Ok(r)
+}
+
 /// PoC 冒烟 v2：初始化 → 注入配置 → 安装桥 → loopback hostcall 往返。
 /// 注意：`skal_evaluate` 同步阻塞（会等待 Promise 落定），调用方须在
 /// blocking 线程（本函数由 async command 经 spawn_blocking 调用）。

@@ -2688,6 +2688,7 @@ name = "pi-mobile"
 version = "0.1.0"
 dependencies = [
  "libloading 0.8.9",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
