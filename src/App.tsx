@@ -52,6 +52,21 @@ type Approval = {
   diff: string;
 };
 
+type AskOption = { title: string; description?: string };
+
+type AskRequest = {
+  requestId: string;
+  question: string;
+  context?: string | null;
+  options: AskOption[];
+  allowMultiple: boolean;
+  allowFreeform: boolean;
+  allowComment: boolean;
+  selected: string[];
+  freeform: string;
+  comment: string;
+};
+
 type TreeEntry = {
   path: string;
   kind: "file" | "directory";
@@ -83,6 +98,7 @@ function App() {
   const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [approval, setApproval] = createSignal<Approval | null>(null);
+  const [ask, setAsk] = createSignal<AskRequest | null>(null);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
   const [currentSession, setCurrentSession] = createSignal<string | null>(null);
@@ -210,6 +226,20 @@ function App() {
             tool: ev.tool,
             path: ev.path,
             diff: ev.diff ?? "",
+          });
+          break;
+        case "ask_user":
+          setAsk({
+            requestId: ev.requestId,
+            question: ev.question ?? "",
+            context: ev.context,
+            options: ev.options ?? [],
+            allowMultiple: Boolean(ev.allowMultiple),
+            allowFreeform: ev.allowFreeform !== false,
+            allowComment: Boolean(ev.allowComment),
+            selected: [],
+            freeform: "",
+            comment: "",
           });
           break;
         case "boot_error":
@@ -379,6 +409,64 @@ function App() {
       push({ role: "status", text: `${a.tool} ${a.path} → ${decision}` });
     } catch (e) {
       push({ role: "status", text: `approval respond failed: ${e}` });
+    }
+  }
+
+  // ── ask_user（pi-ask-user 移动原生化）──
+  const toggleOption = (title: string) => {
+    const a = ask();
+    if (!a) return;
+    if (a.allowMultiple) {
+      setAsk({
+        ...a,
+        selected: a.selected.includes(title)
+          ? a.selected.filter((t) => t !== title)
+          : [...a.selected, title],
+      });
+    } else {
+      setAsk({ ...a, selected: [title], freeform: "" });
+    }
+  };
+
+  const setFreeform = (v: string) => {
+    const a = ask();
+    if (!a) return;
+    setAsk({ ...a, freeform: v, selected: v.trim() ? [] : a.selected });
+  };
+
+  async function answerAsk(cancelled: boolean) {
+    const a = ask();
+    if (!a) return;
+    let response: unknown = null;
+    if (!cancelled) {
+      if (a.freeform.trim()) {
+        response = {
+          kind: "freeform",
+          text: a.freeform.trim(),
+          comment: a.comment.trim() || undefined,
+        };
+      } else if (a.selected.length) {
+        response = {
+          kind: "selection",
+          selections: a.selected,
+          comment: a.comment.trim() || undefined,
+        };
+      } else {
+        return; // 没有任何回答，不让空提交
+      }
+    }
+    setAsk(null);
+    try {
+      await invoke("ask_user_respond", {
+        requestId: a.requestId,
+        answer: JSON.stringify({ response, cancelled }),
+      });
+      push({
+        role: "status",
+        text: cancelled ? "question dismissed" : "question answered",
+      });
+    } catch (e) {
+      push({ role: "status", text: `ask_user respond failed: ${e}` });
     }
   }
 
@@ -633,6 +721,66 @@ function App() {
                 onClick={() => decide("allow")}
               >
                 Allow
+              </Button>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={ask()}>
+        {(a) => (
+          <div class="approval">
+            <div class="approval-title">❓ {a().question}</div>
+            <Show when={a().context}>
+              <div class="ask-context">{a().context}</div>
+            </Show>
+            <Show when={a().options.length}>
+              <div class="ask-options">
+                <For each={a().options}>
+                  {(o) => (
+                    <button
+                      class={`ask-option ${a().selected.includes(o.title) ? "selected" : ""}`}
+                      onClick={() => toggleOption(o.title)}
+                    >
+                      <div class="ask-option-title">
+                        <span class="ask-option-mark">
+                          {a().selected.includes(o.title) ? "●" : "○"}
+                        </span>
+                        {o.title}
+                      </div>
+                      <Show when={o.description}>
+                        <div class="ask-option-desc">{o.description}</div>
+                      </Show>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <Show when={a().allowFreeform}>
+              <input
+                class="ask-input"
+                placeholder="Or write your own answer…"
+                value={a().freeform}
+                onInput={(e) => setFreeform(e.currentTarget.value)}
+              />
+            </Show>
+            <Show when={a().allowComment}>
+              <input
+                class="ask-input"
+                placeholder="Optional comment…"
+                value={a().comment}
+                onInput={(e) => setAsk({ ...a(), comment: e.currentTarget.value })}
+              />
+            </Show>
+            <div class="approval-actions">
+              <Button variant="secondary" onClick={() => answerAsk(true)}>
+                Skip
+              </Button>
+              <Button
+                onClick={() => answerAsk(false)}
+                disabled={!a().selected.length && !a().freeform.trim()}
+              >
+                Answer
               </Button>
             </div>
           </div>

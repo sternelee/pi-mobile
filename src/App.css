@@ -419,6 +419,72 @@ button {
   flex: 1;
 }
 
+/* ── ask_user 提问卡 ──────────────────────────────────── */
+
+.ask-context {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  margin-top: 0.35rem;
+  white-space: pre-wrap;
+}
+
+.ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.ask-option {
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+}
+
+.ask-option.selected {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / 0.12);
+}
+
+.ask-option-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ask-option-mark {
+  color: hsl(var(--primary));
+  font-size: 0.7rem;
+}
+
+.ask-option-desc {
+  margin-top: 0.15rem;
+  padding-left: 1.15rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.ask-input {
+  width: 100%;
+  margin-top: 0.5rem;
+  background: var(--surface-2);
+  border: 1px solid hsl(var(--border));
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+  font-size: 0.82rem;
+  outline: none;
+}
+
+.ask-input:focus {
+  border-color: hsl(var(--ring) / 0.6);
+}
+
 /* ── 输入区 ───────────────────────────────────────────── */
 
 .composer {

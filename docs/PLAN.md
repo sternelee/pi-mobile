@@ -345,7 +345,14 @@ pi-mobile/
 - **出口条件**：真机日常使用一周，会话/凭证/审批全部可靠；agent 完成"改文件 → 审批 → diff 可回滚"闭环
 
 ### M4 —— 平台深化与生态：MCP + Skills（~3-4 周）
-- [ ] **MCP**：pi 原生客户端（bun 内）HTTP transport + McpSettings 界面 + `mcp__` 审批分类（D11）；Android stdio 实验通道
+- [~] **MCP**：扩展能力层已就位（2026-09-06）；等价实现采用 bundle 内
+  `@modelcontextprotocol/client` 仅 streamable-http（stdio 的 cross-spawn/
+  native 依赖在 JSC 不可用），先 spike SDK 兼容性（吸取 @google/genai
+  SIGSEGV 教训）+ McpSettings 界面 + `mcp__` 审批分类（D11）
+- [~] **插件能力层**（2026-09-06 起，替代直接嵌入 npm:pi-* 扩展——上游交互
+  层绑死 pi-tui 终端，移动原生化策略见 PROGRESS 2026-09-06 02:20 条目）：
+  pi-ask-user ✅；pi-subagents（delegate 工具）、@devkade/pi-plan、pi-goal、
+  pi-btw 按命令面板进度跟进
 - [ ] **Skills**：git/URL 安装器（git2-rs + checksum pin）+ SkillsManager + system prompt 注入（D12）
 - [ ] Android 前台服务保流；SAF 打开外部目录；bash 命令黑名单兜底（D6）
 - [ ] 通知：审批请求、长任务完成

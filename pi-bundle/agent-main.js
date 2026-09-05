@@ -39,7 +39,7 @@ function emit(event) {
 	hostcall("agent_event", event).catch(() => {});
 }
 
-// ---- tools: workspace FS via Rust host (D2.1/D6: no exec, host owns trust) ----
+// ---- core tools: workspace FS via Rust host (D2.1/D6: no exec, host owns trust) ----
 // Mutating tools ask the host for approval before executing (PLAN D2 policy-hook):
 // Rust policy gates ask/auto, the UI gets the diff, denial returns as tool error.
 const errContent = (text) => ({ content: [{ type: "text", text }], details: {} });
@@ -80,13 +80,85 @@ const obj = (props, required) => ({
 	additionalProperties: false,
 });
 
-const tools = [
+const coreTools = [
 	hostTool("read", "Read", "Read a text file from the workspace. Args: {path}", obj({ path: { type: "string" } })),
 	hostTool("write", "Write", "Write text to a file in the workspace (creates or overwrites). Requires user approval — if the user denies, do not retry the same write. Args: {path, content}", obj({ path: { type: "string" }, content: { type: "string" } }), { mutating: true }),
 	hostTool("edit", "Edit", "Replace an exact text snippet inside a workspace file. oldText must match the file content exactly (including whitespace) and be unique unless replaceAll=true. Requires user approval. Args: {path, oldText, newText, replaceAll?}", obj({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, replaceAll: { type: "boolean" } }, ["path", "oldText", "newText"]), { mutating: true }),
 	hostTool("ls", "List", "List directory entries in the workspace. Args: {path?} (default '.')", obj({ path: { type: "string" } }, [])),
 	hostTool("grep", "Grep", "Regex search across workspace text files. Args: {pattern, path?}", obj({ pattern: { type: "string" }, path: { type: "string" } }, ["pattern"])),
 ];
+
+// ---- extension capability layer（npm:pi-* 插件的移动原生化）----
+// 原 npm 插件是 pi-coding-agent 扩展，交互层绑死 pi-tui 终端 UI，无法在嵌入
+// 式 WebView 环境运行。这里保持工具名与 schema 对齐上游（模型视角一致），
+// 交互层由宿主 UI（WebView 组件）承担。每个扩展 = 一组 AgentTool。
+// 已覆盖：pi-ask-user（ask_user）。路线图：pi-mcp-adapter（HTTP transport）、
+// pi-subagents（委托）、@devkade/pi-plan / pi-goal / pi-btw（命令类）。
+
+const askUserTool = {
+	name: "ask_user",
+	label: "Ask User",
+	description:
+		"Ask the user a question with optional multiple-choice answers. Use when the user's intent is ambiguous, when a decision requires explicit input, or when multiple valid options exist. Ask exactly ONE focused question per call; before calling, gather context with tools and pass a short summary via context. The user must answer before the run continues.",
+	parameters: {
+		type: "object",
+		properties: {
+			question: { type: "string", description: "The question to ask the user" },
+			context: { type: "string", description: "Relevant context to show before the question (summary of findings)" },
+			options: {
+				type: "array",
+				description: "Options for the user to choose from",
+				items: {
+					type: "object",
+					properties: {
+						title: { type: "string", description: "Short title for this option" },
+						description: { type: "string", description: "Longer description explaining this option" },
+					},
+					required: ["title"],
+					additionalProperties: false,
+				},
+			},
+			allowMultiple: { type: "boolean", description: "Allow selecting multiple options. Default: false" },
+			allowFreeform: { type: "boolean", description: "Offer a freeform text answer. Default: true" },
+			allowComment: { type: "boolean", description: "Allow an optional extra comment. Default: false" },
+		},
+		required: ["question"],
+		additionalProperties: false,
+	},
+	// 与上游一致：ask_user 未决时阻塞同回合其他工具，防止用户未看到提问
+	// 就先执行有副作用的操作
+	executionMode: "sequential",
+	async execute(toolCallId, params) {
+		try {
+			const r = await hostcall("ask_user", {
+				question: params.question,
+				context: params.context,
+				options: params.options ?? [],
+				allowMultiple: params.allowMultiple ?? false,
+				allowFreeform: params.allowFreeform ?? true,
+				allowComment: params.allowComment ?? false,
+			});
+			const resp = r.response;
+			if (!resp) {
+				return errContent(
+					`The user dismissed the question${r.reason ? ` (${r.reason})` : ""}. Continue with your best judgment and clearly state the assumption you are making.`,
+				);
+			}
+			let text =
+				resp.kind === "freeform"
+					? `(wrote) ${resp.text ?? ""}`
+					: `✓ ${(resp.selections ?? []).join(", ")}`;
+			if (resp.comment) text += `\nComment: ${resp.comment}`;
+			return { content: [{ type: "text", text: `User answered: ${text}` }], details: {} };
+		} catch (e) {
+			return errContent(`Error: ${e?.message ?? e}`);
+		}
+	},
+};
+
+const extensionTools = [askUserTool];
+
+const tools = [...coreTools, ...extensionTools];
 
 // 诊断/测试缝：直接执行一个工具（与 agent 循环同一 execute 路径，含审批）。
 globalThis.__pi_tool_call = async (name, args) => {

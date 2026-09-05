@@ -18,6 +18,7 @@
 | `agent_history` | `{}` | `{sessionId,messages[]}` | boot 时从最新 JSONL 会话回放的历史 |
 | `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（creds.rs） |
 | `approval_respond` | `{ requestId, decision }` | `{}` | M3 审批：decision ∈ allow/deny/always；唤醒阻塞中的 approval_request |
+| `ask_user_respond` | `{ requestId, answer }` | `{}` | 扩展 ask_user：answer = `{response:{kind:"selection",selections[],comment?} \| {kind:"freeform",text,comment?}}` 或 `{response:null,cancelled:true}` |
 | `workspace_revert` | `{ path }` | `u64`（字节数） | M3 回滚：恢复该文件最近一次覆盖写入前的内容（消费备份） |
 | `workspace_backup_info` | `{ path }` | `{millis}` / `null` | M3 回滚 UI：该路径是否还有可回滚备份 |
 | `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | M3 会话列表：`{id,createdAt,cwd,modifiedAt,entries,size}` |
@@ -50,6 +51,7 @@
 | `fs` | `{ op, path, … }` | `{ ok, value }` / `{ ok, error: { code, message } }` | pi `JsonlSessionRepo` 的 FileSystem 后端；jail 到 `{dataDir}/sessions`；JS 侧虚拟根 `/pi-sessions`（agent-main.js 与 loopback.rs 同款常量）；op ∈ readTextFile/readTextLines/writeFile/appendFile/renameFile/fileInfo/listDir/exists/createDir/remove |
 | `agent_event` | agent 事件 JSON | `{ok}` | Rust sink → `emit("pi-agent-event")` |
 | `approval_request` | `{ tool, args }` | `{ decision: allow/deny, reason? }`（阻塞至 UI 决策/超时 120s） | M3：mutating 工具（write/edit/bash）执行前调用；Rust policy 状态机（`{data_dir}/policy.json`，write: ask→auto 经 "always" 持久化）；ask 时 emit `approval_required`（含 unified diff，上限 16KB） |
+| `ask_user` | `{ question, context?, options?[{title,description?}], allowMultiple?, allowFreeform?, allowComment? }` | `{ response: {kind:"selection",selections} \| {kind:"freeform",text} \| null, reason?, cancelled? }`（阻塞至用户作答/跳过/超时 600s） | 扩展能力层 #1（pi-ask-user 移动原生化）：emit `ask_user` 事件 → 提问卡；schema 与 npm:pi-ask-user 对齐 |
 
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 

@@ -2,6 +2,46 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 02:20 — M3 扩展能力层 I：插件架构 + pi-ask-user 移动原生化 ✅
+
+### 调研结论（决定架构）
+用户点名的 6 个 npm:pi-* 插件（pi-ask-user / pi-mcp-adapter / pi-subagents /
+@devkade/pi-plan / pi-btw / @capyup/pi-goal）全部是 **pi-coding-agent 扩展**，
+交互层绑死 **pi-tui 终端 UI**（ask-user 的选择面板、goal 的编辑器悬浮层……），
+部分还带原生依赖（pi-mcp-adapter 的 @napi-rs/keyring、cross-spawn stdio）。
+**无法直接跑进嵌入式 JSC bundle**（无终端渲染，native 模块不可用）。
+
+### 路线：扩展能力层（桥层适配，模型视角不变）
+- bundle 内建扩展宿主：`coreTools` + `extensionTools` 合并进 Agent；
+  每个扩展 = 一组 AgentTool（工具名/schema 对齐上游）+ 所需 hostcall。
+- 交互层由宿主 UI（WebView 组件）承担——TUI 面板 → 移动卡片。
+- 路线图：pi-ask-user ✅ → pi-mcp-adapter（仅 HTTP transport，需验证 MCP SDK
+  在 JSC 的兼容性）→ pi-subagents（嵌套 Agent 委托）→ plan/goal/btw
+  （命令类，等命令面板 UI）。
+
+### pi-ask-user ✅（扩展能力层 #1）
+- **Rust `ask_user.rs`**：pending 表 + 600s 超时 + 事件转发（复用 approval 的
+  channel 模式）；`ask_user` hostcall 分发 + `ask_user_respond` 命令；
+  单测覆盖应答/取消/无 UI 三路径。
+- **bundle `ask_user` 工具**：schema 对齐上游
+  （question/context/options{title,description}/allowMultiple/allowFreeform/
+  allowComment），`executionMode: "sequential"`（提问未决时阻塞同回合其他
+  工具——上游同款防乱序语义）；结果格式化
+  （`✓ 选项…` / `(wrote) 自由文本` / Comment / 取消→按假设继续）。
+- **UI 提问卡**：问题 + 上下文 + 选项按钮（单选/多选）+ 自由输入 + 备注 +
+  Answer/Skip。
+- **测试**：Rust 5/5；approval-test 增 ask_user 往返（mock 应答 → 工具结果
+  含选项与备注）；tsc ✅。APK 已构建（设备断连，重连后装机）。
+
+### 下一步
+- [ ] 真机验证 ask_user 提问卡
+- [ ] **pi-mcp-adapter 等价物**（仅 streamable-http；先 spike @modelcontextprotocol/
+  client 在 JSC 的加载兼容性——吸取 @google/genai SIGSEGV 教训）
+- [ ] pi-subagents 等价物（delegate 工具，嵌套 Agent 复用当前 streamFn）
+- [ ] 命令面板 UI（/plan /todos /goal /btw 的移动形态）
+
+---
+
 ## 2026-09-06 02:00 — M3 UX 专项 II：接入 solid-ui 组件体系 ✅
 
 ### 基建（补齐 solid-ui CLI 缺项）

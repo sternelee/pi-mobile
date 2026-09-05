@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod approval;
+mod ask_user;
 mod creds;
 mod pi_bun;
 mod sessions;
@@ -85,6 +86,12 @@ fn approval_respond(request_id: String, decision: String) -> Result<(), String> 
     approval::respond(&request_id, &decision)
 }
 
+/// 扩展：回填 ask_user 答案（JSON：{response: ...} 或 {response: null, cancelled: true}）。
+#[tauri::command]
+fn ask_user_respond(request_id: String, answer: String) -> Result<(), String> {
+    ask_user::respond(&request_id, &answer)
+}
+
 /// M3：回滚 workspace 文件到上一次覆盖写入前（消费对应备份）。
 #[tauri::command]
 fn workspace_revert(path: String) -> Result<u64, String> {
@@ -144,14 +151,15 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
-            // agent_event / approval_required → WebView 事件桥（loopback 线程 → main emit）
+            // agent_event / approval_required / ask_user → WebView 事件桥
             let handle = app.handle().clone();
             let emit = move |json: &str| {
                 use tauri::Emitter;
                 let _ = handle.emit("pi-agent-event", json);
             };
             pi_bun::loopback::set_event_sink(emit.clone());
-            approval::set_event_sink(emit);
+            approval::set_event_sink(emit.clone());
+            ask_user::set_event_sink(emit);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -164,6 +172,7 @@ pub fn run() {
             agent_history,
             set_creds,
             approval_respond,
+            ask_user_respond,
             workspace_revert,
             workspace_backup_info,
             workspace_tree,
