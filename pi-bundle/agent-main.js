@@ -40,7 +40,11 @@ function emit(event) {
 }
 
 // ---- tools: workspace FS via Rust host (D2.1/D6: no exec, host owns trust) ----
-function hostTool(name, label, description, parameters) {
+// Mutating tools ask the host for approval before executing (PLAN D2 policy-hook):
+// Rust policy gates ask/auto, the UI gets the diff, denial returns as tool error.
+const errContent = (text) => ({ content: [{ type: "text", text }], details: {} });
+
+function hostTool(name, label, description, parameters, opts = {}) {
 	return {
 		name,
 		label,
@@ -48,11 +52,19 @@ function hostTool(name, label, description, parameters) {
 		parameters,
 		async execute(args) {
 			try {
+				if (opts.mutating) {
+					const apr = await hostcall("approval_request", { tool: name, args });
+					if (apr.error) return errContent(`approval failed: ${apr.error}`);
+					if (apr.decision !== "allow")
+						return errContent(
+							`User did not approve the ${name} of "${args.path}" (${apr.reason ?? apr.decision}). Nothing was written — choose another approach or ask the user.`,
+						);
+				}
 				const r = await hostcall("tool", { name, args });
 				if (r.error) throw new Error(r.error);
 				return { content: [{ type: "text", text: r.text ?? "" }], details: {} };
 			} catch (e) {
-				return { content: [{ type: "text", text: `Error: ${e?.message ?? e}` }], details: {} };
+				return errContent(`Error: ${e?.message ?? e}`);
 			}
 		},
 	};
@@ -67,10 +79,17 @@ const obj = (props, required) => ({
 
 const tools = [
 	hostTool("read", "Read", "Read a text file from the workspace. Args: {path}", obj({ path: { type: "string" } })),
-	hostTool("write", "Write", "Write text to a file in the workspace (creates or overwrites). Args: {path, content}", obj({ path: { type: "string" }, content: { type: "string" } })),
+	hostTool("write", "Write", "Write text to a file in the workspace (creates or overwrites). Requires user approval — if the user denies, do not retry the same write. Args: {path, content}", obj({ path: { type: "string" }, content: { type: "string" } }), { mutating: true }),
 	hostTool("ls", "List", "List directory entries in the workspace. Args: {path?} (default '.')", obj({ path: { type: "string" } }, [])),
 	hostTool("grep", "Grep", "Regex search across workspace text files. Args: {pattern, path?}", obj({ pattern: { type: "string" }, path: { type: "string" } }, ["pattern"])),
 ];
+
+// 诊断/测试缝：直接执行一个工具（与 agent 循环同一 execute 路径，含审批）。
+globalThis.__pi_tool_call = async (name, args) => {
+	const tool = tools.find((t) => t.name === name);
+	if (!tool) return { error: `unknown tool: ${name}` };
+	return tool.execute(args ?? {});
+};
 
 // ---- streamFn: dispatch on model.api via per-api simple stream functions ----
 let apiKeyCache;

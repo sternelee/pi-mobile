@@ -329,7 +329,12 @@ pi-mobile/
   会话列表 UI（Rust 侧索引）
 
 ### M3 —— 审批与产品化（~2-3 周）
-- [ ] `pi-bundle/policy-hook.ts`（pi extension）：write/edit/bash 审批上报 + DiffApproval UI + policy 状态机
+- [~] `pi-bundle` 工具审批（2026-09-05 主线落地）：mutating 工具 execute 前过
+  `approval_request` hostcall；Rust `approval.rs` policy 状态机（ask/auto，
+  `{data_dir}/policy.json`，"always" 持久化）+ pending 表 + unified diff；
+  DiffApproval UI（Deny/Always/Allow）；写前备份 + `workspace_revert` 回滚命令。
+  本机测试（cargo test + approval-test.js）✅，真机验证待做。
+  edit 工具与 Android bash 落地时复用同一审批点。
 - [ ] 会话列表/索引（Rust 侧）、文件树（fs 插件 scope 收紧至 workspace）、命令面板、用量成本可视化
 - [ ] AGENTS.md（pi 原生支持，随 workspace 生效）；Provider OAuth + deep-link（D9）
 - [ ] 产品化基线：i18n / 无障碍 / 深色模式；Android APK 内测分发；checkpoint/恢复兜底（D8）

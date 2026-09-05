@@ -16,14 +16,16 @@
 | `agent_status` | `{}` | `{busy,lastError,queued}` | 轮询 |
 | `agent_history` | `{}` | `{sessionId,messages[]}` | boot 时从最新 JSONL 会话回放的历史 |
 | `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（creds.rs） |
+| `approval_respond` | `{ requestId, decision }` | `{}` | M3 审批：decision ∈ allow/deny/always；唤醒阻塞中的 approval_request |
+| `workspace_revert` | `{ path }` | `u64`（字节数） | M3 回滚：恢复该文件最近一次覆盖写入前的内容（消费备份） |
 
 ### 1.2 Events（Rust → UI）
 
 | 事件 | Payload | 说明 |
 |------|---------|------|
-| `pi-agent-event` | agent 事件 JSON（透传） | 见 §2.4 事件类型；含 `agent_ready` / `session_restored` / `session_created` / `session_error` / `agent_error` / `boot_error` |
+| `pi-agent-event` | agent 事件 JSON（透传） | 见 §2.4 事件类型；含 `agent_ready` / `session_restored` / `session_created` / `session_error` / `agent_error` / `boot_error` / `approval_required` |
 
-（原规划的 `agent:delta` 16ms 合并、`tool:approval-required` 等随 M3 审批流落地。）
+（原规划的 `agent:delta` 16ms 合并等随 M3 后续落地。）
 
 ## 2. Rust ↔ bun 桥（C ABI：`src-tauri/pi_bun/include/pi_bun.h`）
 
@@ -40,6 +42,7 @@
 | `creds_get` | `{ provider }` | `{ apiKey }` / `{ error }` | 凭证不出宿主内存，JS 仅注入运行时内存 |
 | `fs` | `{ op, path, … }` | `{ ok, value }` / `{ ok, error: { code, message } }` | pi `JsonlSessionRepo` 的 FileSystem 后端；jail 到 `{dataDir}/sessions`；JS 侧虚拟根 `/pi-sessions`（agent-main.js 与 loopback.rs 同款常量）；op ∈ readTextFile/readTextLines/writeFile/appendFile/renameFile/fileInfo/listDir/exists/createDir/remove |
 | `agent_event` | agent 事件 JSON | `{ok}` | Rust sink → `emit("pi-agent-event")` |
+| `approval_request` | `{ tool, args }` | `{ decision: allow/deny, reason? }`（阻塞至 UI 决策/超时 120s） | M3：mutating 工具（write/edit/bash）执行前调用；Rust policy 状态机（`{data_dir}/policy.json`，write: ask→auto 经 "always" 持久化）；ask 时 emit `approval_required`（含 unified diff，上限 16KB） |
 
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 

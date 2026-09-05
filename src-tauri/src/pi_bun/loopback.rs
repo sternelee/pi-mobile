@@ -42,6 +42,93 @@ fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
     Ok(std::path::Path::new(root).join(p))
 }
 
+// ── 写前备份与回滚（M3：「改文件 → 审批 → diff 可回滚」闭环）──────────
+
+/// 备份文件名：`{millis}__{rel 中 / 换 __}`；回滚时按同 rel 后缀找最新。
+fn backup_name(rel: &str, millis: u128) -> String {
+    format!("{millis}__{}", rel.replace('/', "__"))
+}
+
+fn backup_dir() -> Option<std::path::PathBuf> {
+    DATA_DIR.get().map(|d| std::path::Path::new(d).join("backups"))
+}
+
+/// 覆盖写入前保存旧内容（best-effort：备份失败不阻塞写入）。
+fn backup_existing(real: &std::path::Path) {
+    let (Some(dir), Some(ws)) = (backup_dir(), WORKSPACE_DIR.get()) else {
+        return;
+    };
+    let Ok(rel) = real.strip_prefix(ws).map(|p| p.to_string_lossy().into_owned()) else {
+        return;
+    };
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::copy(real, dir.join(backup_name(&rel, millis)));
+}
+
+/// 回滚：恢复指定 workspace 相对路径的最新一次备份（消费该备份，
+/// 连续调用可逐级回退）。返回恢复的字节数。
+pub fn revert_workspace_file(rel: &str) -> Result<u64, String> {
+    let real = jail_path(rel)?;
+    let dir = backup_dir().ok_or("backups not configured")?;
+    let suffix = format!("__{}", rel.replace('/', "__"));
+    let mut latest: Option<(u128, std::path::PathBuf)> = None;
+    for e in std::fs::read_dir(&dir).map_err(|e| format!("backups: {e}"))?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(&suffix) {
+            if let Ok(millis) = stem.trim_end_matches('_').parse::<u128>() {
+                if latest.as_ref().is_none_or(|(m, _)| millis > *m) {
+                    latest = Some((millis, e.path()));
+                }
+            }
+        }
+    }
+    let (_, src) = latest.ok_or_else(|| format!("no backup for {rel}"))?;
+    let n = std::fs::copy(&src, &real).map_err(|e| format!("restore: {e}"))?;
+    std::fs::remove_file(&src).map_err(|e| format!("consume backup: {e}"))?;
+    Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 静态 OnceLock 全进程共享，备份/回滚场景合并为一个串行测试。
+    #[test]
+    fn write_backup_and_revert_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("pi-loopback-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        configure(ws.to_str().unwrap(), dir.to_str().unwrap());
+
+        // 新建写入：无备份
+        run_tool("write", &json!({ "path": "t.txt", "content": "v1" })).unwrap();
+        assert!(!dir.join("backups").exists());
+
+        // 覆盖写入：产生备份
+        run_tool("write", &json!({ "path": "t.txt", "content": "v2" })).unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("t.txt")).unwrap(), "v2");
+
+        // 回滚到 v1，备份被消费
+        revert_workspace_file("t.txt").unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("t.txt")).unwrap(), "v1");
+        assert!(revert_workspace_file("t.txt").is_err()); // 没有更多备份
+
+        // 子目录路径的备份/回滚
+        run_tool("write", &json!({ "path": "sub/a.md", "content": "s1" })).unwrap();
+        run_tool("write", &json!({ "path": "sub/a.md", "content": "s2" })).unwrap();
+        revert_workspace_file("sub/a.md").unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("sub/a.md")).unwrap(), "s1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// 工具实现（M2 子集：read/write/ls/grep；D6：不提供 exec）。
 fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
     match name {
@@ -58,6 +145,10 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             let content = args.get("content").and_then(|v| v.as_str()).ok_or("content?")?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+            }
+            // 写前备份（“diff 可回滚”闭环，M3）：覆盖已有文件前存旧内容
+            if path.exists() {
+                backup_existing(&path);
             }
             std::fs::write(&path, content).map_err(|e| format!("write: {e}"))?;
             Ok(format!("wrote {} bytes to {}", content.len(), path.display()))
@@ -480,6 +571,7 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             }
         }
         "fs" => fs_op(payload),
+        "approval_request" => crate::approval::request(payload),
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());

@@ -2,6 +2,40 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-05（深夜）— M3 开工：审批流闭环（write 审批 + diff + 可回滚）✅
+
+### 审批流（M3 主线第一块，PLAN D2 policy-hook 落地）
+- **拦截点**：mutating 工具（write）execute 前发 `approval_request` hostcall
+  （阻塞等决策；loopback 每连接一线程，不阻塞其他通道）。pi 的 `beforeToolCall`
+  钩子评估过但没采用——它只在 agent 循环内生效，工具执行路径内拦截对直连调用
+  （诊断缝）同样有效。
+- **Rust `approval.rs`**：policy 状态机（`{data_dir}/policy.json`，write 基线
+  ask/auto）+ pending 请求表（channel 应答）+ unified diff（`similar` crate，
+  context=2，16KB 截断）。ask 时 emit `approval_required`（requestId/tool/path/diff）；
+  超时 120s 自动 deny；"always" 把 write 基线持久化为 auto；无 UI attach 兜底
+  立即 deny 并清表（防 stale entry——单测抓出来的坑）。
+- **bundle**：`hostTool` 增 mutating 标记，execute 先过审批，拒绝以工具错误文案
+  返回给模型（并提示别重试同一写入）；write 工具描述告知需审批。新增
+  `__pi_tool_call` 诊断/测试缝（与 agent 循环同一 execute 路径）。
+- **UI**：底部审批卡（路径 + 红/绿 diff + Deny/Always/Allow），决策经
+  `approval_respond` 命令回填。
+- **可回滚**：write 工具覆盖已有文件前自动备份到 `{data_dir}/backups/
+  {millis}__{rel}`；新命令 `workspace_revert` 恢复最近一次备份并消费之
+  （连续调用逐级回退）。回滚 UI 入口随后续文件树/工具卡落地。
+- **测试**：Rust 单测 ×2（approval 全状态机：ask→deny→always→auto→持久化、
+  只读工具直放；备份/回滚 round-trip 含子目录）；本地 `approval-test.js`
+  （deny 不落盘 / allow 写入 / 只读工具不触发审批）。cargo test 3/3 ✅。
+
+### 下一步（M3 剩余）
+- [ ] 真机验证：审批卡真机弹卡 → 决策 → 写入/拒绝（含重启恢复回归）
+- [ ] edit 工具（apply_string_edit 类）+ 审批；Android bash 通道（M4 前置）
+- [ ] 回滚 UI 入口（工具卡上"Revert"按钮）
+- [ ] 会话列表/索引（Rust session_list + UI）、文件树、用量可视化
+- [ ] AGENTS.md 随 workspace 生效验证；Provider OAuth + deep-link（D9）
+- [ ] i18n / 深色模式 / 无障碍基线；checkpoint/恢复兜底（D8）
+
+---
+
 ## 2026-09-05（晚）— M2 收尾：会话 JSONL 落盘 + 凭证 keyring 化 ✅
 
 ### 会话持久化（D3，pi 原生格式）

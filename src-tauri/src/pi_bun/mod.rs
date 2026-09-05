@@ -181,6 +181,7 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     std::fs::create_dir_all(format!("{data_dir}/sessions"))
         .map_err(|e| format!("sessions: {e}"))?;
     loopback::configure(&workspace, data_dir);
+    crate::approval::configure(data_dir);
 
     // 异步引导（dynamic import 等）需要 VM tick 数拍——轮询 __pi_ready。
     // null result 视为瞬时失败可重试（实测出现过）。

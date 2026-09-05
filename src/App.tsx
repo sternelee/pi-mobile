@@ -8,6 +8,13 @@ type ChatItem = {
   text: string;
 };
 
+type Approval = {
+  requestId: string;
+  tool: string;
+  path: string;
+  diff: string;
+};
+
 function App() {
   const [items, setItems] = createSignal<ChatItem[]>([
     { role: "status", text: "booting embedded pi agent…" },
@@ -15,6 +22,7 @@ function App() {
   const [input, setInput] = createSignal("");
   const [apiKey, setApiKey] = createSignal("");
   const [ready, setReady] = createSignal(false);
+  const [approval, setApproval] = createSignal<Approval | null>(null);
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
 
@@ -44,6 +52,14 @@ function App() {
           break;
         case "session_error":
           push({ role: "status", text: `session persist error: ${ev.error}` });
+          break;
+        case "approval_required":
+          setApproval({
+            requestId: ev.requestId,
+            tool: ev.tool,
+            path: ev.path,
+            diff: ev.diff ?? "",
+          });
           break;
         case "boot_error":
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
@@ -153,6 +169,18 @@ function App() {
     }
   }
 
+  async function decide(decision: "allow" | "deny" | "always") {
+    const a = approval();
+    if (!a) return;
+    setApproval(null);
+    try {
+      await invoke("approval_respond", { requestId: a.requestId, decision });
+      push({ role: "status", text: `${a.tool} ${a.path} → ${decision}` });
+    } catch (e) {
+      push({ role: "status", text: `approval respond failed: ${e}` });
+    }
+  }
+
   return (
     <main
       class="container"
@@ -210,6 +238,75 @@ function App() {
           )}
         </For>
       </div>
+
+      <Show when={approval()}>
+        {(a) => (
+          <div
+            style={{
+              border: "1px solid #3a4a5c",
+              "border-radius": "0.6rem",
+              margin: "0.3rem 0.5rem",
+              padding: "0.5rem",
+              background: "#1a232e",
+              "max-height": "45vh",
+              "overflow-y": "auto",
+            }}
+          >
+            <div style={{ "font-size": "0.8rem", "font-weight": "bold" }}>
+              ⚠ {a().tool} «{a().path}» — approve?
+            </div>
+            <Show when={a().diff}>
+              <pre
+                style={{
+                  "font-family": "monospace",
+                  "font-size": "0.68rem",
+                  "line-height": "1.35",
+                  "white-space": "pre-wrap",
+                  "word-break": "break-all",
+                  margin: "0.4rem 0",
+                  padding: "0.4rem",
+                  background: "#121922",
+                  "border-radius": "0.4rem",
+                }}
+              >
+                {a().diff.split("\n").map((line) => (
+                  <div
+                    style={
+                      line.startsWith("+")
+                        ? { color: "#7ce38b" }
+                        : line.startsWith("-")
+                          ? { color: "#ff8182" }
+                          : { color: "#7d8b99" }
+                    }
+                  >
+                    {line || " "}
+                  </div>
+                ))}
+              </pre>
+            </Show>
+            <div style={{ display: "flex", gap: "0.5rem", "margin-top": "0.4rem" }}>
+              <button
+                style={{ flex: "1", background: "#5a3038", color: "#ff9ea0", border: "none", padding: "0.45rem", "border-radius": "0.4rem" }}
+                onClick={() => decide("deny")}
+              >
+                Deny
+              </button>
+              <button
+                style={{ flex: "1", background: "#2c4a5e", color: "#8ec6ff", border: "none", padding: "0.45rem", "border-radius": "0.4rem" }}
+                onClick={() => decide("always")}
+              >
+                Always
+              </button>
+              <button
+                style={{ flex: "1", background: "#1f4a33", color: "#8fe6a4", border: "none", padding: "0.45rem", "border-radius": "0.4rem" }}
+                onClick={() => decide("allow")}
+              >
+                Allow
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
 
       <form class="row" onSubmit={send} style={{ "padding-bottom": "0.8rem" }}>
         <input
