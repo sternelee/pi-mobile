@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
+import path from "node:path";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -7,6 +8,13 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [solid()],
+
+  // solid-ui / tailwind 生态约定：~/ 指向 src/
+  resolve: {
+    alias: {
+      "~": path.resolve(import.meta.dirname, "src"),
+    },
+  },
 
   // 依赖扫描只看应用入口（vendor/ 里有 bun fork 的上千个 html/js，
   // 会被 dev 模式的扫描器误爬并报语法错误）

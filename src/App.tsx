@@ -9,6 +9,16 @@ import {
   onMount,
 } from "solid-js";
 import { Markdown } from "./ui/Markdown";
+import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "~/components/ui/collapsible";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "~/components/ui/sheet";
+import { TextField, TextFieldInput } from "~/components/ui/text-field";
 import "./App.css";
 
 type ChatItem = {
@@ -442,12 +452,12 @@ function App() {
     <main class="app">
       <header class="topbar">
         <div class="topbar-actions">
-          <button class="icon-btn" onClick={openDrawer} aria-label="sessions">
+          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={openDrawer} aria-label="sessions">
             ☰
-          </button>
-          <button class="icon-btn" onClick={openFiles} aria-label="files">
+          </Button>
+          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={openFiles} aria-label="files">
             📁
-          </button>
+          </Button>
         </div>
         <h1 class="topbar-title">pi-mobile</h1>
         <div class="topbar-meta">
@@ -457,13 +467,15 @@ function App() {
 
       <Show when={!ready()}>
         <form class="keyform" onSubmit={saveKey}>
-          <input
-            type="password"
-            placeholder="DeepSeek API key…"
-            value={apiKey()}
-            onInput={(e) => setApiKey(e.currentTarget.value)}
-          />
-          <button type="submit">Save</button>
+          <TextField class="flex-1">
+            <TextFieldInput
+              type="password"
+              placeholder="DeepSeek API key…"
+              value={apiKey()}
+              onInput={(e) => setApiKey(e.currentTarget.value)}
+            />
+          </TextField>
+          <Button type="submit">Save</Button>
         </form>
       </Show>
 
@@ -478,7 +490,16 @@ function App() {
             </p>
             <div class="chips">
               <For each={SUGGESTIONS}>
-                {(s) => <button class="chip" onClick={() => sendText(s)}>{s}</button>}
+                {(s) => (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="rounded-full"
+                    onClick={() => sendText(s)}
+                  >
+                    {s}
+                  </Button>
+                )}
               </For>
             </div>
           </div>
@@ -517,23 +538,27 @@ function App() {
                     </Show>
                   }
                 >
-                  <div class={`tool-card ${toolState(it)}`}>
-                    <button
-                      class="tool-head"
-                      onClick={() =>
-                        updateItem(it.toolCallId!, { expanded: !it.expanded })
-                      }
-                    >
-                      <span>
-                        {it.pending ? "◌" : it.isError ? "✗" : "✓"}
-                      </span>
+                  <Collapsible
+                    open={it.expanded}
+                    onOpenChange={(o) => updateItem(it.toolCallId!, { expanded: o })}
+                    class={`tool-card ${toolState(it)}`}
+                  >
+                    <CollapsibleTrigger class="tool-head">
+                      <Badge
+                        variant={
+                          it.pending ? "warning" : it.isError ? "destructive" : "success"
+                        }
+                        class="px-1.5 text-[0.6rem]"
+                      >
+                        {it.pending ? "…" : it.isError ? "!" : "✓"}
+                      </Badge>
                       <span class="tool-summary">
                         {it.toolName}({(it.argsText ?? "").slice(0, 90)})
                         {it.pending ? " …" : ""}
                       </span>
                       <span class="tool-caret">{it.expanded ? "▼" : "▶"}</span>
-                    </button>
-                    <Show when={it.expanded}>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent>
                       <div class="tool-body">
                         <div>{prettyArgs(it.argsText)}</div>
                         <Show when={it.text}>
@@ -545,18 +570,20 @@ function App() {
                               when={it.canRevert}
                               fallback={<span class="reverted-note">↩ reverted</span>}
                             >
-                              <button
-                                class="chip-revert"
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                class="h-7 rounded-full text-xs"
                                 onClick={() => revert(it)}
                               >
                                 ↩ Revert
-                              </button>
+                              </Button>
                             </Show>
                           </div>
                         </Show>
                       </div>
-                    </Show>
-                  </div>
+                    </CollapsibleContent>
+                  </Collapsible>
                 </Show>
               </div>
             </Show>
@@ -588,15 +615,18 @@ function App() {
               </div>
             </Show>
             <div class="approval-actions">
-              <button class="btn btn-deny" onClick={() => decide("deny")}>
+              <Button variant="destructive" onClick={() => decide("deny")}>
                 Deny
-              </button>
-              <button class="btn btn-always" onClick={() => decide("always")}>
+              </Button>
+              <Button variant="secondary" onClick={() => decide("always")}>
                 Always
-              </button>
-              <button class="btn btn-allow" onClick={() => decide("allow")}>
+              </Button>
+              <Button
+                class="bg-success text-success-foreground hover:bg-success/90"
+                onClick={() => decide("allow")}
+              >
                 Allow
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -634,61 +664,71 @@ function App() {
         </Show>
       </form>
 
-      <Show when={drawerOpen()}>
-        <div class="overlay" onClick={() => setDrawerOpen(false)} />
-        <div class="drawer drawer-right">
-          <div class="drawer-head">
-            <strong>Sessions</strong>
-            <button class="icon-btn" onClick={newSession}>
-              ＋ New
-            </button>
-          </div>
-          <For each={sessions()}>
-            {(s) => (
-              <div
-                class={`item-card ${s.id === currentSession() ? "active" : ""}`}
-                onClick={() => switchSession(s.id)}
-              >
-                <div class="item-title">{s.id.slice(0, 8)}</div>
-                <div class="item-sub">
-                  {fmtRel(s.modifiedAt)} · {s.entries} messages
+      <Sheet open={drawerOpen()} onOpenChange={setDrawerOpen}>
+        <SheetContent
+          side="right"
+          class="w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+        >
+          <SheetHeader>
+            <SheetTitle class="text-base">Sessions</SheetTitle>
+          </SheetHeader>
+          <Button variant="outline" size="sm" onClick={newSession}>
+            ＋ New session
+          </Button>
+          <div class="-mx-1 flex-1 overflow-y-auto px-1">
+            <For each={sessions()}>
+              {(s) => (
+                <div
+                  class={`item-card ${s.id === currentSession() ? "active" : ""}`}
+                  onClick={() => switchSession(s.id)}
+                >
+                  <div class="item-title">{s.id.slice(0, 8)}</div>
+                  <div class="item-sub">
+                    {fmtRel(s.modifiedAt)} · {s.entries} messages
+                  </div>
                 </div>
-              </div>
-            )}
-          </For>
-          <Show when={!sessions().length}>
-            <div class="empty-note">no sessions yet</div>
-          </Show>
-        </div>
-      </Show>
-
-      <Show when={filesOpen()}>
-        <div class="overlay" onClick={() => setFilesOpen(false)} />
-        <div class="drawer drawer-left">
-          <div class="drawer-head">
-            <strong>Workspace</strong>
-            <button class="icon-btn" onClick={openFiles}>
-              ⟳
-            </button>
+              )}
+            </For>
+            <Show when={!sessions().length}>
+              <div class="empty-note">no sessions yet</div>
+            </Show>
           </div>
-          <For each={tree()}>
-            {(t) => (
-              <div
-                class={`file-item ${t.kind === "directory" ? "dir" : ""}`}
-                style={{ "margin-left": `${(t.path.split("/").length - 1) * 0.8}rem` }}
-                onClick={() => t.kind === "file" && previewFile(t.path)}
-              >
-                {t.kind === "directory" ? "▸ " : ""}
-                {t.path.split("/").pop()}
-                {t.kind === "file" ? `  (${t.size}B)` : "/"}
-              </div>
-            )}
-          </For>
-          <Show when={!tree().length}>
-            <div class="empty-note">workspace is empty</div>
-          </Show>
-        </div>
-      </Show>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={filesOpen()} onOpenChange={setFilesOpen}>
+        <SheetContent
+          side="left"
+          class="w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+        >
+          <SheetHeader>
+            <SheetTitle class="text-base">Workspace</SheetTitle>
+          </SheetHeader>
+          <Button variant="outline" size="sm" onClick={openFiles}>
+            ⟳ Refresh
+          </Button>
+          <div class="-mx-1 flex-1 overflow-y-auto px-1">
+            <For each={tree()}>
+              {(t) => (
+                <div
+                  class={`file-item ${t.kind === "directory" ? "dir" : ""}`}
+                  style={{
+                    "margin-left": `${(t.path.split("/").length - 1) * 0.8}rem`,
+                  }}
+                  onClick={() => t.kind === "file" && previewFile(t.path)}
+                >
+                  {t.kind === "directory" ? "▸ " : ""}
+                  {t.path.split("/").pop()}
+                  {t.kind === "file" ? `  (${t.size}B)` : "/"}
+                </div>
+              )}
+            </For>
+            <Show when={!tree().length}>
+              <div class="empty-note">workspace is empty</div>
+            </Show>
+          </div>
+        </SheetContent>
+      </Sheet>
 
       <Show when={preview()}>
         {(p) => (

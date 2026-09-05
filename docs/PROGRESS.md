@@ -2,6 +2,37 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 02:00 — M3 UX 专项 II：接入 solid-ui 组件体系 ✅
+
+### 基建（补齐 solid-ui CLI 缺项）
+- `@kobalte/core@0.13.13`（无头可访问组件基座）、`postcss.config.cjs`、
+  vite `resolve.alias`：`~ → src`（tsconfig paths 已有）、`src/lib/utils.ts`
+  的 `cn()`（clsx + tailwind-merge）。
+- tailwind.config.cjs（CLI 生成）保持标准 solid-ui 形态：HSL 令牌映射、
+  border-radius、accordion/content-show 动画、tailwindcss-animate。
+
+### 新增组件（`src/components/ui/`，solid-ui 源码模式）
+- `button`（cva 变体 default/destructive/outline/secondary/ghost/link + 尺寸）
+- `sheet`（Kobalte Dialog 侧滑抽屉，left/right 滑入动画 + overlay + 关闭钮 +
+  focus trap + ESC）——会话列表（右）/ 文件树（左）从手写 overlay 换成 Sheet
+- `collapsible`（工具卡折叠改用 Kobalte 受控 open）
+- `text-field`（API key 输入框）、`badge`（工具卡状态：pending 黄/失败红/成功绿）
+- `card`、`separator`（备用）
+- Kobalte 泛型 JSX 类型在包装组件处收敛（Overlay/Content 边界断言，调用侧
+  类型精确）。
+
+### 令牌合并
+- App.css 顶部 @tailwind 三件套 + solid-ui HSL 令牌（**暗色为默认值**，
+  本 App 单暗色主题），调色板与聊天配色一致；聊天/工具卡/审批卡/markdown
+  自定义类与 tailwind 共存。
+
+### 现状
+- tsc ✅、vite build ✅（CSS 22KB / JS 105KB，Kobalte 进包）、bundle 测试回归 ✅。
+- APK 已构建；设备断连未装机——重连后 `adb install -r -g` 装机验证 Sheet 手势
+  （ESC/点外关闭、focus trap）、Collapsible 动画、Badge 状态。
+
+---
+
 ## 2026-09-06 01:40 — M3 UX 专项：移动端 agent chat 体验重构 ✅
 
 ### 设计体系
