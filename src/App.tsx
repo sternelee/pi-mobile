@@ -519,7 +519,14 @@ function App() {
                   fallback={
                     <Show
                       when={it.role === "assistant"}
-                      fallback={<span class="status-line">{it.text}</span>}
+                      fallback={
+                        <Show
+                          when={it.role === "user"}
+                          fallback={<span class="status-line">{it.text}</span>}
+                        >
+                          <div class="bubble">{it.text}</div>
+                        </Show>
+                      }
                     >
                       <div class={`bubble ${it.thinking ? "thinking" : ""}`}>
                         <Show when={!it.thinking} fallback={<span>thinking…</span>}>

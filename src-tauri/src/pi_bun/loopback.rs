@@ -288,6 +288,15 @@ mod tests {
     }
 }
 
+/// workspace 内真实路径的展示名（相对 workspace 根，避免输出绝对路径噪音）。
+fn display_rel(real: &std::path::Path) -> String {
+    WORKSPACE_DIR
+        .get()
+        .and_then(|ws| real.strip_prefix(ws).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| real.to_string_lossy().into_owned())
+}
+
 /// 工具实现（M2 子集：read/write/ls/grep；D6：不提供 exec）。
 fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
     match name {
@@ -306,7 +315,7 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
             }
             write_with_backup(&path, content)?;
-            Ok(format!("wrote {} bytes to {}", content.len(), path.display()))
+            Ok(format!("wrote {} bytes to {}", content.len(), display_rel(&path)))
         }
         "edit" => {
             let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
@@ -324,7 +333,7 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             write_with_backup(&path, &updated)?;
             Ok(format!(
                 "edited {} ({} → {} bytes)",
-                path.display(),
+                display_rel(&path),
                 content.len(),
                 updated.len()
             ))
@@ -370,7 +379,7 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                                 if re.is_match(line) {
                                     hits.push(format!(
                                         "{}:{}: {}",
-                                        p.display(),
+                                        display_rel(&p),
                                         i + 1,
                                         line.chars().take(200).collect::<String>()
                                     ));
