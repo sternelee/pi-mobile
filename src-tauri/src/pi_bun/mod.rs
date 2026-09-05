@@ -305,6 +305,15 @@ pub fn session_new() -> Result<(), String> {
     Ok(())
 }
 
+/// 中止当前 agent 运行（UI 停止按钮）。
+pub fn agent_stop() -> Result<(), String> {
+    let (r, err) = evaluate_blocking("globalThis.__pi_stop()", "pi:stop")?;
+    if err {
+        return Err(format!("stop eval threw: {r}"));
+    }
+    Ok(())
+}
+
 /// PoC 冒烟 v2：初始化 → 注入配置 → 安装桥 → loopback hostcall 往返。
 /// 注意：`skal_evaluate` 同步阻塞（会等待 Promise 落定），调用方须在
 /// blocking 线程（本函数由 async command 经 spawn_blocking 调用）。

@@ -95,6 +95,16 @@ globalThis.__pi_tool_call = async (name, args) => {
 	return tool.execute("test-call-id", args ?? {});
 };
 
+// 中止当前运行（UI 停止按钮）：AbortController 语义，agent_end(aborted) 收尾
+globalThis.__pi_stop = () => {
+	try {
+		agent.abort();
+		return "ok";
+	} catch (e) {
+		return `error: ${e?.message ?? e}`;
+	}
+};
+
 // ---- streamFn: dispatch on model.api via per-api simple stream functions ----
 let apiKeyCache;
 async function getApiKey(provider) {

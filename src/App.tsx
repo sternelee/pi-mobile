@@ -1,12 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+  For,
+  Show,
+  createEffect,
+  createSignal,
+  onCleanup,
+  onMount,
+} from "solid-js";
+import { Markdown } from "./ui/Markdown";
 import "./App.css";
 
 type ChatItem = {
   role: "user" | "assistant" | "tool" | "status";
   text: string;
   toolCallId?: string;
+  toolName?: string;
+  argsText?: string;
+  pending?: boolean;
+  isError?: boolean;
+  expanded?: boolean;
+  thinking?: boolean;
   path?: string;
   canRevert?: boolean;
   reverted?: boolean;
@@ -35,10 +49,19 @@ type TreeEntry = {
   mtimeMs: number;
 };
 
-function fmtTime(millis: number): string {
-  const d = new Date(millis);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const SUGGESTIONS = [
+  "List my workspace files",
+  "Create hello.py that prints a greeting",
+  "What can you do?",
+];
+
+function fmtRel(ms: number): string {
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function App() {
@@ -48,19 +71,43 @@ function App() {
   const [input, setInput] = createSignal("");
   const [apiKey, setApiKey] = createSignal("");
   const [ready, setReady] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
   const [approval, setApproval] = createSignal<Approval | null>(null);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
   const [currentSession, setCurrentSession] = createSignal<string | null>(null);
   const [filesOpen, setFilesOpen] = createSignal(false);
   const [tree, setTree] = createSignal<TreeEntry[]>([]);
-  const [preview, setPreview] = createSignal<{ path: string; content: string } | null>(null);
+  const [preview, setPreview] = createSignal<{ path: string; content: string } | null>(
+    null,
+  );
+  const [stick, setStick] = createSignal(true);
+
+  let chatEl: HTMLDivElement | undefined;
+  let textareaEl: HTMLTextAreaElement | undefined;
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
   const updateItem = (toolCallId: string, patch: Partial<ChatItem>) =>
     setItems((prev) =>
-      prev.map((it) => (it.toolCallId === toolCallId ? { ...it, ...patch } : it)),
+      prev.map((it) =>
+        it.toolCallId === toolCallId ? { ...it, ...patch } : it,
+      ),
     );
+
+  const hasConversation = () =>
+    items().some((i) => i.role === "user" || i.role === "assistant" || i.role === "tool");
+
+  // ── 自动滚动：贴底跟随，用户上翻即暂停 ──
+  createEffect(() => {
+    items();
+    if (chatEl && stick()) {
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+  });
+  const onChatScroll = () => {
+    if (!chatEl) return;
+    setStick(chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 90);
+  };
 
   function mapHistoryMessage(m: any): ChatItem {
     const text =
@@ -70,10 +117,10 @@ function App() {
             .filter((c: any) => c.type === "text")
             .map((c: any) => c.text)
             .join("");
-    if (m.role === "toolResult")
+    if (m.role === "toolResult") {
       return { role: "tool", text: `↳ ${text.slice(0, 200)}` };
+    }
     if (m.role === "assistant") {
-      // 纯 toolCall 消息没有文本块 —— 汇总为工具卡行，避免空气泡
       const calls = (m.content ?? [])
         .filter((c: any) => c.type === "toolCall")
         .map((c: any) => `⚒ ${c.name}(${JSON.stringify(c.arguments ?? {})})`);
@@ -82,20 +129,18 @@ function App() {
     return { role: "user", text };
   }
 
-  /// 从 bundle 拉当前会话历史并渲染（boot 恢复 / 切换会话后共用）。
   async function loadHistory() {
     const h = JSON.parse(await invoke<string>("agent_history"));
     setCurrentSession(h.sessionId ?? null);
     const msgs = (h.messages ?? []) as any[];
     if (!msgs.length) {
-      setItems([{ role: "status", text: "new session — say hi or ask pi to do something" }]);
+      setItems([]);
       return;
     }
     setItems(msgs.map(mapHistoryMessage));
     push({ role: "status", text: `history loaded — ${msgs.length} messages` });
   }
 
-  /// 查询某路径是否还有可回滚的备份，刷新对应工具卡。
   async function refreshCanRevert(path: string) {
     const info = await invoke<string>("workspace_backup_info", { path });
     const has = info !== "null";
@@ -119,7 +164,6 @@ function App() {
   }
 
   onMount(async () => {
-    // agent 事件流（bundle → loopback → Rust emit → 这里）
     const un = await listen<string>("pi-agent-event", (e) => {
       let ev: any;
       try {
@@ -130,10 +174,16 @@ function App() {
       switch (ev.type) {
         case "agent_ready":
           setReady(true);
-          push({
-            role: "status",
-            text: `agent ready — tools: ${(ev.tools ?? []).join(", ")}`,
-          });
+          break;
+        case "agent_start":
+          setBusy(true);
+          break;
+        case "agent_end":
+          setBusy(false);
+          break;
+        case "agent_error":
+          setBusy(false);
+          push({ role: "status", text: `ERROR: ${ev.error ?? "unknown"}` });
           break;
         case "session_restored":
           setCurrentSession(ev.sessionId ?? null);
@@ -153,41 +203,63 @@ function App() {
           });
           break;
         case "boot_error":
+          setBusy(false);
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
           break;
-        case "agent_error":
-          push({ role: "status", text: `ERROR: ${ev.error}` });
-          break;
-        case "agent_start":
-          break;
-        case "agent_end":
+        case "turn_end":
+          // 回合收束：清掉滞留的 thinking 空泡
+          setItems((prev) => {
+            const last = prev[prev.length - 1];
+            return last?.role === "assistant" && last.thinking && !last.text
+              ? prev.slice(0, -1)
+              : prev;
+          });
           break;
         case "message_start":
         case "message_update":
         case "message_end": {
-          // 流式 assistant 消息：把 delta 汇总进最后一条 assistant 项
+          // 只渲染 assistant 流（user/toolResult 的消息事件另行处理/已在界面）
           const msg = ev.message ?? {};
-          const text =
-            msg.content
-              ?.filter((c: any) => c.type === "text")
-              .map((c: any) => c.text)
-              .join("") ?? "";
-          if (ev.type === "message_update" && !text) break;
+          if (msg.role !== "assistant") break;
+          const blocks = msg.content ?? [];
+          const text = blocks
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => c.text)
+            .join("");
+          const thinking = blocks.some((c: any) => c.type === "thinking");
+          if (ev.type === "message_update" && !text) {
+            if (thinking) updateThinking();
+            break;
+          }
           setItems((prev) => {
             const last = prev[prev.length - 1];
             if (last?.role === "assistant" && ev.type !== "message_start") {
-              return [...prev.slice(0, -1), { ...last, text }];
+              return [...prev.slice(0, -1), { ...last, text, thinking: false }];
             }
-            return [...prev, { role: "assistant", text }];
+            return [...prev, { role: "assistant", text, thinking }];
           });
           break;
         }
         case "tool_execution_start":
-          push({
-            role: "tool",
-            text: `⚒ ${ev.toolName}(${JSON.stringify(ev.args ?? {}).slice(0, 120)})`,
-            toolCallId: ev.toolCallId,
-            path: ev.args?.path,
+          // 清掉滞留 thinking 空泡（模型思考完直接调工具的场景）
+          setItems((prev) => {
+            const last = prev[prev.length - 1];
+            const cleaned =
+              last?.role === "assistant" && last.thinking && !last.text
+                ? prev.slice(0, -1)
+                : prev;
+            return [
+              ...cleaned,
+              {
+                role: "tool",
+                text: "",
+                toolCallId: ev.toolCallId,
+                toolName: ev.toolName,
+                argsText: JSON.stringify(ev.args ?? {}),
+                path: ev.args?.path,
+                pending: true,
+              },
+            ];
           });
           break;
         case "tool_execution_end": {
@@ -196,8 +268,13 @@ function App() {
               ?.filter((c: any) => c.type === "text")
               .map((c: any) => c.text)
               .join("") ?? "";
-          updateItem(ev.toolCallId, { text: `↳ ${String(out).slice(0, 300)}` });
-          // write 卡片查询备份（覆盖写才有）→ 显示回滚 chip
+          const isError = Boolean(ev.isError);
+          updateItem(ev.toolCallId, {
+            isError,
+            pending: false,
+            expanded: isError ? true : undefined,
+            text: `↳ ${String(out).slice(0, 400)}`,
+          });
           const it = items().find((x) => x.toolCallId === ev.toolCallId);
           if (it?.path) {
             invoke("workspace_backup_info", { path: it.path }).then((info) => {
@@ -214,17 +291,27 @@ function App() {
 
     try {
       await invoke("agent_init");
-      // 重启恢复：bundle 已回放最新会话，这里拉历史渲染
       await loadHistory();
     } catch (e) {
       push({ role: "status", text: `agent_init failed: ${e}` });
     }
   });
 
+  // message_update 只有 thinking 块时：把当前 assistant 气泡置为思考态
+  function updateThinking() {
+    setItems((prev) => {
+      const last = prev[prev.length - 1];
+      if (last?.role === "assistant" && !last.text) {
+        return [...prev.slice(0, -1), { ...last, thinking: true }];
+      }
+      if (last?.role === "assistant") return prev;
+      return [...prev, { role: "assistant", text: "", thinking: true }];
+    });
+  }
+
   async function saveKey(e: Event) {
     e.preventDefault();
     if (!apiKey().trim()) return;
-    // 默认模型 deepseek-v4-flash（agent-main.js DEFAULT_MODEL），凭证按 provider 名存
     await invoke("set_creds", {
       provider: "deepseek",
       apiKey: apiKey().trim(),
@@ -233,17 +320,43 @@ function App() {
     push({ role: "status", text: "API key saved (deepseek)" });
   }
 
-  async function send(e: Event) {
-    e.preventDefault();
-    const text = input().trim();
-    if (!text || !ready()) return;
+  async function sendText(raw: string) {
+    const text = raw.trim();
+    if (!text || !ready() || busy()) return;
     setInput("");
+    if (textareaEl) textareaEl.style.height = "auto";
+    setStick(true);
     push({ role: "user", text });
     try {
-      const r = await invoke<string>("agent_prompt", { text });
-      if (r !== "started") push({ role: "status", text: `prompt kick: ${r}` });
+      await invoke("agent_prompt", { text });
     } catch (e) {
       push({ role: "status", text: `prompt failed: ${e}` });
+    }
+  }
+
+  const onSubmit = (e: Event) => {
+    e.preventDefault();
+    sendText(input());
+  };
+
+  const onKeydown = (e: KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey && !(e as any).isComposing) {
+      e.preventDefault();
+      sendText(input());
+    }
+  };
+
+  const autoGrow = () => {
+    if (!textareaEl) return;
+    textareaEl.style.height = "auto";
+    textareaEl.style.height = `${Math.min(textareaEl.scrollHeight, 132)}px`;
+  };
+
+  async function stop() {
+    try {
+      await invoke("agent_stop");
+    } catch (e) {
+      push({ role: "status", text: `stop failed: ${e}` });
     }
   }
 
@@ -260,6 +373,7 @@ function App() {
   }
 
   async function openDrawer() {
+    setFilesOpen(false);
     setDrawerOpen(true);
     try {
       setSessions(JSON.parse(await invoke<string>("session_list")));
@@ -308,48 +422,41 @@ function App() {
     }
   }
 
+  const copyText = (text: string) => {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  };
+
+  const toolState = (it: ChatItem) =>
+    it.pending ? "pending" : it.isError ? "error" : "ok";
+
+  const prettyArgs = (raw?: string) => {
+    if (!raw) return "";
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw;
+    }
+  };
+
   return (
-    <main
-      class="container"
-      style={{ display: "flex", "flex-direction": "column", height: "100vh" }}
-    >
-      <div style={{ display: "flex", "align-items": "center", gap: "0.5rem" }}>
-        <button
-          style={{
-            background: "none",
-            border: "1px solid #3a4a5c",
-            color: "#c7d4e0",
-            "border-radius": "0.4rem",
-            padding: "0.15rem 0.5rem",
-            "font-size": "0.95rem",
-          }}
-          onClick={openDrawer}
-        >
-          ☰
-        </button>
-        <button
-          style={{
-            background: "none",
-            border: "1px solid #3a4a5c",
-            color: "#c7d4e0",
-            "border-radius": "0.4rem",
-            padding: "0.15rem 0.5rem",
-            "font-size": "0.95rem",
-          }}
-          onClick={openFiles}
-        >
-          📁
-        </button>
-        <h1 style={{ "font-size": "1.1rem", flex: "1" }}>pi-mobile</h1>
-        <Show when={currentSession()}>
-          <span style={{ color: "#7d8b99", "font-size": "0.7rem" }}>
-            {currentSession()!.slice(0, 8)}
-          </span>
-        </Show>
-      </div>
+    <main class="app">
+      <header class="topbar">
+        <div class="topbar-actions">
+          <button class="icon-btn" onClick={openDrawer} aria-label="sessions">
+            ☰
+          </button>
+          <button class="icon-btn" onClick={openFiles} aria-label="files">
+            📁
+          </button>
+        </div>
+        <h1 class="topbar-title">pi-mobile</h1>
+        <div class="topbar-meta">
+          <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
+        </div>
+      </header>
 
       <Show when={!ready()}>
-        <form class="row" onSubmit={saveKey}>
+        <form class="keyform" onSubmit={saveKey}>
           <input
             type="password"
             placeholder="DeepSeek API key…"
@@ -360,131 +467,134 @@ function App() {
         </form>
       </Show>
 
-      <div
-        id="chat"
-        style={{
-          flex: "1",
-          overflow: "auto",
-          "text-align": "left",
-          padding: "0.5rem",
-        }}
-      >
-        <For each={items()}>
-          {(item) => (
-            <div
-              style={{
-                margin: "0.4rem 0",
-                padding: "0.45rem 0.6rem",
-                "border-radius": "0.6rem",
-                "white-space": "pre-wrap",
-                "word-break": "break-word",
-                "font-size": "0.85rem",
-                ...(item.role === "user"
-                  ? { background: "#2f6feb", color: "#fff" }
-                  : item.role === "assistant"
-                    ? { background: "#24313f" }
-                    : item.role === "tool"
-                      ? {
-                          background: "#1c2530",
-                          color: "#9fb3c8",
-                          "font-family": "monospace",
-                          "font-size": "0.75rem",
-                        }
-                      : { color: "#7d8b99", "font-style": "italic" }),
-              }}
-            >
-              {item.text}
-              <Show when={item.role === "tool" && item.path && (item.canRevert || item.reverted)}>
-                <div style={{ "margin-top": "0.3rem" }}>
-                  <Show
-                    when={item.canRevert}
-                    fallback={
-                      <span style={{ color: "#5f7183" }}>↩ reverted</span>
-                    }
-                  >
-                    <button
-                      style={{
-                        background: "#2c4a5e",
-                        color: "#8ec6ff",
-                        border: "none",
-                        "border-radius": "0.4rem",
-                        padding: "0.2rem 0.6rem",
-                        "font-size": "0.72rem",
-                      }}
-                      onClick={() => revert(item)}
-                    >
-                      ↩ Revert
-                    </button>
-                  </Show>
-                </div>
-              </Show>
+      <div class="chat" ref={chatEl} onScroll={onChatScroll}>
+        <Show when={ready() && !hasConversation()}>
+          <div class="welcome">
+            <div class="welcome-logo">π</div>
+            <h2>Your pocket coding agent</h2>
+            <p>
+              pi runs entirely on this device — it can list, read, write and edit
+              files in the sandboxed workspace. Writes ask for your approval.
+            </p>
+            <div class="chips">
+              <For each={SUGGESTIONS}>
+                {(s) => <button class="chip" onClick={() => sendText(s)}>{s}</button>}
+              </For>
             </div>
+          </div>
+        </Show>
+
+        <For each={items()}>
+          {(it) => (
+            <Show
+              when={it.role !== "tool" || it.toolCallId}
+              fallback={
+                <div class="result-line">{it.text}</div>
+              }
+            >
+              <div class={`msg msg-${it.role}`}>
+                <Show
+                  when={it.role === "tool"}
+                  fallback={
+                    <Show
+                      when={it.role === "assistant"}
+                      fallback={<span class="status-line">{it.text}</span>}
+                    >
+                      <div class={`bubble ${it.thinking ? "thinking" : ""}`}>
+                        <Show when={!it.thinking} fallback={<span>thinking…</span>}>
+                          <Markdown text={it.text} />
+                        </Show>
+                        <Show when={it.text && !it.thinking}>
+                          <button
+                            class="copy-btn"
+                            onClick={() => copyText(it.text)}
+                            aria-label="copy"
+                          >
+                            copy
+                          </button>
+                        </Show>
+                      </div>
+                    </Show>
+                  }
+                >
+                  <div class={`tool-card ${toolState(it)}`}>
+                    <button
+                      class="tool-head"
+                      onClick={() =>
+                        updateItem(it.toolCallId!, { expanded: !it.expanded })
+                      }
+                    >
+                      <span>
+                        {it.pending ? "◌" : it.isError ? "✗" : "✓"}
+                      </span>
+                      <span class="tool-summary">
+                        {it.toolName}({(it.argsText ?? "").slice(0, 90)})
+                        {it.pending ? " …" : ""}
+                      </span>
+                      <span class="tool-caret">{it.expanded ? "▼" : "▶"}</span>
+                    </button>
+                    <Show when={it.expanded}>
+                      <div class="tool-body">
+                        <div>{prettyArgs(it.argsText)}</div>
+                        <Show when={it.text}>
+                          <div class="tool-result">{it.text}</div>
+                        </Show>
+                        <Show when={it.path && (it.canRevert || it.reverted)}>
+                          <div class="tool-revert-row">
+                            <Show
+                              when={it.canRevert}
+                              fallback={<span class="reverted-note">↩ reverted</span>}
+                            >
+                              <button
+                                class="chip-revert"
+                                onClick={() => revert(it)}
+                              >
+                                ↩ Revert
+                              </button>
+                            </Show>
+                          </div>
+                        </Show>
+                      </div>
+                    </Show>
+                  </div>
+                </Show>
+              </div>
+            </Show>
           )}
         </For>
       </div>
 
       <Show when={approval()}>
         {(a) => (
-          <div
-            style={{
-              border: "1px solid #3a4a5c",
-              "border-radius": "0.6rem",
-              margin: "0.3rem 0.5rem",
-              padding: "0.5rem",
-              background: "#1a232e",
-              "max-height": "45vh",
-              "overflow-y": "auto",
-            }}
-          >
-            <div style={{ "font-size": "0.8rem", "font-weight": "bold" }}>
+          <div class="approval">
+            <div class="approval-title">
               ⚠ {a().tool} «{a().path}» — approve?
             </div>
             <Show when={a().diff}>
-              <pre
-                style={{
-                  "font-family": "monospace",
-                  "font-size": "0.68rem",
-                  "line-height": "1.35",
-                  "white-space": "pre-wrap",
-                  "word-break": "break-all",
-                  margin: "0.4rem 0",
-                  padding: "0.4rem",
-                  background: "#121922",
-                  "border-radius": "0.4rem",
-                }}
-              >
+              <div class="diff">
                 {a().diff.split("\n").map((line) => (
                   <div
-                    style={
+                    class={
                       line.startsWith("+")
-                        ? { color: "#7ce38b" }
+                        ? "diff-add"
                         : line.startsWith("-")
-                          ? { color: "#ff8182" }
-                          : { color: "#7d8b99" }
+                          ? "diff-del"
+                          : "diff-ctx"
                     }
                   >
                     {line || " "}
                   </div>
                 ))}
-              </pre>
+              </div>
             </Show>
-            <div style={{ display: "flex", gap: "0.5rem", "margin-top": "0.4rem" }}>
-              <button
-                style={{ flex: "1", background: "#5a3038", color: "#ff9ea0", border: "none", padding: "0.45rem", "border-radius": "0.4rem" }}
-                onClick={() => decide("deny")}
-              >
+            <div class="approval-actions">
+              <button class="btn btn-deny" onClick={() => decide("deny")}>
                 Deny
               </button>
-              <button
-                style={{ flex: "1", background: "#2c4a5e", color: "#8ec6ff", border: "none", padding: "0.45rem", "border-radius": "0.4rem" }}
-                onClick={() => decide("always")}
-              >
+              <button class="btn btn-always" onClick={() => decide("always")}>
                 Always
               </button>
-              <button
-                style={{ flex: "1", background: "#1f4a33", color: "#8fe6a4", border: "none", padding: "0.45rem", "border-radius": "0.4rem" }}
-                onClick={() => decide("allow")}
-              >
+              <button class="btn btn-allow" onClick={() => decide("allow")}>
                 Allow
               </button>
             </div>
@@ -492,224 +602,109 @@ function App() {
         )}
       </Show>
 
-      <Show when={drawerOpen()}>
-        <div
-          style={{
-            position: "fixed",
-            inset: "0",
-            background: "rgba(0,0,0,0.45)",
-            "z-index": "10",
+      <form class="composer" onSubmit={onSubmit}>
+        <textarea
+          ref={textareaEl}
+          rows="1"
+          placeholder={ready() ? "Ask pi to do something…" : "agent booting…"}
+          disabled={!ready()}
+          value={input()}
+          onInput={(e) => {
+            setInput(e.currentTarget.value);
+            autoGrow();
           }}
-          onClick={() => setDrawerOpen(false)}
+          onKeyDown={onKeydown}
         />
-        <div
-          style={{
-            position: "fixed",
-            top: "0",
-            right: "0",
-            bottom: "0",
-            width: "82vw",
-            "max-width": "22rem",
-            background: "#141c26",
-            "z-index": "11",
-            padding: "0.8rem",
-            "overflow-y": "auto",
-            "border-left": "1px solid #3a4a5c",
-          }}
+        <Show
+          when={!busy()}
+          fallback={
+            <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
+              ■
+            </button>
+          }
         >
-          <div style={{ display: "flex", "align-items": "center", "margin-bottom": "0.6rem" }}>
-            <strong style={{ flex: "1" }}>Sessions</strong>
-            <button
-              style={{
-                background: "#1f4a33",
-                color: "#8fe6a4",
-                border: "none",
-                "border-radius": "0.4rem",
-                padding: "0.3rem 0.7rem",
-              }}
-              onClick={newSession}
-            >
+          <button
+            type="submit"
+            class="send-btn"
+            disabled={!ready() || !input().trim()}
+            aria-label="send"
+          >
+            ➤
+          </button>
+        </Show>
+      </form>
+
+      <Show when={drawerOpen()}>
+        <div class="overlay" onClick={() => setDrawerOpen(false)} />
+        <div class="drawer drawer-right">
+          <div class="drawer-head">
+            <strong>Sessions</strong>
+            <button class="icon-btn" onClick={newSession}>
               ＋ New
             </button>
           </div>
           <For each={sessions()}>
             {(s) => (
               <div
-                style={{
-                  padding: "0.5rem 0.6rem",
-                  "border-radius": "0.5rem",
-                  margin: "0.25rem 0",
-                  cursor: "pointer",
-                  background: s.id === currentSession() ? "#24313f" : "#1a232e",
-                  border:
-                    s.id === currentSession() ? "1px solid #2f6feb" : "1px solid #232f3d",
-                }}
+                class={`item-card ${s.id === currentSession() ? "active" : ""}`}
                 onClick={() => switchSession(s.id)}
               >
-                <div style={{ "font-size": "0.8rem", "font-family": "monospace" }}>
-                  {s.id.slice(0, 8)}
-                </div>
-                <div style={{ "font-size": "0.7rem", color: "#7d8b99" }}>
-                  {fmtTime(s.modifiedAt)} · {s.entries} messages
+                <div class="item-title">{s.id.slice(0, 8)}</div>
+                <div class="item-sub">
+                  {fmtRel(s.modifiedAt)} · {s.entries} messages
                 </div>
               </div>
             )}
           </For>
           <Show when={!sessions().length}>
-            <div style={{ color: "#7d8b99", "font-size": "0.8rem" }}>no sessions yet</div>
+            <div class="empty-note">no sessions yet</div>
           </Show>
         </div>
       </Show>
 
       <Show when={filesOpen()}>
-        <div
-          style={{
-            position: "fixed",
-            inset: "0",
-            background: "rgba(0,0,0,0.45)",
-            "z-index": "10",
-          }}
-          onClick={() => setFilesOpen(false)}
-        />
-        <div
-          style={{
-            position: "fixed",
-            top: "0",
-            left: "0",
-            bottom: "0",
-            width: "82vw",
-            "max-width": "22rem",
-            background: "#141c26",
-            "z-index": "11",
-            padding: "0.8rem",
-            "overflow-y": "auto",
-            "border-right": "1px solid #3a4a5c",
-          }}
-        >
-          <div style={{ display: "flex", "align-items": "center", "margin-bottom": "0.6rem" }}>
-            <strong style={{ flex: "1" }}>Workspace</strong>
-            <button
-              style={{
-                background: "none",
-                border: "1px solid #3a4a5c",
-                color: "#c7d4e0",
-                "border-radius": "0.4rem",
-                padding: "0.2rem 0.5rem",
-              }}
-              onClick={openFiles}
-            >
+        <div class="overlay" onClick={() => setFilesOpen(false)} />
+        <div class="drawer drawer-left">
+          <div class="drawer-head">
+            <strong>Workspace</strong>
+            <button class="icon-btn" onClick={openFiles}>
               ⟳
             </button>
           </div>
           <For each={tree()}>
             {(t) => (
               <div
-                style={{
-                  padding: "0.3rem 0.4rem",
-                  "border-radius": "0.4rem",
-                  "font-size": "0.78rem",
-                  "font-family": "monospace",
-                  cursor: t.kind === "file" ? "pointer" : "default",
-                  color: t.kind === "directory" ? "#8ec6ff" : "#c7d4e0",
-                  "font-weight": t.kind === "directory" ? "bold" : "normal",
-                  "margin-left": `${(t.path.split("/").length - 1) * 0.8}rem`,
-                }}
+                class={`file-item ${t.kind === "directory" ? "dir" : ""}`}
+                style={{ "margin-left": `${(t.path.split("/").length - 1) * 0.8}rem` }}
                 onClick={() => t.kind === "file" && previewFile(t.path)}
               >
-                {t.kind === "directory" ? "▸ " : "  "}
+                {t.kind === "directory" ? "▸ " : ""}
                 {t.path.split("/").pop()}
-                {t.kind === "file" ? ` (${t.size}B)` : "/"}
+                {t.kind === "file" ? `  (${t.size}B)` : "/"}
               </div>
             )}
           </For>
           <Show when={!tree().length}>
-            <div style={{ color: "#7d8b99", "font-size": "0.8rem" }}>workspace is empty</div>
+            <div class="empty-note">workspace is empty</div>
           </Show>
         </div>
       </Show>
 
       <Show when={preview()}>
         {(p) => (
-          <div
-            style={{
-              position: "fixed",
-              inset: "0",
-              background: "rgba(0,0,0,0.6)",
-              "z-index": "20",
-              display: "flex",
-              "flex-direction": "column",
-              padding: "0.8rem",
-            }}
-            onClick={() => setPreview(null)}
-          >
-            <div
-              style={{
-                background: "#141c26",
-                "border-radius": "0.6rem",
-                "border": "1px solid #3a4a5c",
-                flex: "1",
-                display: "flex",
-                "flex-direction": "column",
-                "min-height": "0",
-              }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  "align-items": "center",
-                  padding: "0.5rem 0.7rem",
-                  "border-bottom": "1px solid #232f3d",
-                }}
-              >
-                <strong style={{ flex: "1", "font-size": "0.8rem", "font-family": "monospace" }}>
-                  {p().path}
-                </strong>
-                <button
-                  style={{
-                    background: "none",
-                    border: "1px solid #3a4a5c",
-                    color: "#c7d4e0",
-                    "border-radius": "0.4rem",
-                    padding: "0.1rem 0.5rem",
-                  }}
-                  onClick={() => setPreview(null)}
-                >
+          <div class="preview-overlay" onClick={() => setPreview(null)}>
+            <div class="preview-panel" onClick={(e) => e.stopPropagation()}>
+              <div class="preview-head">
+                <strong>{p().path}</strong>
+                <button class="icon-btn" onClick={() => setPreview(null)}>
                   ✕
                 </button>
               </div>
-              <pre
-                style={{
-                  flex: "1",
-                  overflow: "auto",
-                  margin: "0",
-                  padding: "0.6rem",
-                  "font-family": "monospace",
-                  "font-size": "0.72rem",
-                  "line-height": "1.4",
-                  "white-space": "pre-wrap",
-                  "word-break": "break-all",
-                  color: "#c7d4e0",
-                }}
-              >
-                {p().content}
-              </pre>
+              <pre class="preview-body">{p().content}</pre>
             </div>
           </div>
         )}
       </Show>
-
-      <form class="row" onSubmit={send} style={{ "padding-bottom": "0.8rem" }}>
-        <input
-          placeholder={ready() ? "Ask pi to do something…" : "agent booting…"}
-          disabled={!ready()}
-          value={input()}
-          onInput={(e) => setInput(e.currentTarget.value)}
-        />
-        <button type="submit" disabled={!ready() || !input().trim()}>
-          Send
-        </button>
-      </form>
     </main>
   );
 }

@@ -14,6 +14,7 @@
 | `agent_init` | `{}` | `{}` | 加载 bundle；等 `__pi_ready` + `__pi_restored`（会话回放完成） |
 | `agent_prompt` | `{ text }` | `"started"` | kick；回复经 `pi-agent-event` 流回 |
 | `agent_status` | `{}` | `{busy,lastError,queued}` | 轮询 |
+| `agent_stop` | `{}` | `{}` | M3：中止当前运行（bundle `agent.abort()`） |
 | `agent_history` | `{}` | `{sessionId,messages[]}` | boot 时从最新 JSONL 会话回放的历史 |
 | `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（creds.rs） |
 | `approval_respond` | `{ requestId, decision }` | `{}` | M3 审批：decision ∈ allow/deny/always；唤醒阻塞中的 approval_request |

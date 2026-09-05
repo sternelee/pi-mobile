@@ -56,6 +56,14 @@ async fn agent_status() -> Result<String, String> {
         .map_err(|e| format!("join: {e}"))?
 }
 
+/// M3：中止当前 agent 运行。
+#[tauri::command]
+async fn agent_stop() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(pi_bun::agent_stop)
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
 /// M2 收尾：重启恢复 —— 取 boot 时从最新 JSONL 会话回放的历史消息。
 #[tauri::command]
 async fn agent_history() -> Result<String, String> {
@@ -152,6 +160,7 @@ pub fn run() {
             agent_init,
             agent_prompt,
             agent_status,
+            agent_stop,
             agent_history,
             set_creds,
             approval_respond,

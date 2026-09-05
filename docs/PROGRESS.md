@@ -2,6 +2,43 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 01:40 — M3 UX 专项：移动端 agent chat 体验重构 ✅
+
+### 设计体系
+- **App.css 全面重写**：设计令牌（--bg/--surface/--text/--accent/…）+ 类名
+  体系，App.tsx 去掉全部内联样式；暗色移动优先，`100dvh` 布局，
+  `env(safe-area-inset-*)` 适配手势条/刘海，内容区 max-width 760px（平板居中）。
+- **index.html**：viewport-fit=cover + 主题色 + 标题改 pi-mobile。
+
+### 聊天体验
+- **Markdown 渲染**（新组件 `src/ui/Markdown.tsx`，零依赖）：围栏代码块
+  （语言标签 + copy 按钮）、标题/列表/引用/粗斜体/行内代码/链接；
+  escape-first 自有转换，无注入面。
+- **assistant 气泡**：markdown + 悬停/常显 copy 按钮；**thinking 态**——
+  message_update 只有 thinking 块时显示斜体 "thinking…"；调工具前清掉滞留
+  思考泡（修掉此前截图里的 "(empty)" 空气泡：user/toolResult 的消息事件
+  不再误渲染为 assistant 气泡）。
+- **工具卡折叠**：toolCallId 合并 start/end，收起态一行
+  （状态符 + 摘要 + 箭头），展开看参数/result；pending 黄/成功绿/失败红
+  左边条，失败自动展开；回滚 chip 移入展开区。
+- **自动滚动**：贴底跟随（新内容自动滚），用户上翻即暂停跟随。
+- **流式状态 + 停止**：agent_start→busy，发送键变红色 ■ Stop（脉冲动画），
+  经 `agent_stop` → bundle `agent.abort()`（AbortController 语义）；
+  agent_error 显示错误状态行。
+- **输入区**：单行 input → 自增高 textarea（Enter 发送 / Shift+Enter 换行，
+  IME composing 防误发）；布局换 flex composer。
+- **空状态**：π logo + 欢迎语 + 3 个建议 chips（点击直接发送）。
+
+### 修复
+- user/toolResult 的 message_start/update/end 事件此前会渲染成空气泡/重复
+  气泡 → 只处理 assistant 角色。
+
+### 待真机验证（设备已断开；重连后 `adb install -r -g` + 重启即装）
+- markdown/代码块渲染、思考态、工具卡折叠、Stop 中断、chips、自动滚动、
+  键盘下 composer 位置（安全区）。
+
+---
+
 ## 2026-09-06 01:20 — M3 第三块：edit 工具 + 文件树/预览 + AGENTS.md ✅
 
 ### edit 工具（审批自动复用）
