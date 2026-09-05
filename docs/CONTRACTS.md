@@ -18,6 +18,10 @@
 | `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（creds.rs） |
 | `approval_respond` | `{ requestId, decision }` | `{}` | M3 审批：decision ∈ allow/deny/always；唤醒阻塞中的 approval_request |
 | `workspace_revert` | `{ path }` | `u64`（字节数） | M3 回滚：恢复该文件最近一次覆盖写入前的内容（消费备份） |
+| `workspace_backup_info` | `{ path }` | `{millis}` / `null` | M3 回滚 UI：该路径是否还有可回滚备份 |
+| `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | M3 会话列表：`{id,createdAt,cwd,modifiedAt,entries,size}` |
+| `session_open` | `{ id }` | `{}` | M3 切换会话：bundle 内 repo.open + 回放进 agent 状态与 UI 历史 |
+| `session_new` | `{}` | `{}` | M3 新建空白会话（下一个 prompt 落新 JSONL） |
 
 ### 1.2 Events（Rust → UI）
 

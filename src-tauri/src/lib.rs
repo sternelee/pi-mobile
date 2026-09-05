@@ -2,6 +2,7 @@
 mod approval;
 mod creds;
 mod pi_bun;
+mod sessions;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -82,6 +83,38 @@ fn workspace_revert(path: String) -> Result<u64, String> {
     pi_bun::loopback::revert_workspace_file(&path)
 }
 
+/// M3：查询某 workspace 文件的最新备份时间戳（null = 无备份）。
+#[tauri::command]
+fn workspace_backup_info(path: String) -> Result<String, String> {
+    match pi_bun::loopback::latest_backup_millis(&path) {
+        Some(m) => Ok(format!("{{\"millis\":{m}}}")),
+        None => Ok("null".into()),
+    }
+}
+
+/// M3：会话索引（modifiedAt 倒序，供会话列表 UI）。
+#[tauri::command]
+fn session_list(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    sessions::list(&format!("{dir}/sessions"))
+}
+
+/// M3：切换到指定会话。
+#[tauri::command]
+async fn session_open(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || pi_bun::session_open(&id))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+/// M3：新建空白会话。
+#[tauri::command]
+async fn session_new() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(pi_bun::session_new)
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -110,7 +143,11 @@ pub fn run() {
             agent_history,
             set_creds,
             approval_respond,
-            workspace_revert
+            workspace_revert,
+            workspace_backup_info,
+            session_list,
+            session_open,
+            session_new
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

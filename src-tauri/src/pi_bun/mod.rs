@@ -280,6 +280,31 @@ pub fn agent_history() -> Result<String, String> {
     Ok(r)
 }
 
+/// 切换到指定会话（bundle 内 repo.open + 回放进 agent 状态与 UI 历史）。
+pub fn session_open(id: &str) -> Result<(), String> {
+    let arg = serde_json::to_string(id).map_err(|e| format!("serialize: {e}"))?;
+    let (r, err) = evaluate_blocking(
+        &format!("globalThis.__pi_open_session({arg})"),
+        "pi:session-open",
+    )?;
+    if err {
+        return Err(format!("session open threw: {r}"));
+    }
+    if r.contains("\"error\"") {
+        return Err(r);
+    }
+    Ok(())
+}
+
+/// 新建空白会话（下一个 prompt 落新 JSONL）。
+pub fn session_new() -> Result<(), String> {
+    let (r, err) = evaluate_blocking("globalThis.__pi_new_session()", "pi:session-new")?;
+    if err {
+        return Err(format!("session new threw: {r}"));
+    }
+    Ok(())
+}
+
 /// PoC 冒烟 v2：初始化 → 注入配置 → 安装桥 → loopback hostcall 往返。
 /// 注意：`skal_evaluate` 同步阻塞（会等待 Promise 落定），调用方须在
 /// blocking 线程（本函数由 async command 经 spawn_blocking 调用）。

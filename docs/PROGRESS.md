@@ -2,6 +2,42 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 01:00 — M3 第二块：会话列表/切换 + 工具卡回滚 ✅
+
+### 会话管理（D7 首行落地）
+- **Rust `sessions.rs`**：扫描 `sessions/<cwd-encoded>/*.jsonl`，解析 v4 header
+  （id/createdAt/cwd）+ mtime + message 条数 → `session_list` 命令（modifiedAt
+  倒序）；单测覆盖排序与解析。
+- **bundle 缝**：`__pi_open_session(id)`（repo.open + findEntries 回放进
+  agent.state.messages 与 __pi_history）、`__pi_new_session()`（清指针，下一
+  prompt 落新 JSONL）；Rust `session_open` / `session_new` 命令驱动。
+- **UI 会话抽屉**：标题栏 ☰ → 右侧抽屉列出会话（id 前 8 位、时间、条数，
+  当前会话高亮）→ 点击切换（`session_open` + `loadHistory` 重渲染）；「＋ New」
+  开新会话。头栏显示当前会话 id 前缀。
+
+### 回滚 UI（"diff 可回滚"闭环最后一环）
+- `workspace_backup_info` 命令（该路径最新备份时间戳/null）；工具卡在
+  tool_execution_end 时查询，覆盖写显示「↩ Revert」chip；点击 `workspace_revert`
+  → 文件回退 + 消费备份 → 刷新同路径所有卡的 chip（还有更早备份可继续回退），
+  卡片显示 "↩ reverted"。新文件写入无备份不显示 chip。
+- 事件处理重构：工具卡按 `toolCallId` 合并 start/end（此前 end 另起新气泡）。
+
+### 已知边界（记入 M3 剩余）
+- 会话切换在 agent 运行中执行会把后续落盘写进新会话（MVP 可接受，后续
+  busy 时禁用切换入口）。
+- 历史会话里的 write 卡片暂无回滚 chip（历史渲染没有 toolCallId；后续把
+  entry id 透出后补）。
+
+### 下一步（M3 剩余）
+- [ ] 真机验证：会话切换/新建 + Revert chip（等用户操作）
+- [ ] 文件树 + 只读预览（D7）
+- [ ] edit 工具 + 审批复用；Android bash 通道（M4 前置）
+- [ ] google provider 重接（bun plugin 构建期内联 node-builtin import）
+- [ ] AGENTS.md 随 workspace 生效；Provider OAuth + deep-link（D9）
+- [ ] i18n / 深色模式 / 无障碍基线；checkpoint/恢复兜底（D8）
+
+---
+
 ## 2026-09-06 00:50 — 真机验证收官：审批流 + 重启恢复全链路 ✅（4 个真机 bug 修复）
 
 ### 验证结果（Honor 真机，debug APK，`bun tauri android build --debug`）

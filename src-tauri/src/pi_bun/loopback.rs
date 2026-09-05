@@ -69,6 +69,24 @@ fn backup_existing(real: &std::path::Path) {
     let _ = std::fs::copy(real, dir.join(backup_name(&rel, millis)));
 }
 
+/// 指定 workspace 相对路径的最新备份时间戳（无备份 → None）。
+pub fn latest_backup_millis(rel: &str) -> Option<u128> {
+    let dir = backup_dir()?;
+    let suffix = format!("__{}", rel.replace('/', "__"));
+    let mut latest: Option<u128> = None;
+    for e in std::fs::read_dir(&dir).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name.strip_suffix(&suffix) {
+            if let Ok(millis) = stem.trim_end_matches('_').parse::<u128>() {
+                if latest.is_none_or(|m| millis > m) {
+                    latest = Some(millis);
+                }
+            }
+        }
+    }
+    latest
+}
+
 /// 回滚：恢复指定 workspace 相对路径的最新一次备份（消费该备份，
 /// 连续调用可逐级回退）。返回恢复的字节数。
 pub fn revert_workspace_file(rel: &str) -> Result<u64, String> {

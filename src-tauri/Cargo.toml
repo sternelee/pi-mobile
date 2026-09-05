@@ -35,3 +35,6 @@ similar = "2"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
+[dev-dependencies]
+filetime = "0.2"
+

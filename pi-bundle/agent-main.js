@@ -363,6 +363,39 @@ globalThis.__pi_persist_direct = (message) => {
 	return "started";
 };
 
+// 会话切换（D7 会话列表）：open 指定会话并回放；new 清空指针，下一 prompt 落新 JSONL
+globalThis.__pi_open_session = async (id) => {
+	try {
+		const metas = await repo.list();
+		const meta = metas.find((m) => m.id === id);
+		if (!meta) return JSON.stringify({ error: `no such session: ${id}` });
+		const opened = await repo.open(meta);
+		session = opened;
+		sessionId = meta.id;
+		ensurePromise = null;
+		const entries = await opened.findEntries();
+		restoredMessages = entries
+			.filter((e) => e.type === "message" && e.message)
+			.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+			.map((e) => e.message);
+		if (restoredMessages.length) agent.state.messages = restoredMessages;
+		emit({ type: "session_restored", sessionId: meta.id, messages: restoredMessages.length });
+		return "ok";
+	} catch (e) {
+		return JSON.stringify({ error: String(e?.message ?? e) });
+	}
+};
+
+globalThis.__pi_new_session = () => {
+	session = null;
+	sessionId = null;
+	restoredMessages = [];
+	ensurePromise = null;
+	agent.state.messages = [];
+	emit({ type: "session_new" });
+	return "ok";
+};
+
 globalThis.__pi_ready = true;
 emit({ type: "agent_ready", tools: tools.map((t) => t.name) });
 
