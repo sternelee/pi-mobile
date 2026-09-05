@@ -97,15 +97,32 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     let mut path = String::new();
     if let Some(args) = payload.get("args") {
         path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").into();
-        if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
-            let old = DATA_DIR.get().and_then(|dir| {
-                let root = format!("{dir}/workspace");
-                if path.starts_with('/') || path.split('/').any(|s| s == "..") {
-                    return None;
+        let old = crate::pi_bun::loopback::read_workspace_rel(&path);
+        match payload.get("tool").and_then(|v| v.as_str()) {
+            Some("write") => {
+                if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+                    diff = unified_diff(&path, old.as_deref().unwrap_or(""), content);
                 }
-                std::fs::read_to_string(std::path::Path::new(&root).join(&path)).ok()
-            });
-            diff = unified_diff(&path, old.as_deref().unwrap_or(""), content);
+            }
+            Some("edit") => {
+                if let (Some(old_text), Some(new_text)) = (
+                    args.get("oldText").and_then(|v| v.as_str()),
+                    args.get("newText").and_then(|v| v.as_str()),
+                ) {
+                    let replace_all = args
+                        .get("replaceAll")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if let Some(content) = old {
+                        if let Ok(updated) =
+                            crate::pi_bun::loopback::apply_edit(&content, old_text, new_text, replace_all)
+                        {
+                            diff = unified_diff(&path, &content, &updated);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

@@ -26,20 +26,38 @@ const srv = createServer((req, res) => {
 			res.end(JSON.stringify({ ok: true, value: JSON.parse(empty) }));
 		} else if (method === "approval_request") {
 			approvalsSeen++;
-			if (payload.tool !== "write") {
+			if (!["write", "edit"].includes(payload.tool)) {
 				res.end(JSON.stringify({ error: `unexpected approval for ${payload.tool}` }));
 				return;
 			}
-			if (!payload.args?.path || typeof payload.args.content !== "string") {
-				res.end(JSON.stringify({ error: "approval payload missing path/content" }));
+			const a = payload.args ?? {};
+			if (typeof a.path !== "string" || (payload.tool === "write" ? typeof a.content !== "string" : typeof a.oldText !== "string")) {
+				res.end(JSON.stringify({ error: "approval payload missing required args" }));
 				return;
 			}
-			// deny 首次（除非测试通过 APPROVAL_POLICY=allow 要求直接放行）
-			const decision = approvalsSeen === 1 && process.env.APPROVAL_POLICY !== "allow" ? "deny" : "allow";
+			// deny 首次（write），其余放行
+			const decision = approvalsSeen === 1 ? "deny" : "allow";
 			res.end(JSON.stringify({ decision }));
 		} else if (method === "tool") {
 			if (payload.name === "write") {
 				writeFileSync(path.join(ws, payload.args.path), payload.args.content);
+				res.end(JSON.stringify({ text: "ok" }));
+			} else if (payload.name === "edit") {
+				const target = path.join(ws, payload.args.path);
+				const cur = readFileSync(target, "utf8");
+				const count = cur.split(payload.args.oldText).length - 1;
+				if (count === 0) {
+					res.end(JSON.stringify({ error: "oldText not found in file" }));
+					return;
+				}
+				if (count > 1 && !payload.args.replaceAll) {
+					res.end(JSON.stringify({ error: `oldText occurs ${count} times` }));
+					return;
+				}
+				const next = payload.args.replaceAll
+					? cur.split(payload.args.oldText).join(payload.args.newText)
+					: cur.replace(payload.args.oldText, payload.args.newText);
+				writeFileSync(target, next);
 				res.end(JSON.stringify({ text: "ok" }));
 			} else {
 				res.end(JSON.stringify({ text: "ok" }));
@@ -83,10 +101,34 @@ if (readFileSync(target, "utf8") !== "approved content") {
 }
 console.log("OK allow: write executed");
 
-// 3) 只读工具不应触发审批
+// 3) edit：审批后精确替换
+const edited = await globalThis.__pi_tool_call("edit", {
+	path: "t.txt",
+	oldText: "approved content",
+	newText: "edited content",
+});
+if ((edited.content?.[0]?.text ?? "") !== "ok") {
+	console.error("FAIL edit:", (edited.content?.[0]?.text ?? "").slice(0, 200));
+	process.exit(1);
+}
+if (readFileSync(target, "utf8") !== "edited content") {
+	console.error("FAIL edit: file content wrong");
+	process.exit(1);
+}
+console.log("OK edit: snippet replaced");
+
+// 4) edit：oldText 未找到 → 工具错误
+const miss = await globalThis.__pi_tool_call("edit", { path: "t.txt", oldText: "nope", newText: "x" });
+if (!/not found/i.test(miss.content?.[0]?.text ?? "")) {
+	console.error("FAIL edit-miss:", (miss.content?.[0]?.text ?? "").slice(0, 200));
+	process.exit(1);
+}
+console.log("OK edit: missing oldText reported as error");
+
+// 5) 只读工具不应触发审批（write×2 + edit×2，含未命中 edit —— 审批在执行前）
 await globalThis.__pi_tool_call("ls", {});
-if (approvalsSeen !== 2) {
-	console.error(`FAIL: expected exactly 2 approval requests (write×2), saw ${approvalsSeen}`);
+if (approvalsSeen !== 4) {
+	console.error(`FAIL: expected exactly 4 approval requests (write×2 + edit×2), saw ${approvalsSeen}`);
 	process.exit(1);
 }
 console.log("OK read-only tools bypass approval");

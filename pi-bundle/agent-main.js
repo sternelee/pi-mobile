@@ -83,6 +83,7 @@ const obj = (props, required) => ({
 const tools = [
 	hostTool("read", "Read", "Read a text file from the workspace. Args: {path}", obj({ path: { type: "string" } })),
 	hostTool("write", "Write", "Write text to a file in the workspace (creates or overwrites). Requires user approval — if the user denies, do not retry the same write. Args: {path, content}", obj({ path: { type: "string" }, content: { type: "string" } }), { mutating: true }),
+	hostTool("edit", "Edit", "Replace an exact text snippet inside a workspace file. oldText must match the file content exactly (including whitespace) and be unique unless replaceAll=true. Requires user approval. Args: {path, oldText, newText, replaceAll?}", obj({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, replaceAll: { type: "boolean" } }, ["path", "oldText", "newText"]), { mutating: true }),
 	hostTool("ls", "List", "List directory entries in the workspace. Args: {path?} (default '.')", obj({ path: { type: "string" } }, [])),
 	hostTool("grep", "Grep", "Regex search across workspace text files. Args: {pattern, path?}", obj({ pattern: { type: "string" }, path: { type: "string" } }, ["pattern"])),
 ];
@@ -135,7 +136,7 @@ const STREAM_SIMPLE = {
 };
 
 const agent = new Agent({
-	initialState: { model: DEFAULT_MODEL, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), grep (search files). When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To read a file, call read with its path. The workspace is a sandboxed directory on the device.", tools },
+	initialState: { model: DEFAULT_MODEL, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), edit (replace an exact text snippet in a file), grep (search files). write and edit require user approval. When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To change a file, prefer edit with an exact oldText snippet; use write only to create files or rewrite them entirely. The workspace is a sandboxed directory on the device.", tools },
 	streamFn: async (model, context, options) => {
 		const fn = STREAM_SIMPLE[model.api];
 		if (!fn) throw new Error(`unsupported api: ${model.api}`);
@@ -309,6 +310,20 @@ async function restoreLatest() {
 	emit({ type: "session_restored", sessionId: latest.id, messages: restoredMessages.length });
 }
 
+const BASE_SYSTEM_PROMPT = () => agent.state.systemPrompt.split("\n\n# Project instructions")[0].trim();
+
+// AGENTS.md 注入（pi 语义：workspace 规则进 system prompt）。boot/切会话时刷新。
+async function refreshAgentsMd() {
+	try {
+		const r = await hostcall("tool", { name: "read", args: { path: "AGENTS.md" } });
+		if (r.error || !r.text?.trim()) return;
+		agent.state.systemPrompt = `${BASE_SYSTEM_PROMPT()}\n\n# Project instructions (AGENTS.md)\n\n${r.text}`;
+		emit({ type: "agents_md_loaded", bytes: r.text.length });
+	} catch {
+		// 无 AGENTS.md —— 保持基线 prompt
+	}
+}
+
 const sessionPersistError = (e) =>
 	emit({ type: "session_error", error: String(e?.message ?? e) });
 // agent_init 等 __pi_restored 再返回，保证 UI 的 agent_history 读到回放结果
@@ -317,6 +332,7 @@ restoreLatest()
 	.finally(() => {
 		globalThis.__pi_restored = true;
 	});
+refreshAgentsMd().catch(() => {});
 
 // ---- host-facing controls (kick+poll contract) ----
 let lastError = null;

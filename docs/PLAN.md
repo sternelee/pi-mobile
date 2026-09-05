@@ -333,10 +333,13 @@ pi-mobile/
   `approval_request` hostcall；Rust `approval.rs` policy 状态机（ask/auto，
   `{data_dir}/policy.json`，"always" 持久化）+ pending 表 + unified diff；
   DiffApproval UI（Deny/Always/Allow）；写前备份 + `workspace_revert` 回滚命令。
-  本机测试（cargo test + approval-test.js）✅，真机验证待做。
-  edit 工具与 Android bash 落地时复用同一审批点。
+  本机测试（cargo test + approval-test.js）✅；真机验证 ✅（2026-09-06：
+  弹卡 → Allow → 写入 + 备份；Always 持久化 auto；重置恢复 ask）。
+  edit 工具已接入同一审批点（2026-09-06，含 edit diff）。
+  Android bash 通道（M4 前置）待做。
 - [~] 会话列表/索引（Rust 侧）✅（2026-09-06：session_list/open/new + 会话抽屉 UI）；
-  文件树（fs 插件 scope 收紧至 workspace）、命令面板、用量成本可视化待做
+  文件树 + 只读预览 ✅（2026-09-06：workspace_tree/read + 📁 面板）；
+  命令面板、用量成本可视化待做
 - [ ] AGENTS.md（pi 原生支持，随 workspace 生效）；Provider OAuth + deep-link（D9）
 - [ ] 产品化基线：i18n / 无障碍 / 深色模式；Android APK 内测分发；checkpoint/恢复兜底（D8）
 - **出口条件**：真机日常使用一周，会话/凭证/审批全部可靠；agent 完成"改文件 → 审批 → diff 可回滚"闭环

@@ -92,6 +92,18 @@ fn workspace_backup_info(path: String) -> Result<String, String> {
     }
 }
 
+/// M3：workspace 文件树（扁平列表，深度 ≤6 / 条目 ≤500）。
+#[tauri::command]
+fn workspace_tree() -> Result<String, String> {
+    pi_bun::loopback::workspace_tree()
+}
+
+/// M3：workspace 文件只读预览（上限 256KB）。
+#[tauri::command]
+fn workspace_read(path: String) -> Result<String, String> {
+    pi_bun::loopback::workspace_read(&path)
+}
+
 /// M3：会话索引（modifiedAt 倒序，供会话列表 UI）。
 #[tauri::command]
 fn session_list(app: tauri::AppHandle) -> Result<String, String> {
@@ -145,6 +157,8 @@ pub fn run() {
             approval_respond,
             workspace_revert,
             workspace_backup_info,
+            workspace_tree,
+            workspace_read,
             session_list,
             session_open,
             session_new

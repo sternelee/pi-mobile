@@ -2,6 +2,43 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 01:20 — M3 第三块：edit 工具 + 文件树/预览 + AGENTS.md ✅
+
+### edit 工具（审批自动复用）
+- Rust `run_tool("edit")`：`{path, oldText, newText, replaceAll?}` 精确替换；
+  未找到 / 多处出现且未 replaceAll → 工具错误；覆盖写走 write_with_backup
+  （备份自动生成，回滚链路复用）。`apply_edit` 抽为宿主函数，approval 与
+  工具执行共用同一语义。
+- approval `request()` 支持 edit diff：按 oldText/newText 在当前内容上模拟
+  替换后生成 unified diff，审批卡直接展示改动。
+- bundle：edit 工具注册（mutating → 审批点自动生效）；systemPrompt 更新
+  （列出 edit、建议优先 edit 改文件）；approval-test 扩展 edit 场景
+  （deny→错误、allow→替换、未命中→错误、只读工具零审批）。
+
+### 文件树 + 只读预览（D7）
+- `workspace_tree`（递归扁平列表，深度 ≤6 / 条目 ≤500）+ `workspace_read`
+  （只读预览，256KB 上限，jail 复用）；UI 标题栏 📁 → 左侧文件树面板
+  （目录蓝色加粗、缩进、⟳ 刷新）→ 点文件弹预览 overlay（等宽滚动，✕ 关闭）。
+
+### AGENTS.md 注入（pi 语义对齐）
+- boot/restore 后经 read 工具读 workspace/AGENTS.md，追加到 systemPrompt
+  （`# Project instructions (AGENTS.md)` 节）；无文件静默保持基线。
+  会话共享同一 workspace，无需按会话刷新。
+
+### 验证
+- cargo test 4/4（edit 唯一/未命中/replaceAll + 备份 + 树 + 预览 +
+  越狱拒绝）；approval-test 全绿（含 edit）；session-test、local-test 回归
+  通过；tsc ✅；桌面 + Android check ✅。真机待用户验证。
+
+### 下一步（M3 剩余）
+- [ ] 真机验证：edit 审批卡 diff、文件树/预览、AGENTS.md（放一个进 workspace）
+- [ ] google provider 重接（bun plugin 构建期内联 node-builtin import）
+- [ ] AGENTS.md / OAuth + deep-link（D9）
+- [ ] i18n / 深色模式 / 无障碍基线；checkpoint/恢复兜底（D8）
+- [ ] （已记录边界）agent 运行中切换会话、历史卡片无回滚 chip
+
+---
+
 ## 2026-09-06 01:00 — M3 第二块：会话列表/切换 + 工具卡回滚 ✅
 
 ### 会话管理（D7 首行落地）

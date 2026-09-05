@@ -42,6 +42,46 @@ fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
     Ok(std::path::Path::new(root).join(p))
 }
 
+/// 读 workspace 相对路径文件（approval 计算 diff 等宿主内部用途）。
+pub(crate) fn read_workspace_rel(rel: &str) -> Option<String> {
+    if rel.starts_with('/') || rel.split('/').any(|s| s == "..") {
+        return None;
+    }
+    let root = WORKSPACE_DIR.get()?;
+    std::fs::read_to_string(std::path::Path::new(root).join(rel)).ok()
+}
+
+/// 覆盖写 workspace 文件：已有内容先备份（回滚闭环），best-effort。
+fn write_with_backup(real: &std::path::Path, content: &str) -> Result<(), String> {
+    if real.exists() {
+        backup_existing(real);
+    }
+    std::fs::write(real, content).map_err(|e| format!("write: {e}"))
+}
+
+/// 精确文本替换（edit 工具与 approval diff 共用）。
+pub(crate) fn apply_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<String, String> {
+    let matches = content.matches(old).count();
+    if matches == 0 {
+        return Err("oldText not found in file".into());
+    }
+    if matches > 1 && !replace_all {
+        return Err(format!(
+            "oldText occurs {matches} times — extend it for uniqueness or set replaceAll=true"
+        ));
+    }
+    Ok(if replace_all {
+        content.replace(old, new)
+    } else {
+        content.replacen(old, new, 1)
+    })
+}
+
 // ── 写前备份与回滚（M3：「改文件 → 审批 → diff 可回滚」闭环）──────────
 
 /// 备份文件名：`{millis}__{rel 中 / 换 __}`；回滚时按同 rel 后缀找最新。
@@ -69,9 +109,71 @@ fn backup_existing(real: &std::path::Path) {
     let _ = std::fs::copy(real, dir.join(backup_name(&rel, millis)));
 }
 
+/// 文件树数据（workspace 递归展开，MVP：扁平列表 + 深度，UI 缩进渲染）。
+/// 深度 ≤6、条目 ≤500，防大目录拖垮桥。
+pub fn workspace_tree() -> Result<String, String> {
+    let root = WORKSPACE_DIR.get().ok_or("workspace not configured")?;
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    fn walk(
+        dir: &std::path::Path,
+        rel: &str,
+        depth: usize,
+        out: &mut Vec<serde_json::Value>,
+    ) {
+        const MAX_DEPTH: usize = 6;
+        const MAX_ENTRIES: usize = 500;
+        if depth > MAX_DEPTH || out.len() >= MAX_ENTRIES {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            if out.len() >= MAX_ENTRIES {
+                return;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let Ok(meta) = e.metadata() else { continue };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let is_dir = meta.is_dir();
+            out.push(serde_json::json!({
+                "path": child_rel,
+                "kind": if is_dir { "directory" } else { "file" },
+                "size": meta.len(),
+                "mtimeMs": mtime,
+            }));
+            if is_dir {
+                walk(&e.path(), &child_rel, depth + 1, out);
+            }
+        }
+    }
+    let root_path = std::path::Path::new(root);
+    walk(root_path, "", 1, &mut out);
+    serde_json::to_string(&out).map_err(|e| format!("serialize: {e}"))
+}
+
+/// 只读预览：读 workspace 文件（上限 256KB，文件树 UI 用）。
+pub fn workspace_read(rel: &str) -> Result<String, String> {
+    const MAX_PREVIEW: u64 = 256 * 1024;
+    let path = jail_path(rel)?;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("stat: {e}"))?;
+    if meta.len() > MAX_PREVIEW {
+        return Err(format!(
+            "file too large for preview: {} bytes (limit {MAX_PREVIEW})",
+            meta.len()
+        ));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))
+}
+
 /// 指定 workspace 相对路径的最新备份时间戳（无备份 → None）。
-pub fn latest_backup_millis(rel: &str) -> Option<u128> {
-    let dir = backup_dir()?;
+pub fn latest_backup_millis(rel: &str) -> Option<u128> {    let dir = backup_dir()?;
     let suffix = format!("__{}", rel.replace('/', "__"));
     let mut latest: Option<u128> = None;
     for e in std::fs::read_dir(&dir).ok()?.flatten() {
@@ -143,6 +245,45 @@ mod tests {
         revert_workspace_file("sub/a.md").unwrap();
         assert_eq!(std::fs::read_to_string(ws.join("sub/a.md")).unwrap(), "s1");
 
+        // edit：唯一替换 + 备份生成
+        run_tool(
+            "edit",
+            &json!({ "path": "t.txt", "oldText": "v1", "newText": "v3" }),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("t.txt")).unwrap(), "v3");
+        assert!(latest_backup_millis("t.txt").is_some()); // edit 前的 v1 备份
+        revert_workspace_file("t.txt").unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("t.txt")).unwrap(), "v1");
+
+        // edit：oldText 未找到 / 多处出现须 replaceAll
+        assert!(run_tool("edit", &json!({ "path": "t.txt", "oldText": "zzz", "newText": "x" })).is_err());
+        run_tool("write", &json!({ "path": "dup.txt", "content": "aa" })).unwrap();
+        assert!(run_tool("edit", &json!({ "path": "dup.txt", "oldText": "a", "newText": "b" })).is_err());
+        run_tool(
+            "edit",
+            &json!({ "path": "dup.txt", "oldText": "a", "newText": "b", "replaceAll": true }),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(ws.join("dup.txt")).unwrap(), "bb");
+
+        // 文件树
+        let tree = workspace_tree().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&tree).unwrap();
+        let paths: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["path"].as_str())
+            .collect();
+        assert!(paths.contains(&"t.txt"));
+        assert!(paths.contains(&"sub/a.md"));
+        assert!(paths.iter().any(|p| p.starts_with("sub"))); // 目录项也在树里
+
+        // 只读预览
+        assert_eq!(workspace_read("dup.txt").unwrap(), "bb");
+        assert!(workspace_read("../../etc/passwd").is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -164,12 +305,29 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
             }
-            // 写前备份（“diff 可回滚”闭环，M3）：覆盖已有文件前存旧内容
-            if path.exists() {
-                backup_existing(&path);
-            }
-            std::fs::write(&path, content).map_err(|e| format!("write: {e}"))?;
+            write_with_backup(&path, content)?;
             Ok(format!("wrote {} bytes to {}", content.len(), path.display()))
+        }
+        "edit" => {
+            let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
+            let old = args.get("oldText").and_then(|v| v.as_str()).ok_or("oldText?")?;
+            let new = args.get("newText").and_then(|v| v.as_str()).ok_or("newText?")?;
+            let replace_all = args
+                .get("replaceAll")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let content = std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
+            let updated = apply_edit(&content, old, new, replace_all)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+            }
+            write_with_backup(&path, &updated)?;
+            Ok(format!(
+                "edited {} ({} → {} bytes)",
+                path.display(),
+                content.len(),
+                updated.len()
+            ))
         }
         "ls" => {
             let path = jail_path(args.get("path").and_then(|v| v.as_str()).unwrap_or("."))?;

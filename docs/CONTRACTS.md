@@ -22,6 +22,8 @@
 | `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | M3 会话列表：`{id,createdAt,cwd,modifiedAt,entries,size}` |
 | `session_open` | `{ id }` | `{}` | M3 切换会话：bundle 内 repo.open + 回放进 agent 状态与 UI 历史 |
 | `session_new` | `{}` | `{}` | M3 新建空白会话（下一个 prompt 落新 JSONL） |
+| `workspace_tree` | `{}` | `{path,kind,size,mtimeMs}[]` | M3 文件树（深度 ≤6 / 条目 ≤500） |
+| `workspace_read` | `{ path }` | `string` | M3 只读预览（上限 256KB，jail 在 workspace 内） |
 
 ### 1.2 Events（Rust → UI）
 

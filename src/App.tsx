@@ -28,6 +28,13 @@ type Approval = {
   diff: string;
 };
 
+type TreeEntry = {
+  path: string;
+  kind: "file" | "directory";
+  size: number;
+  mtimeMs: number;
+};
+
 function fmtTime(millis: number): string {
   const d = new Date(millis);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -45,6 +52,9 @@ function App() {
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
   const [currentSession, setCurrentSession] = createSignal<string | null>(null);
+  const [filesOpen, setFilesOpen] = createSignal(false);
+  const [tree, setTree] = createSignal<TreeEntry[]>([]);
+  const [preview, setPreview] = createSignal<{ path: string; content: string } | null>(null);
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
   const updateItem = (toolCallId: string, patch: Partial<ChatItem>) =>
@@ -279,6 +289,25 @@ function App() {
     }
   }
 
+  async function openFiles() {
+    setDrawerOpen(false);
+    setFilesOpen(true);
+    try {
+      setTree(JSON.parse(await invoke<string>("workspace_tree")));
+    } catch (e) {
+      push({ role: "status", text: `workspace_tree failed: ${e}` });
+    }
+  }
+
+  async function previewFile(path: string) {
+    try {
+      const content = await invoke<string>("workspace_read", { path });
+      setPreview({ path, content });
+    } catch (e) {
+      push({ role: "status", text: `read failed: ${e}` });
+    }
+  }
+
   return (
     <main
       class="container"
@@ -297,6 +326,19 @@ function App() {
           onClick={openDrawer}
         >
           ☰
+        </button>
+        <button
+          style={{
+            background: "none",
+            border: "1px solid #3a4a5c",
+            color: "#c7d4e0",
+            "border-radius": "0.4rem",
+            padding: "0.15rem 0.5rem",
+            "font-size": "0.95rem",
+          }}
+          onClick={openFiles}
+        >
+          📁
         </button>
         <h1 style={{ "font-size": "1.1rem", flex: "1" }}>pi-mobile</h1>
         <Show when={currentSession()}>
@@ -517,6 +559,144 @@ function App() {
             <div style={{ color: "#7d8b99", "font-size": "0.8rem" }}>no sessions yet</div>
           </Show>
         </div>
+      </Show>
+
+      <Show when={filesOpen()}>
+        <div
+          style={{
+            position: "fixed",
+            inset: "0",
+            background: "rgba(0,0,0,0.45)",
+            "z-index": "10",
+          }}
+          onClick={() => setFilesOpen(false)}
+        />
+        <div
+          style={{
+            position: "fixed",
+            top: "0",
+            left: "0",
+            bottom: "0",
+            width: "82vw",
+            "max-width": "22rem",
+            background: "#141c26",
+            "z-index": "11",
+            padding: "0.8rem",
+            "overflow-y": "auto",
+            "border-right": "1px solid #3a4a5c",
+          }}
+        >
+          <div style={{ display: "flex", "align-items": "center", "margin-bottom": "0.6rem" }}>
+            <strong style={{ flex: "1" }}>Workspace</strong>
+            <button
+              style={{
+                background: "none",
+                border: "1px solid #3a4a5c",
+                color: "#c7d4e0",
+                "border-radius": "0.4rem",
+                padding: "0.2rem 0.5rem",
+              }}
+              onClick={openFiles}
+            >
+              ⟳
+            </button>
+          </div>
+          <For each={tree()}>
+            {(t) => (
+              <div
+                style={{
+                  padding: "0.3rem 0.4rem",
+                  "border-radius": "0.4rem",
+                  "font-size": "0.78rem",
+                  "font-family": "monospace",
+                  cursor: t.kind === "file" ? "pointer" : "default",
+                  color: t.kind === "directory" ? "#8ec6ff" : "#c7d4e0",
+                  "font-weight": t.kind === "directory" ? "bold" : "normal",
+                  "margin-left": `${(t.path.split("/").length - 1) * 0.8}rem`,
+                }}
+                onClick={() => t.kind === "file" && previewFile(t.path)}
+              >
+                {t.kind === "directory" ? "▸ " : "  "}
+                {t.path.split("/").pop()}
+                {t.kind === "file" ? ` (${t.size}B)` : "/"}
+              </div>
+            )}
+          </For>
+          <Show when={!tree().length}>
+            <div style={{ color: "#7d8b99", "font-size": "0.8rem" }}>workspace is empty</div>
+          </Show>
+        </div>
+      </Show>
+
+      <Show when={preview()}>
+        {(p) => (
+          <div
+            style={{
+              position: "fixed",
+              inset: "0",
+              background: "rgba(0,0,0,0.6)",
+              "z-index": "20",
+              display: "flex",
+              "flex-direction": "column",
+              padding: "0.8rem",
+            }}
+            onClick={() => setPreview(null)}
+          >
+            <div
+              style={{
+                background: "#141c26",
+                "border-radius": "0.6rem",
+                "border": "1px solid #3a4a5c",
+                flex: "1",
+                display: "flex",
+                "flex-direction": "column",
+                "min-height": "0",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  "align-items": "center",
+                  padding: "0.5rem 0.7rem",
+                  "border-bottom": "1px solid #232f3d",
+                }}
+              >
+                <strong style={{ flex: "1", "font-size": "0.8rem", "font-family": "monospace" }}>
+                  {p().path}
+                </strong>
+                <button
+                  style={{
+                    background: "none",
+                    border: "1px solid #3a4a5c",
+                    color: "#c7d4e0",
+                    "border-radius": "0.4rem",
+                    padding: "0.1rem 0.5rem",
+                  }}
+                  onClick={() => setPreview(null)}
+                >
+                  ✕
+                </button>
+              </div>
+              <pre
+                style={{
+                  flex: "1",
+                  overflow: "auto",
+                  margin: "0",
+                  padding: "0.6rem",
+                  "font-family": "monospace",
+                  "font-size": "0.72rem",
+                  "line-height": "1.4",
+                  "white-space": "pre-wrap",
+                  "word-break": "break-all",
+                  color: "#c7d4e0",
+                }}
+              >
+                {p().content}
+              </pre>
+            </div>
+          </div>
+        )}
       </Show>
 
       <form class="row" onSubmit={send} style={{ "padding-bottom": "0.8rem" }}>
