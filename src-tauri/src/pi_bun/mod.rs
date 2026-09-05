@@ -181,8 +181,24 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     let creds_path = format!("{data_dir}/creds.json");
     loopback::configure(&workspace, &creds_path);
 
+    // 异步引导（dynamic import 等）需要 VM tick 数拍——轮询 __pi_ready。
+    // null result 视为瞬时失败可重试（实测出现过）。
+    let eval_retry = |js: &str, url: &str| -> Result<(String, bool), String> {
+        let mut last = Err("no attempt".into());
+        for _ in 0..3 {
+            last = evaluate_blocking(js, url);
+            match &last {
+                Err(e) if e.contains("null result") => {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                _ => return last,
+            }
+        }
+        last
+    };
+
     let cfg_json = serde_json::json!({ "port": port, "dataDir": data_dir });
-    let (r, err) = evaluate_blocking(
+    let (r, err) = eval_retry(
         &format!("globalThis.__PI_CONFIG = {};", cfg_json),
         "pi:agent-config",
     )?;
@@ -190,12 +206,28 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
         return Err(format!("agent config eval threw: {r}"));
     }
 
-    let (r, err) = evaluate_blocking(AGENT_JS, "pi-bundle/dist/agent.js")?;
+    let (r, err) = eval_retry(AGENT_JS, "pi-bundle/dist/agent.js")?;
     if err {
         return Err(format!("agent bundle eval threw: {r}"));
     }
-    if r.trim() != "agent-main kicked" {
-        return Err(format!("agent bundle unexpected return: {r}"));
+
+    // 轮询 __pi_ready（CJS bundle 完成值是 wrapper 函数，不能用作就绪信号）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match evaluate_blocking("String(globalThis.__pi_ready === true)", "pi:agent-ready") {
+            Ok((r, false)) if r.trim() == "true" => break,
+            attempt => {
+                if std::time::Instant::now() > deadline {
+                    let boot = evaluate_blocking("String(globalThis.__pi_boot_error ?? '')", "pi:boot-err")
+                        .map(|(s, _)| s)
+                        .unwrap_or_default();
+                    return Err(format!(
+                        "agent not ready after 20s: last={attempt:?} boot_error={boot}"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
     }
     logcat("agent bundle kicked");
     Ok(())
