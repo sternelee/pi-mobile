@@ -91,6 +91,29 @@ var __require = typeof require === "function"
 
 s = s.replace("var __require = import.meta.require;", require_shim)
 s = s.replace("import.meta.url", '"file:///pi-bundle/agent.js"')
+
+# skal_evaluate runs source as a CLASSIC script: top-level static imports are
+# SyntaxErrors on device (bun keeps node builtins/external ws as real imports
+# for --target=bun, e.g. @google/genai's `import { createWriteStream } from
+# "fs"`). Rewrite them to __require shim lookups; the shim's Proxy stub keeps
+# unused provider paths (gemini) inert until actually called.
+import re
+
+def _import_to_var(m):
+    clause, spec = m.group(1).strip(), m.group(2)
+    req = f'__require("{spec}")'
+    if clause.startswith("* as "):
+        return f"var {clause[4:].strip()} = {req};"
+    if clause.startswith("{"):
+        return f"var {clause} = {req};"
+    if "," in clause:  # default + named/namespace
+        default, rest = clause.split(",", 1)
+        return f"var {default.strip()} = {req}; var {rest.strip()} = {req};"
+    return f"var {clause} = {req};"
+
+s = re.sub(r'^import\s+([^"\']+?)\s+from\s+["\']([^"\']+)["\'];$', _import_to_var, s, flags=re.M)
+s = re.sub(r'^import\s+["\']([^"\']+)["\'];$', r'__require("\1");', s, flags=re.M)
+
 open(p, "w").write(s)
 PYEOF
 
@@ -98,6 +121,13 @@ PYEOF
 if grep -q 'import\.meta' pi-bundle/dist/agent.js; then
   echo "ERROR: import.meta survived the patch" >&2
   grep -n 'import\.meta' pi-bundle/dist/agent.js | head -5 >&2
+  exit 1
+fi
+
+# Guard: no static import/export may survive (classic-script SyntaxError on device)
+if grep -qE '^(import|export) ' pi-bundle/dist/agent.js; then
+  echo "ERROR: static import/export survived the patch" >&2
+  grep -nE '^(import|export) ' pi-bundle/dist/agent.js | head -5 >&2
   exit 1
 fi
 

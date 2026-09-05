@@ -17,7 +17,9 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import * as anthropic from "@earendil-works/pi-ai/api/anthropic-messages";
 import * as openaiCompletions from "@earendil-works/pi-ai/api/openai-completions";
 import * as openaiResponses from "@earendil-works/pi-ai/api/openai-responses";
-import * as google from "@earendil-works/pi-ai/api/google-generative-ai";
+// bisect: google-generative-ai temporarily disabled (brings @google/genai node-builtin
+// imports that crash skal JSC on device). re-enable once gemini path is fixed.
+// import * as google from "@earendil-works/pi-ai/api/google-generative-ai";
 
 const LOOPBACK = `http://127.0.0.1:${globalThis.__PI_CONFIG?.port ?? 19999}`;
 
@@ -80,22 +82,46 @@ async function getApiKey(provider) {
 	return apiKeyCache;
 }
 
+// Default model for M2 device verification: DeepSeek V4 Flash (OpenAI-completions
+// compatible, reasoning). Catalog entry from @earendil-works/pi-ai providers.
+const DEFAULT_MODEL = {
+	id: "deepseek-v4-flash",
+	name: "DeepSeek V4 Flash",
+	api: "openai-completions",
+	provider: "deepseek",
+	baseUrl: "https://api.deepseek.com",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	contextWindow: 1000000,
+	maxTokens: 384000,
+	compat: {
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		maxTokensField: "max_tokens",
+		requiresReasoningContentOnAssistantMessages: true,
+		thinkingFormat: "deepseek",
+	},
+	thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", max: "max" },
+};
+
 const STREAM_SIMPLE = {
 	"anthropic-messages": anthropic.streamSimple,
 	"openai-completions": openaiCompletions.streamSimple,
 	"openai-responses": openaiResponses.streamSimple,
-	"google-generative-ai": google.streamSimple,
+	// "google-generative-ai": google.streamSimple,
 };
 
 const agent = new Agent({
+	initialState: { model: DEFAULT_MODEL, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), grep (search files). When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To read a file, call read with its path. The workspace is a sandboxed directory on the device.", tools },
 	streamFn: async (model, context, options) => {
 		const fn = STREAM_SIMPLE[model.api];
 		if (!fn) throw new Error(`unsupported api: ${model.api}`);
 		const apiKey = await getApiKey(model.provider);
+		hostcall("log", { msg: `streamFn: model=${model.id} api=${model.api} tools=${context.tools?.length ?? 0}` }).catch(() => {});
 		return fn(model, context, { ...options, apiKey });
 	},
 	getApiKey: (provider) => getApiKey(provider),
-	tools,
 });
 
 agent.subscribe((event) => {

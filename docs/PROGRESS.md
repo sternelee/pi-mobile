@@ -2,6 +2,52 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-05 22:00 — M2 出口条件达成 ✅（真机端到端对话 + 工具调用 round-trip）
+
+### 验证结果
+- **真机端到端对话跑通**：DeepSeek V4 Flash（OpenAI-completions API），
+  流式 delta → turn_end → agent_end 完整事件链，多轮对话无 error。
+- **工具调用 round-trip 验证通过**：模型调 `ls` 工具 → Rust loopback
+  执行 `run_tool("ls")` → 结果回传模型 → 最终回复。事件流：
+  `toolcall_start` → `toolcall_end` → `tool_execution_start` →
+  `tool_execution_end` → `message_start(toolResult)` → `turn_end`。
+- **agent bundle 真机 boot**：`runtime up` → `agent bundle kicked` →
+  `agent_event: agent_ready`，进程稳定存活。
+
+### 本轮修复（4 个关键 bug）
+1. **top-level 静态 import 触发 SyntaxError**（skal_evaluate 以 classic script
+   模式求值）：bun build `--target=bun` 保留 node-builtin 静态 import（来自
+   `@google/genai`：`import { createWriteStream } from "fs"` 等 7 行）。build.sh
+   新增后处理：用正则将 `import X from "m"` / `import * as ns` / `import { a }`
+   改写为 `var X = __require("m")`，并加 grep 守卫确保无 `^import` / `^export` 残留。
+2. **`@google/genai` 触发 skal JSC 原生段错误**（SIGSEGV fault `0xAAAAAAAAAAAAAAAA`，
+   WKFastMalloc 区）：禁用 google-generative-ai provider（注释掉 import 和
+   STREAM_SIMPLE 条目），bundle 从 2.47MB 降到 1.41MB，崩溃消除。
+3. **Agent tools 未传入 streamFn context**（`context.tools` 始终为空数组）：
+   pi-agent-core 的 Agent 从 `initialState.tools` 读取工具列表，而 agent-main.js
+   错误地将 `tools` 作为顶层 AgentOptions 传入。修复：移入 `initialState: { tools }`。
+   本地验证：`streamFn: tools count = 1`，`toolcall_end` 事件出现。
+4. **DeepSeek reasoning 模式下工具调用走 DSML 文本格式**（`<｜｜DSML｜｜tool_calls>`）
+   而非 OpenAI 标准 `tool_calls` 字段，pi-ai 不解析 DSML。设置
+   `thinkingLevel: "minimal"`（映射到 null = 关闭推理），工具调用恢复结构化 API。
+   补充 systemPrompt 告知模型有工具可用，避免模型拒绝调用。
+
+### 其他改动
+- loopback `dispatch("tool")` 加 logcat 诊断日志（hostcall tool: name/args/ok/err）。
+- logcat tag 从 `pi-bun` 改为 `pibun`（Honor Android 16 间歇性加密含连字符的 tag）。
+- 默认 model 配置为 deepseek-v4-flash（catalog 条目硬编码在 agent-main.js）。
+- `bun tauri android dev` 热重载未触发 Rust 重编译（watcher 未检测 include_str! 依赖
+  变更）；workaround：touch mod.rs 强制 cargo 重建。后续改用打包 APK 模式可避免。
+
+### 下一步（M2 收尾 → M3）
+- [ ] 提交 M2 收官 commit + 更新 PLAN.md 里程碑状态
+- [ ] 会话 JSONL 落盘 `app_data/sessions/`
+- [ ] 凭证迁 keystore（D4）
+- [ ] 重新接入 google provider（需解决 @google/genai JSC 崩溃，可能需 bun plugin
+  在 build 时内联 node-builtin 而非保留外部 import）
+
+---
+
 ## 2026-09-05 — M2 主体攻坚中（嵌入式 pi agent 上机）
 
 ### 已完成

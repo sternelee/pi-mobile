@@ -71,7 +71,7 @@ pub(crate) fn logcat(msg: &str) {
     }
     const INFO: i32 = 4;
     const ERROR: i32 = 5;
-    let tag = CString::new("pi-bun").unwrap();
+    let tag = CString::new("pibun").unwrap();
     let text = CString::new(msg.replace('\0', " ")).unwrap();
     unsafe {
         let prio = if msg.starts_with("ERROR") { ERROR } else { INFO };
@@ -316,4 +316,3 @@ pub fn smoke(data_dir: &str) -> Result<String, String> {
     }
     Ok(format!("{{\"hello\":{hello},\"smoke2\":{smoke2}}}"))
 }
-

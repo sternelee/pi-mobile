@@ -183,9 +183,16 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
         "tool" => {
             let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            logcat(&format!("hostcall tool: {name} args={}", args));
             match run_tool(name, &args) {
-                Ok(text) => serde_json::json!({ "text": text }),
-                Err(e) => serde_json::json!({ "error": e }),
+                Ok(text) => {
+                    logcat(&format!("hostcall tool: {name} ok ({} bytes)", text.len()));
+                    serde_json::json!({ "text": text })
+                }
+                Err(e) => {
+                    logcat(&format!("hostcall tool: {name} err: {e}"));
+                    serde_json::json!({ "error": e })
+                }
             }
         }
         "creds_get" => {
