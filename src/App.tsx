@@ -129,8 +129,13 @@ function App() {
                     .join("");
             if (m.role === "toolResult")
               return { role: "tool", text: `↳ ${text.slice(0, 200)}` } as ChatItem;
-            if (m.role === "assistant")
-              return { role: "assistant", text } as ChatItem;
+            if (m.role === "assistant") {
+              // 纯 toolCall 消息没有文本块 —— 汇总为工具卡行，避免空气泡
+              const calls = (m.content ?? [])
+                .filter((c: any) => c.type === "toolCall")
+                .map((c: any) => `⚒ ${c.name}(${JSON.stringify(c.arguments ?? {})})`);
+              return { role: "assistant", text: text || calls.join("\n") } as ChatItem;
+            }
             return { role: "user", text } as ChatItem;
           }),
         );
@@ -147,12 +152,13 @@ function App() {
   async function saveKey(e: Event) {
     e.preventDefault();
     if (!apiKey().trim()) return;
+    // 默认模型 deepseek-v4-flash（agent-main.js DEFAULT_MODEL），凭证按 provider 名存
     await invoke("set_creds", {
-      provider: "anthropic",
+      provider: "deepseek",
       apiKey: apiKey().trim(),
     });
     setApiKey("");
-    push({ role: "status", text: "API key saved (anthropic)" });
+    push({ role: "status", text: "API key saved (deepseek)" });
   }
 
   async function send(e: Event) {

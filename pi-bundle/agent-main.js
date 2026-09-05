@@ -50,17 +50,20 @@ function hostTool(name, label, description, parameters, opts = {}) {
 		label,
 		description,
 		parameters,
-		async execute(args) {
+		// pi AgentTool.execute 签名： (toolCallId, params, signal, onUpdate)
+		// —— 第一参数是调用 ID，参数在第二位（真机实测踩坑：ls 不依赖参数
+		// 掩盖了错位，write 报 path? 才暴露）。
+		async execute(toolCallId, params) {
 			try {
 				if (opts.mutating) {
-					const apr = await hostcall("approval_request", { tool: name, args });
+					const apr = await hostcall("approval_request", { tool: name, args: params });
 					if (apr.error) return errContent(`approval failed: ${apr.error}`);
 					if (apr.decision !== "allow")
 						return errContent(
-							`User did not approve the ${name} of "${args.path}" (${apr.reason ?? apr.decision}). Nothing was written — choose another approach or ask the user.`,
+							`User did not approve the ${name} of "${params?.path}" (${apr.reason ?? apr.decision}). Nothing was written — choose another approach or ask the user.`,
 						);
 				}
-				const r = await hostcall("tool", { name, args });
+				const r = await hostcall("tool", { name, args: params });
 				if (r.error) throw new Error(r.error);
 				return { content: [{ type: "text", text: r.text ?? "" }], details: {} };
 			} catch (e) {
@@ -88,7 +91,7 @@ const tools = [
 globalThis.__pi_tool_call = async (name, args) => {
 	const tool = tools.find((t) => t.name === name);
 	if (!tool) return { error: `unknown tool: ${name}` };
-	return tool.execute(args ?? {});
+	return tool.execute("test-call-id", args ?? {});
 };
 
 // ---- streamFn: dispatch on model.api via per-api simple stream functions ----
@@ -255,19 +258,35 @@ let restoredMessages = [];
 
 function persistMessage(message) {
 	if (!session || !message) return;
-	session.appendMessage(message).catch((e) =>
+	// agent 消息带显式 undefined 属性（如 toolResult 的 usage/addedToolNames），
+	// pi 的 assertJsonSerializable 直接拒绝（真机实测 "Durable payload contains
+	// undefined"）—— JSON 一轮净化：undefined 属性被丢弃，其余保真。
+	const clean = JSON.parse(JSON.stringify(message));
+	session.appendMessage(clean).catch((e) =>
 		emit({ type: "session_error", error: String(e?.message ?? e) }),
 	);
 }
 
-async function ensureSession() {
-	if (session) return session;
-	const created = await repo.create({ cwd: WORKSPACE });
-	session = created;
-	const meta = await created.getMetadata();
-	sessionId = meta.id;
-	emit({ type: "session_created", sessionId: meta.id });
-	return created;
+let ensurePromise = null;
+function ensureSession() {
+	// single-flight：并发首调（prompt 与 persist_direct 同帧）只建一个会话
+	if (session) return Promise.resolve(session);
+	if (!ensurePromise) {
+		ensurePromise = repo
+			.create({ cwd: WORKSPACE })
+			.then(async (created) => {
+				session = created;
+				const meta = await created.getMetadata();
+				sessionId = meta.id;
+				emit({ type: "session_created", sessionId: meta.id });
+				return created;
+			})
+			.catch((e) => {
+				ensurePromise = null; // 失败可重试
+				throw e;
+			});
+	}
+	return ensurePromise;
 }
 
 async function restoreLatest() {
@@ -279,8 +298,10 @@ async function restoreLatest() {
 	session = opened;
 	sessionId = latest.id;
 	const entries = await opened.findEntries();
+	// findEntries 新序列在前（真机实测），回放按 seq 升序
 	restoredMessages = entries
 		.filter((e) => e.type === "message" && e.message)
+		.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
 		.map((e) => e.message);
 	if (restoredMessages.length) {
 		agent.state.messages = restoredMessages;
@@ -333,6 +354,14 @@ globalThis.__pi_status = () =>
 // 重启恢复给 UI 的历史（boot 时从最新会话回放；同步求值用内存副本）
 globalThis.__pi_history = () =>
 	JSON.stringify({ sessionId, messages: restoredMessages });
+
+// 诊断/测试缝：直接把一条消息写入当前会话（走 persistMessage 同一净化路径）
+globalThis.__pi_persist_direct = (message) => {
+	ensureSession()
+		.then(() => persistMessage(message))
+		.catch(sessionPersistError);
+	return "started";
+};
 
 globalThis.__pi_ready = true;
 emit({ type: "agent_ready", tools: tools.map((t) => t.name) });

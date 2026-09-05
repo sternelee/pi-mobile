@@ -151,7 +151,23 @@ await import("./dist/agent.js");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 if (PHASE === "A") {
+	// 生产时序对齐：agent_init 会等 __pi_restored 才放行 prompt
+	const bootDeadline = Date.now() + 10_000;
+	while (!globalThis.__pi_restored && Date.now() < bootDeadline) await sleep(100);
 	globalThis.__pi_prompt(token);
+	// 真机回归：toolResult 带 undefined 属性时 pi 的 assertJsonSerializable 会拒绝
+	// （"Durable payload contains undefined"）—— persistMessage 净化后必须能落盘
+	globalThis.__pi_persist_direct({
+		role: "toolResult",
+		toolCallId: "call_test_1",
+		toolName: "ls",
+		content: [{ type: "text", text: "tool result survived" }],
+		details: {},
+		usage: undefined,
+		addedToolNames: undefined,
+		isError: false,
+		timestamp: Date.now(),
+	});
 	// poll until the user message is on disk (LLM call may fail — irrelevant)
 	const deadline = Date.now() + 15_000;
 	let hit = false;
@@ -160,7 +176,8 @@ if (PHASE === "A") {
 		try {
 			for (const dir of fsp.readdirSync(sessionsDir)) {
 				for (const f of fsp.readdirSync(path.join(sessionsDir, dir))) {
-					if (readFileSync(path.join(sessionsDir, dir, f), "utf8").includes(token)) hit = true;
+					const c = readFileSync(path.join(sessionsDir, dir, f), "utf8");
+					if (c.includes(token) && c.includes("tool result survived")) hit = true;
 				}
 			}
 		} catch {}
@@ -168,10 +185,10 @@ if (PHASE === "A") {
 	}
 	srv.close();
 	if (!hit) {
-		console.error("user message never hit disk. events:", JSON.stringify(events).slice(0, 800));
+		console.error("user message / sanitized toolResult never hit disk. events:", JSON.stringify(events).slice(0, 800));
 		process.exit(1);
 	}
-	console.log("PHASE A OK — user message persisted to session JSONL");
+	console.log("PHASE A OK — user message + sanitized toolResult persisted");
 	process.exit(0);
 }
 
@@ -198,8 +215,13 @@ if (PHASE === "B") {
 		console.error("restored messages missing token:", JSON.stringify(restored).slice(0, 600));
 		process.exit(1);
 	}
+	const toolResult = restored.messages.find((m) => m.role === "toolResult");
+	if (!toolResult || !JSON.stringify(toolResult.content).includes("tool result survived")) {
+		console.error("restored messages missing sanitized toolResult");
+		process.exit(1);
+	}
 	console.log(
-		`PHASE B OK — restored session ${restored.sessionId} with ${restored.messages.length} message(s), user content matches`,
+		`PHASE B OK — restored session ${restored.sessionId} with ${restored.messages.length} message(s), user + toolResult match`,
 	);
 	process.exit(0);
 }

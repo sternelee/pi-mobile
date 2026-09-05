@@ -2,6 +2,50 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 00:50 — 真机验证收官：审批流 + 重启恢复全链路 ✅（4 个真机 bug 修复）
+
+### 验证结果（Honor 真机，debug APK，`bun tauri android build --debug`）
+- **审批流闭环**：写文件 → 审批卡（diff）→ **Allow** → 写入执行 → 文件落盘；
+  点 **Always** 后 `policy.json` 持久化 `{"write":"auto"}`，后续写入免卡；
+  删除 policy.json + 重启恢复 ask——策略状态机真机行为全部符合设计。
+- **写前备份**：覆盖 `hello.txt` 自动生成 `backups/{millis}__hello.txt`。
+- **重启恢复**：杀进程/重装后 `session_restored`，UI "history loaded — N messages
+  from previous run"，会话随对话增长（7 → 27 条）持续落盘。
+- **真实 LLM 对话**：DeepSeek 流式（含 thinking 块）、ls/write 工具往返，
+  会话 JSONL 为 pi-v4 格式（header + message entries + usage/cost）。
+
+### 真机修复的 4 个 bug（本地测试没抓到、只有真机 LLM 全链路才暴露）
+1. **`AgentTool.execute` 签名错位（最重要）**：pi 的签名是
+   `execute(toolCallId, params, signal, onUpdate)` —— hostTool 把第一参数当
+   args 用了。ls 不依赖参数掩盖了错位，write 报 `Error: path?` 才暴露
+   （Rust 收到的 args 是工具调用 ID 字符串）。`__pi_tool_call` 测试缝也按
+   正确签名调用。教训：接口签名要对照 .d.ts，不能靠行为猜。
+2. **toolResult 落盘失败**：agent 消息带显式 undefined 属性（usage 等），
+   pi 的 assertJsonSerializable 拒绝 → "Durable payload contains undefined"。
+   persistMessage 先 JSON 净化（undefined 属性丢弃）。新增
+   `__pi_persist_direct` 测试缝 + session-test 覆盖该形状。
+3. **saveKey provider 错配**：UI 把 key 存在 anthropic 名下而默认模型是
+   deepseek —— 新装用户填 key 必失败（此前真机有旧数据所以没暴露）。
+4. **恢复历史倒序 + 空气泡**：findEntries 新序列在前 → 按 seq 升序重排；
+   纯 toolCall 的 assistant 消息渲染为 `⚒ name(args)` 摘要行。
+
+### 其他
+- `ensureSession` 单飞（并发首调只建一个会话——session-test 并发触发暴露）。
+- adb 驱动真机输入的坑：`adb shell input text` 的引号被 host shell 剥掉后
+  设备端按空格切词（只进第一个词）；空格需 `\ ` 转义，或由用户手动输入
+  （已约定：消息发送由用户操作，自动化负责构建/安装/日志/文件验证）。
+
+### 下一步（M3 剩余）
+- [ ] 会话列表/索引（Rust session_list + UI）、文件树、回滚按钮进工具卡
+- [ ] edit 工具 + 审批复用；Android bash 通道（M4 前置）
+- [ ] google provider 重接（bun plugin 构建期内联 node-builtin import）
+- [ ] AGENTS.md 随 workspace 生效；Provider OAuth + deep-link（D9）
+- [ ] i18n / 深色模式 / 无障碍基线；checkpoint/恢复兜底（D8）
+- [ ] （运维）bundle dist 变更后 Gradle 可能不重打包 → rm -rf
+  src-tauri/gen/android/app/build（本次未遇到，留存备忘）
+
+---
+
 ## 2026-09-05（深夜）— M3 开工：审批流闭环（write 审批 + diff + 可回滚）✅
 
 ### 审批流（M3 主线第一块，PLAN D2 policy-hook 落地）
