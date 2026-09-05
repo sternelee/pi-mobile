@@ -35,6 +35,16 @@ function App() {
             text: `agent ready — tools: ${(ev.tools ?? []).join(", ")}`,
           });
           break;
+        case "session_restored":
+          if (ev.messages > 0)
+            push({ role: "status", text: `restored session (${ev.messages} messages)` });
+          break;
+        case "session_created":
+          push({ role: "status", text: `new session ${String(ev.sessionId).slice(0, 8)}` });
+          break;
+        case "session_error":
+          push({ role: "status", text: `session persist error: ${ev.error}` });
+          break;
         case "boot_error":
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
           break;
@@ -88,6 +98,31 @@ function App() {
 
     try {
       await invoke("agent_init");
+      // 重启恢复：boot 时 bundle 已从最新 JSONL 会话回放，这里拉历史渲染
+      const h = JSON.parse(await invoke<string>("agent_history"));
+      const msgs = (h.messages ?? []) as any[];
+      if (msgs.length) {
+        setItems(
+          msgs.map((m) => {
+            const text =
+              typeof m.content === "string"
+                ? m.content
+                : (m.content ?? [])
+                    .filter((c: any) => c.type === "text")
+                    .map((c: any) => c.text)
+                    .join("");
+            if (m.role === "toolResult")
+              return { role: "tool", text: `↳ ${text.slice(0, 200)}` } as ChatItem;
+            if (m.role === "assistant")
+              return { role: "assistant", text } as ChatItem;
+            return { role: "user", text } as ChatItem;
+          }),
+        );
+        push({
+          role: "status",
+          text: `history loaded — ${msgs.length} messages from previous run`,
+        });
+      }
     } catch (e) {
       push({ role: "status", text: `agent_init failed: ${e}` });
     }

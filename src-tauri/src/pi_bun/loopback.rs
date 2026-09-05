@@ -12,13 +12,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static PORT: OnceLock<u16> = OnceLock::new();
 static WORKSPACE_DIR: OnceLock<String> = OnceLock::new();
-static CREDS_PATH: OnceLock<String> = OnceLock::new();
+static DATA_DIR: OnceLock<String> = OnceLock::new();
+static SESSIONS_DIR: OnceLock<String> = OnceLock::new();
 static EVENT_SINK: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
 
+/// 会话目录的 JS 侧虚拟根（agent-main.js hostFs 同款常量）。
+const SESSIONS_VIRTUAL_ROOT: &str = "/pi-sessions";
+
 /// 配置路径（lib.rs 初始化时调用一次）。
-pub fn configure(workspace_dir: &str, creds_path: &str) {
+pub fn configure(workspace_dir: &str, data_dir: &str) {
     WORKSPACE_DIR.set(workspace_dir.into()).ok();
-    CREDS_PATH.set(creds_path.into()).ok();
+    DATA_DIR.set(data_dir.into()).ok();
+    SESSIONS_DIR.set(format!("{data_dir}/sessions")).ok();
 }
 
 /// 注册 JS→WebView 事件转发（agent_event → tauri emit）。
@@ -118,15 +123,287 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
     }
 }
 
-/// 凭证：creds.json（M2 先文件态；M3 迁 keystore/Keychain，见 D4）。
+/// 凭证：keyring（D4；Android 为沙箱文件态），经 creds 模块。
 fn creds_get(provider: &str) -> Result<String, String> {
-    let path = CREDS_PATH.get().ok_or("creds not configured")?;
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
-    Ok(v.get(provider)
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string())
+    let data_dir = DATA_DIR.get().ok_or("data dir not configured")?;
+    Ok(crate::creds::get(data_dir, provider).unwrap_or_default())
+}
+
+// ── 会话 JSONL 的 fs hostcall（pi 原生 JsonlSessionRepo 的 FileSystem 后端）──
+//
+// JS 侧路径在 /pi-sessions 虚拟命名空间内；此处剥离前缀并 jail 到
+// {data_dir}/sessions。返回值镜像 pi 的 Result 形状
+// （{ok:true,value} / {ok:false,error:{code,message}}），JS 零转换透传。
+
+fn fs_ok(value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "ok": true, "value": value })
+}
+
+fn fs_err(code: &str, msg: String) -> serde_json::Value {
+    serde_json::json!({ "ok": false, "error": { "code": code, "message": msg } })
+}
+
+fn fs_io_err(e: std::io::Error) -> serde_json::Value {
+    use std::io::ErrorKind::*;
+    let code = match e.kind() {
+        NotFound => "not_found",
+        PermissionDenied => "permission_denied",
+        AlreadyExists => "invalid",
+        _ => "unknown",
+    };
+    fs_err(code, e.to_string())
+}
+
+/// 虚拟路径 → 沙箱真实路径。rel 为空表示根目录本身。
+fn fs_jail(rel: &str) -> Result<std::path::PathBuf, serde_json::Value> {
+    if rel.split('/').any(|s| s == "..") || rel.contains('\\') || rel.starts_with('/') {
+        return Err(fs_err(
+            "permission_denied",
+            format!("path outside sessions root: {rel}"),
+        ));
+    }
+    let root = SESSIONS_DIR
+        .get()
+        .ok_or_else(|| fs_err("unknown", "sessions dir not configured".into()))?;
+    Ok(std::path::Path::new(root).join(rel))
+}
+
+/// FileInfo（路径回填虚拟命名空间 —— repo 后续调用消费的是这里的 path）。
+fn fs_file_info(rel: &str, path: &std::path::Path, meta: std::fs::Metadata) -> serde_json::Value {
+    let kind = if meta.is_symlink() {
+        "symlink"
+    } else if meta.is_dir() {
+        "directory"
+    } else {
+        "file"
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let virtual_path = if rel.is_empty() {
+        SESSIONS_VIRTUAL_ROOT.to_string()
+    } else {
+        format!("{SESSIONS_VIRTUAL_ROOT}/{rel}")
+    };
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    serde_json::json!({
+        "name": name,
+        "path": virtual_path,
+        "kind": kind,
+        "size": meta.len(),
+        "mtimeMs": mtime_ms,
+    })
+}
+
+fn fs_op(payload: &serde_json::Value) -> serde_json::Value {
+    let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let path_arg =
+        |p: &serde_json::Value| -> Result<String, serde_json::Value> {
+            p.get("path")
+                .and_then(|v| v.as_str())
+                .map(strip_virtual_root)
+                .ok_or_else(|| fs_err("invalid", "path?".into()))
+        };
+    match op {
+        "readTextFile" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            match fs_jail(&rel).and_then(|p| {
+                std::fs::read_to_string(&p).map_err(fs_io_err)
+            }) {
+                Ok(s) => fs_ok(serde_json::json!(s)),
+                Err(e) => e,
+            }
+        }
+        "readTextLines" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let max = payload
+                .get("maxLines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(u64::MAX) as usize;
+            match fs_jail(&rel).and_then(|p| std::fs::read_to_string(&p).map_err(fs_io_err)) {
+                Ok(s) => fs_ok(serde_json::json!(
+                    s.lines().take(max).collect::<Vec<_>>()
+                )),
+                Err(e) => e,
+            }
+        }
+        "writeFile" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let Some(content) = payload.get("content").and_then(|v| v.as_str()) else {
+                return fs_err("invalid", "content? (string)".into());
+            };
+            match fs_jail(&rel)
+                .and_then(|p| std::fs::write(&p, content).map_err(fs_io_err))
+            {
+                Ok(()) => fs_ok(serde_json::json!(null)),
+                Err(e) => e,
+            }
+        }
+        "appendFile" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let Some(content) = payload.get("content").and_then(|v| v.as_str()) else {
+                return fs_err("invalid", "content? (string)".into());
+            };
+            use std::io::Write;
+            match fs_jail(&rel).and_then(|p| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&p)
+                    .and_then(|mut f| f.write_all(content.as_bytes()))
+                    .map_err(fs_io_err)
+            }) {
+                Ok(()) => fs_ok(serde_json::json!(null)),
+                Err(e) => e,
+            }
+        }
+        "renameFile" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let Some(dest) = payload.get("to").and_then(|v| v.as_str()) else {
+                return fs_err("invalid", "to?".into());
+            };
+            let dest = strip_virtual_root(dest);
+            match fs_jail(&rel).and_then(|p| {
+                fs_jail(&dest)
+                    .and_then(|d| std::fs::rename(&p, &d).map_err(fs_io_err))
+            }) {
+                Ok(()) => fs_ok(serde_json::json!(null)),
+                Err(e) => e,
+            }
+        }
+        "fileInfo" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            match fs_jail(&rel).and_then(|p| {
+                std::fs::symlink_metadata(&p)
+                    .map(|m| fs_file_info(&rel, &p, m))
+                    .map_err(fs_io_err)
+            }) {
+                Ok(v) => fs_ok(v),
+                Err(e) => e,
+            }
+        }
+        "listDir" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            match fs_jail(&rel).and_then(|p| std::fs::read_dir(&p).map_err(fs_io_err)) {
+                Ok(rd) => {
+                    let mut items = Vec::new();
+                    for e in rd.flatten() {
+                        let child_rel = if rel.is_empty() {
+                            e.file_name().to_string_lossy().into_owned()
+                        } else {
+                            format!("{rel}/{}", e.file_name().to_string_lossy())
+                        };
+                        if let Ok(m) = e.metadata() {
+                            items.push(fs_file_info(&child_rel, &e.path(), m));
+                        }
+                    }
+                    items.sort_by(|a, b| {
+                        a["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .cmp(b["name"].as_str().unwrap_or(""))
+                    });
+                    fs_ok(serde_json::json!(items))
+                }
+                Err(e) => e,
+            }
+        }
+        "exists" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            match fs_jail(&rel) {
+                Ok(p) => fs_ok(serde_json::json!(p.exists())),
+                Err(e) => e,
+            }
+        }
+        "createDir" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let recursive = payload
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match fs_jail(&rel).and_then(|p| {
+                if recursive {
+                    std::fs::create_dir_all(&p)
+                } else {
+                    std::fs::create_dir(&p)
+                }
+                .map_err(fs_io_err)
+            }) {
+                Ok(()) => fs_ok(serde_json::json!(null)),
+                Err(e) => e,
+            }
+        }
+        "remove" => {
+            let rel = match path_arg(payload) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            let recursive = payload
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match fs_jail(&rel).and_then(|p| {
+                if p.is_dir() && !p.is_symlink() {
+                    if recursive {
+                        std::fs::remove_dir_all(&p)
+                    } else {
+                        std::fs::remove_dir(&p)
+                    }
+                } else {
+                    std::fs::remove_file(&p)
+                }
+                .map_err(fs_io_err)
+            }) {
+                Ok(()) => fs_ok(serde_json::json!(null)),
+                Err(e) => e,
+            }
+        }
+        _ => fs_err("invalid", format!("unknown fs op: {op}")),
+    }
+}
+
+/// "/pi-sessions/x/y" → "x/y"；根本身 → ""。
+fn strip_virtual_root(p: &str) -> String {
+    if p == SESSIONS_VIRTUAL_ROOT {
+        String::new()
+    } else if let Some(rest) = p.strip_prefix(&format!("{SESSIONS_VIRTUAL_ROOT}/")) {
+        rest.to_string()
+    } else {
+        p.to_string()
+    }
 }
 
 
@@ -202,6 +479,7 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
                 _ => serde_json::json!({ "error": format!("no credential for provider '{provider}' — set it in the app") }),
             }
         }
+        "fs" => fs_op(payload),
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());

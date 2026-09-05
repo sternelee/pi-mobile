@@ -19,6 +19,12 @@ const srv = createServer((req, res) => {
 			res.end(JSON.stringify({ apiKey: process.env.ANTHROPIC_API_KEY ?? "sk-test-fake" }));
 		} else if (method === "tool") {
 			res.end(JSON.stringify({ text: `host-tool ${payload.name} ok` }));
+		} else if (method === "fs") {
+			// sessions dir: exists(根)=true、空目录，让 boot 恢复流程干净走完
+			const { op } = payload;
+			const empty =
+				op === "exists" ? "false" : op === "listDir" ? "[]" : op === "readTextLines" ? "[]" : "null";
+			res.end(JSON.stringify({ ok: true, value: JSON.parse(empty) }));
 		} else {
 			res.end('{"ok":true}');
 		}

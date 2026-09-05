@@ -2,6 +2,58 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-05（晚）— M2 收尾：会话 JSONL 落盘 + 凭证 keyring 化 ✅
+
+### 会话持久化（D3，pi 原生格式）
+- **方案**：bundle 内用 pi 自己的 `JsonlSessionRepo` + `Session`（`@earendil-works/pi-agent-core`
+  harness/session），`FileSystem` 能力经 **`fs` hostcall** 实现——磁盘 I/O 全部留在 Rust
+  （jail 到 `{data_dir}/sessions`）。真机 eval 上下文拿不到真实 `node:fs`（`__require` shim
+  是浏览器 stub），hostcall 边界本就是架构要求。
+- **格式兼容**：文件为 pi-v4 JSONL（首行 header `{kind:"header",version:4,...}`，
+  文件名 `{timestamp}_{uuid}.jsonl`，cwd 编码目录），与桌面 pi 会话同格式，D3 的
+  「桌面开题、手机续跑」后续可直接吃这个目录。
+- **落盘点**：用户消息在 `__pi_prompt`（先于 agent.prompt）、assistant 在 `message_end`、
+  tool 结果在 `turn_end`（不走 toolResult 的 message_end，避免双写）。
+- **重启恢复**：boot kick `restoreLatest()`（list → modifiedAt 最新 → open → findEntries
+  → 回放进 `agent.state.messages`），完成后置 `__pi_restored`；Rust `agent_init` 等
+  ready 后再等该标志（≤5s），UI 经新命令 `agent_history` 拉历史渲染。
+- **本机验证**：新增 `pi-bundle/session-test.js` 两阶段往返（A：prompt 落盘；B：新进程
+  同目录恢复 + v4 header 断言）——全绿。修复 `joinPath` 折叠斜杠 bug（repo 传
+  `["/", root, dir]` 会叠出 `//pi-sessions`，stripRoot 失配 → EISDIR）。
+
+### 凭证迁移（D4 部分）
+- 新增 `src-tauri/src/creds.rs`：**桌面/iOS 用 keyring**（apple-native/windows-native/
+  linux-native，service `pi-mobile`，account=provider），读取时自动迁移清理旧
+  `creds.json`；**Android（cfg 隔离）暂为沙箱文件态 0600**。
+- 关键事实：**keyring v3 没有 Android Keystore 后端**（支持 mac/win/linux/ios）。
+  Android 迁移需 tauri 插件经 JNI 调 Keystore，排 M3；keyring 依赖按 target 门控，
+  Android 构建不编译它。
+- `creds_get` hostcall / `set_creds` 命令切到 creds 模块；`loopback::configure` 改收
+  `data_dir`（内部派生 sessions 目录）。
+
+### 契约与文档
+- `docs/CONTRACTS.md` 更新到 M2 现状：commands（agent_init/prompt/status/history/
+  set_creds）、`pi-agent-event` 单事件通道、hostcall 全集（ping/log/tool/creds_get/
+  **fs**/agent_event）。
+- `docs/PLAN.md` M2 标记 ✅（出口条件达成），遗留项移 M3。
+
+### 验证
+- `bash pi-bundle/build.sh`：1.41MB，import/import.meta 守卫通过。
+- `bun pi-bundle/local-test.js`：boot 无回归。
+- `bun pi-bundle/session-test.js`：两阶段往返 ✅。
+- `cargo check`：桌面 + aarch64-linux-android 双目标 ✅（Android 需 NDK 环境变量，
+  本机 NDK 为 darwin-x86_64 版；`CC_aarch64_linux_android=<ndk>/…/aarch64-linux-android24-clang`）。
+- `bunx tsc --noEmit` ✅。
+
+### 下一步（M3 开工项）
+- [ ] 真机验证：重启恢复（杀进程重开 → 历史回显 + 续聊）
+- [ ] Android Keystore 凭证加密（tauri 插件 + JNI）
+- [ ] google provider 重接（bun plugin 构建期内联 @google/genai 的 node-builtin import）
+- [ ] 审批流（policy-hook + DiffApproval UI + policy 状态机，M3 主菜）
+- [ ] 会话列表 UI（Rust 侧 session_list 索引）
+
+---
+
 ## 2026-09-05 22:00 — M2 出口条件达成 ✅（真机端到端对话 + 工具调用 round-trip）
 
 ### 验证结果

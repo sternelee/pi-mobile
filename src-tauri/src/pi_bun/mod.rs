@@ -178,8 +178,9 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
 
     let workspace = format!("{data_dir}/workspace");
     std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace: {e}"))?;
-    let creds_path = format!("{data_dir}/creds.json");
-    loopback::configure(&workspace, &creds_path);
+    std::fs::create_dir_all(format!("{data_dir}/sessions"))
+        .map_err(|e| format!("sessions: {e}"))?;
+    loopback::configure(&workspace, data_dir);
 
     // 异步引导（dynamic import 等）需要 VM tick 数拍——轮询 __pi_ready。
     // null result 视为瞬时失败可重试（实测出现过）。
@@ -230,6 +231,20 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
         }
     }
     logcat("agent bundle kicked");
+
+    // 等会话恢复（boot kick 的 restoreLatest）完成，保证 agent_history 可读；
+    // 超时不致命（历史晚一点也还在 bundle 内存里）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match evaluate_blocking("String(globalThis.__pi_restored === true)", "pi:restored") {
+            Ok((r, false)) if r.trim() == "true" => break,
+            _ if std::time::Instant::now() > deadline => {
+                logcat("WARN session restore flag not set within 5s");
+                break;
+            }
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
     Ok(())
 }
 
@@ -251,6 +266,15 @@ pub fn agent_status() -> Result<String, String> {
     let (r, err) = evaluate_blocking("globalThis.__pi_status()", "pi:status")?;
     if err {
         return Err(format!("status eval threw: {r}"));
+    }
+    Ok(r)
+}
+
+/// 重启恢复：取 bundle 内已恢复的历史消息（boot 时从最新 JSONL 会话回放）。
+pub fn agent_history() -> Result<String, String> {
+    let (r, err) = evaluate_blocking("globalThis.__pi_history()", "pi:history")?;
+    if err {
+        return Err(format!("history eval threw: {r}"));
     }
     Ok(r)
 }

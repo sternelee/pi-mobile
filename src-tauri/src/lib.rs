@@ -1,4 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod creds;
 mod pi_bun;
 
 #[tauri::command]
@@ -53,17 +54,19 @@ async fn agent_status() -> Result<String, String> {
         .map_err(|e| format!("join: {e}"))?
 }
 
-/// M2：保存 provider 凭证（M2 文件态；M3 迁 keystore，见 D4）。
+/// M2 收尾：重启恢复 —— 取 boot 时从最新 JSONL 会话回放的历史消息。
+#[tauri::command]
+async fn agent_history() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(pi_bun::agent_history)
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+/// D4：保存 provider 凭证（桌面 keyring；Android 沙箱文件态，见 creds.rs）。
 #[tauri::command]
 fn set_creds(app: tauri::AppHandle, provider: String, api_key: String) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
-    let path = std::path::Path::new(&dir).join("creds.json");
-    let mut v: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}));
-    v[provider.as_str()] = serde_json::json!(api_key);
-    std::fs::write(&path, v.to_string()).map_err(|e| format!("write creds: {e}"))
+    creds::set(&dir, &provider, &api_key)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -89,6 +92,7 @@ pub fn run() {
             agent_init,
             agent_prompt,
             agent_status,
+            agent_history,
             set_creds
         ])
         .run(tauri::generate_context!())

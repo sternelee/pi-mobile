@@ -309,12 +309,24 @@ pi-mobile/
 - [ ] C ABI echo PoC：hostcall + 事件回调往返；真机 logcat 验证 bun 执行 hello-world JS
 - **出口条件**：真机 logcat 出现嵌入式 bun 的 JS 执行输出；桥往返（JSON 通道）< 5ms
 
-### M2 —— pi bundle 与最小聊天流（~2 周）
-- [ ] `pi-bundle/entry.ts`：pi-coding-agent 官方 bundle 在 libpi-bun 内以 headless/RPC 模式启动
-- [ ] `docs/CONTRACTS.md` 三份契约（UI↔Rust IPC / Rust↔bun 桥 / store 键空间）+ 双侧类型 + 契约测试
-- [ ] creds 服务（keyring crate）+ hostcall 凭证注入；`src/state/settings.ts`（store 封装 + onboarding 标记）
-- [ ] 最小聊天流 UI：onboarding（选 Provider → 填 Key）→ 对话 → 重启恢复（会话 JSONL 由 pi 原生落盘）
-- **出口条件**：真机完成一次真实 LLM 对话并重启恢复
+### M2 —— pi bundle 与最小聊天流（~2 周）✅（2026-09-05 出口条件达成）
+- [x] `pi-bundle/agent-main.js`：`@earendil-works/pi-agent-core` Agent 在 libpi-bun 内
+  headless 启动（kick+poll 契约；实际形态为 Agent 核心 + host 桥工具，非完整 pi-coding-agent
+  CLI——TUI 壳不适用移动端，agent loop/工具/会话全部上游真源）
+- [x] JS↔Rust 桥（loopback HTTP + hostcall，13ms 往返）；契约见 `docs/CONTRACTS.md`（M2 现状版）
+- [x] **会话 JSONL 落盘**（2026-09-05 收尾）：pi 原生 `JsonlSessionRepo` + hostcall `fs` 后端
+  （磁盘 I/O 留 Rust，jail 到 `app_data/sessions`）；pi-v4 格式与桌面兼容；
+  boot 自动回放最新会话，`agent_history` 供 UI 渲染；本机 `pi-bundle/session-test.js`
+  两阶段往返验证（落盘 → 新进程恢复 → v4 header 校验）
+- [x] creds 服务（D4 部分落地）：桌面 keyring（Keychain/Credential Manager/keyutils）+
+  旧 creds.json 迁移；**Android 暂为沙箱文件态（0600）**——keyring v3 无 Android Keystore
+  后端，迁移需 tauri 插件走 JNI，落 M3
+- [x] 最小聊天流 UI：API key 输入 → 对话（流式 delta/工具调用/状态气泡）→ 重启恢复
+- [x] **出口条件（真机，2026-09-05）**：DeepSeek V4 Flash 真实 LLM 对话 +
+  `ls` 工具调用 round-trip（Honor 真机，提交 `2facaec`）；重启恢复本机验证通过
+- 遗留 → M3：Android Keystore 凭证加密、google-generative-ai provider 重接
+  （@google/genai 触发 skal JSC SIGSEGV，需 bun plugin 构建期内联 node-builtin）、
+  会话列表 UI（Rust 侧索引）
 
 ### M3 —— 审批与产品化（~2-3 周）
 - [ ] `pi-bundle/policy-hook.ts`（pi extension）：write/edit/bash 审批上报 + DiffApproval UI + policy 状态机

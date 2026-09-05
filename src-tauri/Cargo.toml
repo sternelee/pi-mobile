@@ -29,3 +29,8 @@ libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
+# Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+

@@ -13,7 +13,7 @@
 // its own evaluation, before any later import would have run.
 import * as __piNodeStdlib from "node-stdlib-browser";
 globalThis.__PI_NODE_STDLIB = __piNodeStdlib;
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent, JsonlSessionRepo, FileError } from "@earendil-works/pi-agent-core";
 import * as anthropic from "@earendil-works/pi-ai/api/anthropic-messages";
 import * as openaiCompletions from "@earendil-works/pi-ai/api/openai-completions";
 import * as openaiResponses from "@earendil-works/pi-ai/api/openai-responses";
@@ -126,7 +126,157 @@ const agent = new Agent({
 
 agent.subscribe((event) => {
 	emit(event);
+	// D3 落盘：assistant 消息在 message_end、tool 结果在 turn_end 追加；
+	// agent_end 带全量消息，不重复落。toolResult 不走 message_end 以免双写。
+	if (event.type === "message_end" && event.message?.role === "assistant") {
+		persistMessage(event.message);
+	}
+	if (event.type === "turn_end") {
+		for (const tr of event.toolResults ?? []) persistMessage(tr);
+	}
 });
+
+// ---- session persistence: pi-native JSONL (D3) over host-backed fs ----
+// JsonlSessionRepo + Session are pi's own classes (format-compatible with
+// desktop sessions). Real disk I/O stays in Rust: `hostFs` implements the
+// FileSystem capability over the `fs` hostcall (jailed to {dataDir}/sessions).
+// Device constraint: `require` is unavailable in the eval context, so real
+// node:fs is unreachable from JS — the hostcall boundary is mandatory anyway.
+const SESSIONS_ROOT = "/pi-sessions"; // must match loopback.rs SESSIONS_VIRTUAL_ROOT
+const WORKSPACE = `${globalThis.__PI_CONFIG?.dataDir ?? "/data"}/workspace`;
+
+const fsOk = (value) => ({ ok: true, value });
+const fsFail = (code, message, path) => ({
+	ok: false,
+	error: new FileError(code, message, path),
+});
+
+async function fsCall(op, args, path) {
+	const r = await hostcall("fs", { op, ...args });
+	if (r.ok) return r.value;
+	throw Object.assign(new Error(r.error?.message ?? "fs error"), { code: r.error?.code ?? "unknown" });
+}
+
+const needRel = (p) => {
+	const rel = stripRoot(p);
+	if (rel === null) throw Object.assign(new Error(`path outside sessions namespace: ${p}`), { code: "invalid" });
+	return rel;
+};
+
+const stripRoot = (p) =>
+	p === SESSIONS_ROOT ? "" : p.startsWith(`${SESSIONS_ROOT}/`) ? p.slice(SESSIONS_ROOT.length + 1) : null;
+
+const toFsResult = async (path, fn) => {
+	try {
+		return fsOk(await fn());
+	} catch (e) {
+		return fsFail(e?.code ?? "unknown", e?.message ?? String(e), path);
+	}
+};
+
+const hostFs = {
+	async absolutePath(path) {
+		return fsOk(path.startsWith("/") ? path : `${SESSIONS_ROOT}/${path}`);
+	},
+	async joinPath(parts) {
+		// repo 传 ["/", root, dir, file] 之类的混合段：逐段去斜杠再折叠，
+		// 避免 "/pi-sessions" 前面叠出 "//"、"///" 让 stripRoot 失配。
+		const joined = parts
+			.map((s) => String(s ?? "").replace(/^\/+|\/+$/g, ""))
+			.filter((s) => s !== "" && s !== ".")
+			.join("/");
+		return fsOk(`/${joined}`);
+	},
+	readTextFile(path) {
+		return toFsResult(path, () => fsCall("readTextFile", { path: needRel(path) }, path));
+	},
+	readTextLines(path, options) {
+		return toFsResult(path, () =>
+			fsCall("readTextLines", { path: needRel(path), maxLines: options?.maxLines }, path),
+		);
+	},
+	writeFile(path, content) {
+		if (typeof content !== "string") return Promise.resolve(fsFail("not_supported", "binary write unsupported over hostcall", path));
+		return toFsResult(path, () => fsCall("writeFile", { path: needRel(path), content }, path));
+	},
+	appendFile(path, content) {
+		if (typeof content !== "string") return Promise.resolve(fsFail("not_supported", "binary write unsupported over hostcall", path));
+		return toFsResult(path, () => fsCall("appendFile", { path: needRel(path), content }, path));
+	},
+	renameFile(sourcePath, destinationPath) {
+		return toFsResult(sourcePath, () =>
+			fsCall("renameFile", { path: needRel(sourcePath), to: needRel(destinationPath) }, sourcePath),
+		);
+	},
+	fileInfo(path) {
+		return toFsResult(path, () => fsCall("fileInfo", { path: needRel(path) }, path));
+	},
+	listDir(path) {
+		return toFsResult(path, () => fsCall("listDir", { path: needRel(path) }, path));
+	},
+	exists(path) {
+		return toFsResult(path, () => fsCall("exists", { path: needRel(path) }, path));
+	},
+	createDir(path, options) {
+		return toFsResult(path, () =>
+			fsCall("createDir", { path: needRel(path), recursive: options?.recursive ?? false }, path),
+		);
+	},
+	remove(path, options) {
+		return toFsResult(path, () =>
+			fsCall("remove", { path: needRel(path), recursive: options?.recursive ?? false }, path),
+		);
+	},
+};
+
+const repo = new JsonlSessionRepo({ fs: hostFs, sessionsRoot: SESSIONS_ROOT });
+let session = null;
+let sessionId = null;
+let restoredMessages = [];
+
+function persistMessage(message) {
+	if (!session || !message) return;
+	session.appendMessage(message).catch((e) =>
+		emit({ type: "session_error", error: String(e?.message ?? e) }),
+	);
+}
+
+async function ensureSession() {
+	if (session) return session;
+	const created = await repo.create({ cwd: WORKSPACE });
+	session = created;
+	const meta = await created.getMetadata();
+	sessionId = meta.id;
+	emit({ type: "session_created", sessionId: meta.id });
+	return created;
+}
+
+async function restoreLatest() {
+	const metas = await repo.list();
+	if (!metas.length) return;
+	metas.sort((a, b) => b.modifiedAt - a.modifiedAt);
+	const latest = metas[0];
+	const opened = await repo.open(latest);
+	session = opened;
+	sessionId = latest.id;
+	const entries = await opened.findEntries();
+	restoredMessages = entries
+		.filter((e) => e.type === "message" && e.message)
+		.map((e) => e.message);
+	if (restoredMessages.length) {
+		agent.state.messages = restoredMessages;
+	}
+	emit({ type: "session_restored", sessionId: latest.id, messages: restoredMessages.length });
+}
+
+const sessionPersistError = (e) =>
+	emit({ type: "session_error", error: String(e?.message ?? e) });
+// agent_init 等 __pi_restored 再返回，保证 UI 的 agent_history 读到回放结果
+restoreLatest()
+	.catch(sessionPersistError)
+	.finally(() => {
+		globalThis.__pi_restored = true;
+	});
 
 // ---- host-facing controls (kick+poll contract) ----
 let lastError = null;
@@ -137,6 +287,12 @@ globalThis.__pi_prompt = (text) => {
 		const t = typeof text === "string" && text.trim().startsWith("{") ? JSON.parse(text) : String(text);
 		busy = true;
 		lastError = null;
+		// 用户消息先落会话（ensureSession 异步建会话；存储内部队列保证顺序）
+		const userMsg =
+			typeof t === "string" ? { role: "user", content: t, timestamp: Date.now() } : t;
+		ensureSession()
+			.then((s) => s.appendMessage(userMsg))
+			.catch(sessionPersistError);
 		agent
 			.prompt(t)
 			.catch((e) => {
@@ -154,6 +310,10 @@ globalThis.__pi_prompt = (text) => {
 
 globalThis.__pi_status = () =>
 	JSON.stringify({ busy, lastError, queued: agent.hasQueuedMessages() });
+
+// 重启恢复给 UI 的历史（boot 时从最新会话回放；同步求值用内存副本）
+globalThis.__pi_history = () =>
+	JSON.stringify({ sessionId, messages: restoredMessages });
 
 globalThis.__pi_ready = true;
 emit({ type: "agent_ready", tools: tools.map((t) => t.name) });
