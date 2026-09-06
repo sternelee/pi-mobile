@@ -106,6 +106,14 @@ fn mcp_remove(app: tauri::AppHandle, name: String) -> Result<(), String> {
     mcp::remove(&dir, &name)
 }
 
+/// M4：热重连 MCP 服务器（改配置后立即可用，无需重启）。
+#[tauri::command]
+async fn mcp_reconnect() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(pi_bun::mcp_reconnect)
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
 /// 扩展：回填 ask_user 答案（JSON：{response: ...} 或 {response: null, cancelled: true}）。
 /// 经 resolver 反向 skal_evaluate 注入运行时 —— 必须 off main thread。
 #[tauri::command]
@@ -205,7 +213,8 @@ pub fn run() {
             session_new,
             mcp_list,
             mcp_add,
-            mcp_remove
+            mcp_remove,
+            mcp_reconnect
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

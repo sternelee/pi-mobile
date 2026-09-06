@@ -501,12 +501,19 @@ function App() {
       setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
       setMcpName("");
       setMcpUrl("");
-      push({
-        role: "status",
-        text: "MCP server saved — reconnects on next app start",
-      });
+      push({ role: "status", text: `mcp ${mcpName() || "server"} saved — reconnecting…` });
+      await invoke("mcp_reconnect");
     } catch (e) {
       push({ role: "status", text: `mcp_add failed: ${e}` });
+    }
+  }
+
+  async function reconnectMcp() {
+    push({ role: "status", text: "reconnecting mcp servers…" });
+    try {
+      await invoke("mcp_reconnect");
+    } catch (e) {
+      push({ role: "status", text: `mcp_reconnect failed: ${e}` });
     }
   }
 
@@ -888,7 +895,12 @@ function App() {
             </Show>
 
             <div class="mt-4">
-              <strong class="text-sm">MCP servers</strong>
+              <div class="flex items-center justify-between">
+                <strong class="text-sm">MCP servers</strong>
+                <Button variant="ghost" size="sm" class="h-7 text-xs" onClick={reconnectMcp}>
+                  ⟳ Reconnect
+                </Button>
+              </div>
               <For each={mcpServers()}>
                 {(s) => (
                   <div class="item-card">
@@ -922,9 +934,7 @@ function App() {
                   Add server
                 </Button>
               </form>
-              <div class="item-sub mt-1">
-                tools register on next app start · calls require approval
-              </div>
+              <div class="item-sub mt-1">calls require approval · ⟳ Reconnect applies config changes</div>
             </div>
           </div>
         </SheetContent>

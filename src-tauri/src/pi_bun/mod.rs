@@ -322,6 +322,15 @@ pub fn agent_stop() -> Result<(), String> {
     Ok(())
 }
 
+/// M4：热重连 MCP 服务器（改配置后无需重启 App）。
+pub fn mcp_reconnect() -> Result<(), String> {
+    let (r, err) = evaluate_blocking("globalThis.__pi_mcp_reconnect()", "pi:mcp-reconnect")?;
+    if err {
+        return Err(format!("mcp reconnect eval threw: {r}"));
+    }
+    Ok(())
+}
+
 /// PoC 冒烟 v2：初始化 → 注入配置 → 安装桥 → loopback hostcall 往返。
 /// 注意：`skal_evaluate` 同步阻塞（会等待 Promise 落定），调用方须在
 /// blocking 线程（本函数由 async command 经 spawn_blocking 调用）。

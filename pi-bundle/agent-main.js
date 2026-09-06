@@ -314,7 +314,8 @@ function mcpTool(server, tool) {
 	};
 }
 
-// boot 后异步连接所有已配置的 MCP 服务器并注册工具（挂在真实网络 I/O 上）
+// boot 后异步连接所有已配置的 MCP 服务器并注册工具（挂在真实网络 I/O 上）。
+// 幂等：重连时先剔除旧 mcp__ 工具再并入新的。
 async function connectMcpServers() {
 	try {
 		const cfg = await hostcall("mcp_config", {}, { noTimeout: true });
@@ -335,15 +336,20 @@ async function connectMcpServers() {
 				emit({ type: "mcp_error", server: s.name, error: String(e?.message ?? e) });
 			}
 		}
-		if (mcpTools.length) {
-			agent.state.tools = [...tools, ...mcpTools];
-			emit({ type: "mcp_tools_registered", count: mcpTools.length });
-		}
+		const existing = (agent.state.tools ?? []).filter((t) => !t.name.startsWith("mcp__"));
+		agent.state.tools = [...existing, ...mcpTools];
+		emit({ type: "mcp_tools_registered", count: mcpTools.length });
 	} catch (e) {
 		emit({ type: "mcp_error", server: "(config)", error: String(e?.message ?? e) });
 	}
 }
 connectMcpServers().catch(() => {});
+
+// 抽屉"Reconnect"按钮：改完服务器配置后热重连，无需重启 App
+globalThis.__pi_mcp_reconnect = () => {
+	connectMcpServers().catch(() => {});
+	return "started";
+};
 
 // ask_user 的 kick+事件注入：Rust 在用户作答后经 skal_evaluate 调
 // __pi_ask_resolve(id, answerJson) 反向解析 pending promise。返回两拍后才
