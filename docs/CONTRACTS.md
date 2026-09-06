@@ -26,7 +26,12 @@
 | `session_new` | `{}` | `{}` | M3 新建空白会话（下一个 prompt 落新 JSONL） |
 | `mcp_list` / `mcp_add` / `mcp_remove` | `{}` / `{ name, url }` / `{ name }` | `Server[]` / `{}` / `{}` | M4：MCP 服务器配置管理（重启后生效） |
 | `goal_set` / `goal_clear` | `{ objective }` / `{}` | `{}` | M4：持久目标设置/清除（存 goal.json） |
-| `pi_call_global` | `{ fnName, arg }` | `string` | 命令类插件后端：调用 bundle 全局（`__pi_plan_start` / `__pi_btw_start` / `__pi_goal_apply`，均为 kick 语义同步返回） |
+| `pi_call_global` | `{ fnName, arg }` | `string` | 命令类插件后端：调用 bundle 全局（`__pi_plan_start` / `__pi_btw_start` / `__pi_goal_apply` / `__pi_skills_apply`，均为 kick 语义同步返回） |
+| `skills_list` | `{}` | `SkillMeta[]` | D12：技能包列表（`{id,name,description,source,version,checksum,enabled,installedAt}`） |
+| `skills_install` | `{ url }` | `SkillMeta` | D12：https 直链 SKILL.md 或 github.com/{owner}/{repo}[/tree/{ref}]（zipball）；网络操作，off main thread |
+| `skills_toggle` | `{ id, enabled }` | `{}` | D12：启停（禁用 = 不注入） |
+| `skills_remove` | `{ id }` | `{}` | D12：删除（连目录带 registry 项） |
+| `skills_reconnect` | `{}` | `{}` | D12：热生效——kick bundle `__pi_skills_apply` 重新注入 |
 | `workspace_tree` | `{}` | `{path,kind,size,mtimeMs}[]` | M3 文件树（深度 ≤6 / 条目 ≤500） |
 | `workspace_read` | `{ path }` | `string` | M3 只读预览（上限 256KB，jail 在 workspace 内） |
 
@@ -58,6 +63,7 @@
 | `ask_user_register` | 同 `ask_user` | `{ id, state: "pending"/"cancelled" }`（立即返回） | ask_user 的 kick+事件注入形态（禁长挂起 fetch）；作答经 `ask_user_respond` → `__pi_ask_resolve` 注入 |
 | `mcp_config` | `{}` | `{ servers: [{name, url}] }` | M4：MCP 服务器配置（存 `{data_dir}/mcp.json`）；bundle boot 时逐个 streamable-http 连接，工具注册为 `mcp__<server>__<tool>`（默认 ask 审批） |
 | `goal_get` | `{}` | `{ objective: string \| null }` | 扩展能力层 #3（pi-goal 移动原生化）：boot 注入 systemPrompt "Current goal" 节；持久化 `{data_dir}/goal.json` |
+| `skills_config` | `{}` | `{ skills: [{id,name,description,content}] }` | D12：启用中的技能全集（禁用已由宿主过滤）；bundle 注入 systemPrompt "# Skills" 节；总预算 64KB |
 
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 

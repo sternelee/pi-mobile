@@ -29,6 +29,10 @@ libloading = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+# D12 skills 安装器：reqwest 已在依赖树内（tauri-plugin-http），显式声明以直接用
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。

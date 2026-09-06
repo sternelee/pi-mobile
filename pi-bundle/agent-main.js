@@ -1016,15 +1016,21 @@ const BASE_SYSTEM_PROMPT = () =>
 		.split("\n\n# Project instructions")[0]
 		.split("\n\n# Current goal")[0]
 		.split("\n\n# Todo list")[0]
+		.split("\n\n# Skills")[0]
 		.trim();
 
-// AGENTS.md + 持久目标（pi-goal 移动原生化）统一组装 systemPrompt
+// AGENTS.md + 持久目标（pi-goal 移动原生化）+ Skills（D12）统一组装 systemPrompt
 let agentsMdCache = null;
 let currentGoal = null;
+let skillsCache = [];
 
 async function applySystemPrompt() {
 	let prompt = BASE_SYSTEM_PROMPT();
 	prompt += `\n\n# Todo list\n\nManage a task list to track multi-step progress (the \`todo\` tool):\n${TODO_PROMPT_GUIDELINES.map((g) => `- ${g}`).join("\n")}`;
+	if (skillsCache.length)
+		prompt += `\n\n# Skills\n\n${skillsCache
+			.map((s) => `## ${s.name} — ${s.description}\n\n${s.content}`)
+			.join("\n\n")}`;
 	if (agentsMdCache) prompt += `\n\n# Project instructions (AGENTS.md)\n\n${agentsMdCache}`;
 	if (currentGoal)
 		prompt += `\n\n# Current goal\n\nWork persistently toward this objective across turns until the user clears it: ${currentGoal}`;
@@ -1057,6 +1063,23 @@ globalThis.__pi_goal_apply = () => {
 	return "started";
 };
 
+// Skills（D12）：启用中的技能包注入（宿主 skills.rs 安装/启停，此处只消费）。
+// kick 模式：__pi_skills_apply 立即返回，skills_applied 事件携带注入数量。
+async function refreshSkills() {
+	try {
+		const r = await hostcall("skills_config", {}, { noTimeout: true });
+		skillsCache = r.skills ?? [];
+	} catch {
+		skillsCache = [];
+	}
+	await applySystemPrompt();
+	emit({ type: "skills_applied", count: skillsCache.length });
+}
+globalThis.__pi_skills_apply = () => {
+	refreshSkills().catch(() => {});
+	return "started";
+};
+
 const sessionPersistError = (e) =>
 	emit({ type: "session_error", error: String(e?.message ?? e) });
 // agent_init 等 __pi_restored 再返回，保证 UI 的 agent_history 读到回放结果
@@ -1067,6 +1090,7 @@ restoreLatest()
 	});
 refreshAgentsMd().catch(() => {});
 refreshGoal().catch(() => {});
+refreshSkills().catch(() => {});
 
 // ── 命令类插件后端：/plan（只读规划）与 /btw（旁路问答）──
 // kick+事件回投模式：立即返回，嵌套 Agent 与主流式并行跑（共享 bun 事件循环，

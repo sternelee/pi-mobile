@@ -2,6 +2,45 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 14:04 — M4：Skills 管理（D12）✅
+
+### Rust `skills.rs`（安装器 + registry + 宿主过滤）
+- **存储**：`{data_dir}/skills/<id>/SKILL.md`（+ 资源文件）+ `registry.json`
+  （id/name/description/source/version/checksum/enabled/installedAt）。
+- **安装来源（v1）**：https 直链 SKILL.md（frontmatter 必须），或
+  `github.com/{owner}/{repo}[/tree/{ref}]` → archive zipball 下载解包，
+  取路径最浅的 SKILL.md 所在目录整体入包。**不引 git2-rs**——原生构建在
+  Android NDK 有风险（@google/genai / @napi-rs keyring 同族教训），zipball
+  覆盖 github 主流场景；其余 git host 暂不支持。供应链：sha256 checksum、
+  version/ref 记录（更新 = 重装同 id）、下载 8MB / 单文件 256KB 上限、
+  zip-slip 防护。依赖新增 zip/sha2/reqwest（reqwest 本就在依赖树内）。
+- **命令**：skills_list / skills_install（网络，spawn_blocking）/
+  skills_toggle / skills_remove / skills_reconnect（kick `__pi_skills_apply`
+  热生效，复用已修复注册的 pi_call_global 通道）。
+- **注入预算**：hostcall `skills_config` 只返回启用中的技能（宿主过滤），
+  单技能 256KB、总预算 64KB——上下文成本按 D12 预留用量可视化联动。
+
+### bundle + UI
+- systemPrompt 组装追加 "# Skills" 节（`## name — description` + 正文，
+  BASE_SYSTEM_PROMPT 同步剥离防叠加）；boot 即注入，`__pi_skills_apply`
+  热生效（skills_applied 事件带注入数量）。
+- 会话抽屉 Skills 管理节（镜像 MCP 节）：列表（启停状态/version/checksum）、
+  Enable/Disable、Remove、URL 安装表单（Installing… 态）。
+
+### 测试
+- Rust 11/11（新增 4 个 skills 单测：raw md 安装与 registry 往返、zipball
+  最浅 SKILL.md 胜出 + 资源随行、下载 URL 形态解析、注入跳过禁用/目录缺失）；
+  aarch64-linux-android 交叉编译 check ✅（新依赖上机无忧）。
+- 新增 `pi-bundle/skills-test.js`：enabled-only 注入、空配置移除节、
+  热重载再注入、skills_applied 事件——全绿。全回归 7 项 ✅；tsc ✅。
+
+### 下一步
+- [ ] 真机验证：安装 github 技能包 → 注入 → 启停热生效 → 删除
+- [ ] M4 剩余：Android 前台服务保流、通知；自动续跑（autoContinue 带上限）；
+      MCP per-server 审批粒度
+- [ ] Skills 后续（D12 完整版）：内置推荐目录、版本 pin 升级检查、
+      作用域（全局/单 workspace）、用量可视化联动
+
 ## 2026-09-06 15:40 — 扩展能力层 IV：@juicesharp/rpiv-todo 移动原生化 ✅
 
 ### 上游语义（tool-schema.md 逐条对齐，模型视角不变）

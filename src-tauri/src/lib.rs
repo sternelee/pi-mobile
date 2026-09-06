@@ -6,6 +6,7 @@ mod goal;
 mod mcp;
 mod pi_bun;
 mod sessions;
+mod skills;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -93,6 +94,43 @@ fn approval_respond(request_id: String, decision: String) -> Result<(), String> 
 fn mcp_list(app: tauri::AppHandle) -> Result<String, String> {
     let dir = app_data_dir(&app)?;
     mcp::list(&dir)
+}
+
+/// D12 Skills：列表 / URL 安装（网络，off main thread）/ 启停 / 删除。
+#[tauri::command]
+fn skills_list(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    skills::list(&dir)
+}
+
+#[tauri::command]
+async fn skills_install(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || skills::install(&dir, &url))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map(|entry| entry.to_string())
+}
+
+#[tauri::command]
+fn skills_toggle(app: tauri::AppHandle, id: String, enabled: bool) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    skills::toggle(&dir, &id, enabled)
+}
+
+#[tauri::command]
+fn skills_remove(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    skills::remove(&dir, &id)
+}
+
+/// D12：热生效——改完 registry 后重新注入（bundle `__pi_skills_apply` kick）。
+#[tauri::command]
+async fn skills_reconnect() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| pi_bun::call_string_global("__pi_skills_apply", ""))
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+    Ok(())
 }
 
 #[tauri::command]
@@ -252,7 +290,12 @@ pub fn run() {
             goal_get,
             goal_set,
             goal_clear,
-            pi_call_global
+            pi_call_global,
+            skills_list,
+            skills_install,
+            skills_toggle,
+            skills_remove,
+            skills_reconnect
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

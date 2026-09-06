@@ -84,6 +84,17 @@ type TodoTask = {
   owner?: string;
 };
 
+type SkillMeta = {
+  id: string;
+  name: string;
+  description: string;
+  source: string;
+  version: string;
+  checksum: string;
+  enabled: boolean;
+  installedAt: number;
+};
+
 const SUGGESTIONS = [
   "List my workspace files",
   "Create hello.py that prints a greeting",
@@ -123,6 +134,9 @@ function App() {
   const [mcpUrl, setMcpUrl] = createSignal("");
   const [mcpTimeout, setMcpTimeout] = createSignal("");
   const [mcpHeaders, setMcpHeaders] = createSignal("");
+  const [skills, setSkills] = createSignal<SkillMeta[]>([]);
+  const [skillUrl, setSkillUrl] = createSignal("");
+  const [installingSkill, setInstallingSkill] = createSignal(false);
   const [currentSession, setCurrentSession] = createSignal<string | null>(null);
   const [filesOpen, setFilesOpen] = createSignal(false);
   const [tree, setTree] = createSignal<TreeEntry[]>([]);
@@ -649,8 +663,57 @@ function App() {
     try {
       setSessions(JSON.parse(await invoke<string>("session_list")));
       setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
+      setSkills(JSON.parse(await invoke<string>("skills_list")));
     } catch (e) {
       push({ role: "status", text: `session_list failed: ${e}` });
+    }
+  }
+
+  // ── Skills（D12）：URL 安装 / 启停 / 删除，改完经 skills_reconnect 热注入 ──
+  async function refreshSkills() {
+    try {
+      setSkills(JSON.parse(await invoke<string>("skills_list")));
+    } catch (e) {
+      push({ role: "status", text: `skills_list failed: ${e}` });
+    }
+  }
+
+  async function installSkill(e: Event) {
+    e.preventDefault();
+    const url = skillUrl().trim();
+    if (!url || installingSkill()) return;
+    setInstallingSkill(true);
+    try {
+      const entry = JSON.parse(await invoke<string>("skills_install", { url }));
+      await invoke("skills_reconnect");
+      await refreshSkills();
+      setSkillUrl("");
+      push({ role: "status", text: `skill installed: ${entry.id} (${entry.version})` });
+    } catch (err) {
+      push({ role: "status", text: `skills_install failed: ${err}` });
+    } finally {
+      setInstallingSkill(false);
+    }
+  }
+
+  async function toggleSkill(id: string, enabled: boolean) {
+    try {
+      await invoke("skills_toggle", { id, enabled });
+      await invoke("skills_reconnect");
+      await refreshSkills();
+    } catch (e) {
+      push({ role: "status", text: `skills_toggle failed: ${e}` });
+    }
+  }
+
+  async function removeSkill(id: string) {
+    try {
+      await invoke("skills_remove", { id });
+      await invoke("skills_reconnect");
+      await refreshSkills();
+      push({ role: "status", text: `skill removed: ${id}` });
+    } catch (e) {
+      push({ role: "status", text: `skills_remove failed: ${e}` });
     }
   }
 
@@ -1233,6 +1296,61 @@ function App() {
                 </Button>
               </form>
               <div class="item-sub mt-1">calls require approval · ⟳ Reconnect applies config changes</div>
+            </div>
+
+            <div class="mt-4">
+              <strong class="text-sm">Skills</strong>
+              <For each={skills()}>
+                {(s) => (
+                  <div class="item-card">
+                    <div class="item-title">
+                      {s.name}{" "}
+                      <span class="item-sub">
+                        {s.enabled ? "· on" : "· off"} · {s.version}
+                      </span>
+                    </div>
+                    <Show when={s.description}>
+                      <div class="item-sub">{s.description}</div>
+                    </Show>
+                    <div class="item-sub mcp-url">{s.checksum}</div>
+                    <div class="mt-1 flex gap-1.5">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        class="h-7 text-xs"
+                        onClick={() => toggleSkill(s.id, !s.enabled)}
+                      >
+                        {s.enabled ? "Disable" : "Enable"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        class="h-7 text-xs text-muted-foreground"
+                        onClick={() => removeSkill(s.id)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </For>
+              <Show when={!skills().length}>
+                <div class="empty-note">no skills installed</div>
+              </Show>
+              <form onSubmit={installSkill} class="mt-2 flex flex-col gap-1.5">
+                <input
+                  class="ask-input"
+                  placeholder="https://github.com/owner/repo or SKILL.md URL"
+                  value={skillUrl()}
+                  onInput={(e) => setSkillUrl(e.currentTarget.value)}
+                />
+                <Button variant="outline" size="sm" type="submit" disabled={installingSkill()}>
+                  {installingSkill() ? "Installing…" : "Install skill"}
+                </Button>
+              </form>
+              <div class="item-sub mt-1">
+                SKILL.md instructions inject into the system prompt · disabled = not injected · no code runs
+              </div>
             </div>
           </div>
         </SheetContent>
