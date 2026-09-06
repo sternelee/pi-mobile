@@ -1451,7 +1451,7 @@ function App() {
       <Sheet open={drawerOpen()} onOpenChange={setDrawerOpen}>
         <SheetContent
           side="right"
-          class="w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+          class="sheet-safe w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
         >
           <SheetHeader>
             <SheetTitle class="text-base">Sessions</SheetTitle>
@@ -1514,7 +1514,7 @@ function App() {
       <Sheet open={settingsOpen()} onOpenChange={setSettingsOpen}>
         <SheetContent
           side="right"
-          class="w-full max-w-md gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+          class="sheet-safe w-full max-w-md gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
         >
           <Show
             when={settingsView() !== "root"}
@@ -1523,37 +1523,50 @@ function App() {
                 <SheetHeader>
                   <SheetTitle class="text-base">Settings</SheetTitle>
                 </SheetHeader>
-                <div class="flex flex-col gap-2">
-                  <div class="settings-row" onClick={() => setSettingsView("model")}>
-                    <span class="settings-row-icon">🤖</span>
-                    <div class="settings-row-body">
-                      <div class="settings-row-title">AI Model</div>
-                      <div class="settings-row-sub">
-                        {currentModel()
-                          ? `${currentModel()!.name} · ${currentModel()!.provider}`
-                          : "not selected — tap to configure"}
+                <div class="-mx-1 flex-1 overflow-y-auto px-1">
+                  <div class="settings-group-label">Agent</div>
+                  <div class="flex flex-col gap-2">
+                    <div class="settings-row" onClick={() => setSettingsView("model")}>
+                      <span class="settings-icon-chip">🤖</span>
+                      <div class="settings-row-body">
+                        <div class="settings-row-title">AI Model</div>
+                        <div class="settings-row-sub">
+                          {currentModel()
+                            ? `${currentModel()!.name} · ${currentModel()!.provider}`
+                            : "not selected — tap to configure"}
+                        </div>
                       </div>
+                      <span class="settings-chevron">›</span>
                     </div>
-                    <span class="settings-chevron">›</span>
                   </div>
-                  <div class="settings-row" onClick={() => setSettingsView("mcp")}>
-                    <span class="settings-row-icon">🔌</span>
-                    <div class="settings-row-body">
-                      <div class="settings-row-title">MCP Servers</div>
-                      <div class="settings-row-sub">{mcpServers().length} configured</div>
-                    </div>
-                    <span class="settings-chevron">›</span>
-                  </div>
-                  <div class="settings-row" onClick={() => setSettingsView("skills")}>
-                    <span class="settings-row-icon">🧩</span>
-                    <div class="settings-row-body">
-                      <div class="settings-row-title">Skills</div>
-                      <div class="settings-row-sub">
-                        {skills().length} installed · {skills().filter((s) => s.enabled).length} enabled
+                  <div class="settings-group-label">Extensions</div>
+                  <div class="flex flex-col gap-2">
+                    <div class="settings-row" onClick={() => setSettingsView("mcp")}>
+                      <span class="settings-icon-chip">🔌</span>
+                      <div class="settings-row-body">
+                        <div class="settings-row-title">MCP Servers</div>
+                        <div class="settings-row-sub">
+                          {mcpServers().length
+                            ? `${mcpServers().length} configured · calls require approval`
+                            : "none configured — connect tools over HTTP"}
+                        </div>
                       </div>
+                      <span class="settings-chevron">›</span>
                     </div>
-                    <span class="settings-chevron">›</span>
+                    <div class="settings-row" onClick={() => setSettingsView("skills")}>
+                      <span class="settings-icon-chip">🧩</span>
+                      <div class="settings-row-body">
+                        <div class="settings-row-title">Skills</div>
+                        <div class="settings-row-sub">
+                          {skills().length
+                            ? `${skills().filter((s) => s.enabled).length} of ${skills().length} enabled · injected into prompts`
+                            : "none installed — add SKILL.md packages"}
+                        </div>
+                      </div>
+                      <span class="settings-chevron">›</span>
+                    </div>
                   </div>
+                  <div class="settings-footer">pi-mobile · sessions stay on this device</div>
                 </div>
               </>
             }
@@ -1565,6 +1578,10 @@ function App() {
 
           <Show when={settingsView() === "model"}>
             <div class="settings-section-title">AI Model</div>
+            <div class="settings-subtitle">
+              Providers and catalogs come from the pi-ai models registry — the
+              list loads automatically after your key is saved.
+            </div>
             <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <Show
                 when={currentModel()}
@@ -1584,6 +1601,10 @@ function App() {
 
           <Show when={settingsView() === "mcp"}>
             <div class="settings-section-title">MCP Servers</div>
+            <div class="settings-subtitle">
+              Streamable-HTTP servers — tools register as mcp__server__tool and
+              always ask before running.
+            </div>
             <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <div class="flex items-center justify-between">
                 <span />
@@ -1651,6 +1672,10 @@ function App() {
 
           <Show when={settingsView() === "skills"}>
             <div class="settings-section-title">Skills</div>
+            <div class="settings-subtitle">
+              SKILL.md packages whose instructions are injected into the system
+              prompt — no code runs on this device.
+            </div>
             <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <For each={skills()}>
                 {(s) => (
@@ -1711,7 +1736,7 @@ function App() {
       <Sheet open={filesOpen()} onOpenChange={setFilesOpen}>
         <SheetContent
           side="left"
-          class="w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+          class="sheet-safe w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
         >
           <SheetHeader>
             <SheetTitle class="text-base">Workspace</SheetTitle>

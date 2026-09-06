@@ -129,6 +129,7 @@ button {
   align-items: center;
   gap: 0.5rem;
   padding: 0.45rem 0.6rem;
+  padding-top: calc(0.45rem + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid hsl(var(--border));
   background: color-mix(in srgb, var(--surface) 72%, transparent);
   backdrop-filter: blur(20px) saturate(180%);
@@ -1047,4 +1048,48 @@ button {
     -webkit-backdrop-filter: none;
     background: var(--surface);
   }
+}
+
+/* 面板顶部安全距离：内容不被状态栏遮挡（enableEdgeToEdge 下 WebView 全屏） */
+.sheet-safe {
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px)) !important;
+}
+
+/* 设置页 2.0：iOS 设置页形态——图标芯片 + 分组标签 + 行式导航 */
+.settings-group-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+  padding: 0.6rem 0.35rem 0.3rem;
+}
+
+.settings-icon-chip {
+  width: 2.3rem;
+  height: 2.3rem;
+  border-radius: 10px;
+  background: var(--surface-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+  flex-shrink: 0;
+}
+
+.settings-row {
+  min-height: 3.2rem;
+}
+
+.settings-subtitle {
+  font-size: 0.8rem;
+  color: hsl(var(--muted-foreground));
+  padding: 0 0.35rem 0.4rem;
+}
+
+.settings-footer {
+  text-align: center;
+  font-size: 0.7rem;
+  color: hsl(var(--muted-foreground));
+  padding: 1.2rem 0 0.4rem;
 }
