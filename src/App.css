@@ -654,14 +654,6 @@ button {
   }
 }
 
-/* busy 时的 Stop + /btw 旁问按钮组 */
-.stop-row {
-  display: flex;
-  gap: 0.4rem;
-  flex-shrink: 0;
-  align-items: center;
-}
-
 /* ── 文件树 / 预览 ────────────────────────────────────── */
 
 .file-item {

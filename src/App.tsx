@@ -413,20 +413,22 @@ function App() {
     const text = raw.trim();
     if (!text || !ready()) return;
     // 命令不依赖 busy：/btw 与主任务并行（pi-btw 并行旁问语义），/plan 亦可
-    // 随时起草；仅普通 prompt 在 busy 时被拦（走 Stop 或排队语义）。
+    // 随时起草。
     if (text.startsWith("/")) {
       setInput("");
       if (textareaEl) textareaEl.style.height = "auto";
       await handleCommand(text);
       return;
     }
-    if (busy()) return;
+    // 普通 prompt 对齐 pi TUI 队列语义：响应中发送 = 入队（steering/
+    // followUp），当前回合结束后自动继续处理，不丢弃。
     setInput("");
     if (textareaEl) textareaEl.style.height = "auto";
     setStick(true);
     push({ role: "user", text });
     try {
       await invoke("agent_prompt", { text });
+      if (busy()) push({ role: "status", text: "queued — runs after the current response" });
     } catch (e) {
       push({ role: "status", text: `prompt failed: ${e}` });
     }
@@ -1021,7 +1023,9 @@ function App() {
         <textarea
           ref={textareaEl}
           rows="1"
-          placeholder={ready() ? "Ask pi to do something…" : "agent booting…"}
+          placeholder={
+            ready() ? (busy() ? "Queue a message while pi works…" : "Ask pi to do something…") : "agent booting…"
+          }
           disabled={!ready()}
           value={input()}
           onInput={(e) => {
@@ -1031,32 +1035,21 @@ function App() {
           onKeyDown={onKeydown}
         />
         <Show
-          when={!busy()}
+          when={busy() && !input().trim()}
           fallback={
-            <div class="stop-row">
-              <Show when={/^\/btw\b/.test(input())}>
-                <button
-                  type="button"
-                  class="send-btn"
-                  onClick={() => sendText(input())}
-                  aria-label="ask btw"
-                >
-                  💬
-                </button>
-              </Show>
-              <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
-                ■
-              </button>
-            </div>
+            <button
+              type="submit"
+              class="send-btn"
+              disabled={!ready() || !input().trim()}
+              aria-label="send"
+            >
+              ➤
+            </button>
           }
         >
-          <button
-            type="submit"
-            class="send-btn"
-            disabled={!ready() || !input().trim()}
-            aria-label="send"
-          >
-            ➤
+          {/* 仅在「空内容 + 响应中」显示停止；有内容时始终显示发送（消息入队） */}
+          <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
+            ■
           </button>
         </Show>
       </form>
