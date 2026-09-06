@@ -72,7 +72,11 @@ const SheetContent = (props: SheetContentProps & Record<string, unknown>) => {
         {...others}
       >
         {local.children}
-        <DialogPrimitive.CloseButton class="absolute right-3 top-3 rounded-md p-1 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none">
+        {/* 关闭按钮跟随状态栏安全距离（WebView 全屏 edge-to-edge） */}
+        <DialogPrimitive.CloseButton
+          class="absolute right-3 rounded-md p-1 text-muted-foreground opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none"
+          style={{ top: "calc(0.75rem + env(safe-area-inset-top, 0px))" }}
+        >
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"

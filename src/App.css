@@ -129,7 +129,6 @@ button {
   align-items: center;
   gap: 0.5rem;
   padding: 0.45rem 0.6rem;
-  padding-top: calc(0.45rem + env(safe-area-inset-top, 0px));
   border-bottom: 1px solid hsl(var(--border));
   background: color-mix(in srgb, var(--surface) 72%, transparent);
   backdrop-filter: blur(20px) saturate(180%);
