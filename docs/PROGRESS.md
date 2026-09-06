@@ -2,6 +2,39 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 23:30 — M4：pi-goal autoContinue 自动续跑（带上限）✅
+
+### 状态机（bundle，上游 Sisyphus 语义 + 移动端安全边界）
+- **触发**：goal 存续期间每个 `agent_end` 自动续跑（"Continue working
+  toward the current goal. If the goal is fully achieved, reply with
+  exactly GOAL_COMPLETE and nothing else."）。
+- **四条退出路径**：① 模型逐字答复 `GOAL_COMPLETE`（→ `goal_auto_done`，
+  状态行提示 goal achieved）；② 用户 Stop（抑制紧随的 agent_end）；
+  ③ 上限 `GOAL_AUTO_CAP = 10` 次续跑；④ 运行错误（goal_error）。
+- **预算重置**：任何用户手动 prompt / goal 变更（`__pi_goal_apply`）都把
+  计数归零——失控有界（每轮用户交互最多 10 次自动续跑），交互即重新交权。
+- **时序坑（真行为差异）**：`agent_end` 发出时 prompt promise 尚未
+  resolve——立即 `agent.prompt()` 报 "already processing"。goalAutoRun
+  带退避重试（100ms × 30），每轮重试前复查 Stop 标志。
+- **abort 行为差异（测试抓出）**：`agent.abort()` 中止 LLM 流时**不经过**
+  failure-message 路径（那只在流错误时发 agent_end），抑制标志会残留到
+  下一轮用户交互。修复：`__pi_prompt` 一并重置抑制标志——用户 prompt
+  本身就是"重新交回控制权"的语义。
+- **UI**：goal 横幅内联 `· auto 3/10` 计数（goal_auto_continue 事件驱动），
+  goal achieved / 续跑失败走状态行。
+
+### 测试
+- 新增 `pi-bundle/goal-auto-test.js` 四场景（假 LLM + mock loopback）：
+  自动续跑触发与续跑 prompt 断言、GOAL_COMPLETE 停机、Stop 抑制（无失控）、
+  上限 10 次跑满即停。全量 10/10 bundle 测试 ✅；tsc ✅。
+
+### 下一步
+- [ ] 真机交互验证：/goal + 多步任务自动续跑、锁屏存活（配合前台服务）
+- [ ] MCP per-server 审批粒度（D11 完整版）
+- [ ] M5：libpi-bun iOS 静态链路
+
+---
+
 ## 2026-09-06 22:35 — M4：前台服务保活 + 通知（keep-alive）✅
 
 ### Kotlin ForegroundService（gen/android）

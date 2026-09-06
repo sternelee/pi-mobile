@@ -850,6 +850,7 @@ globalThis.__pi_tool_call = async (name, args) => {
 // 中止当前运行（UI 停止按钮）：AbortController 语义，agent_end(aborted) 收尾
 globalThis.__pi_stop = () => {
 	try {
+		goalAutoStopped = true; // 用户 Stop：抑制紧随的 autoContinue
 		agent.abort();
 		return "ok";
 	} catch (e) {
@@ -1172,6 +1173,68 @@ globalThis.__pi_goal_apply = () => {
 	return "started";
 };
 
+// ---- pi-goal autoContinue（上游 Sisyphus 自动续跑，带上限防失控）----
+// goal 存续期间每回合结束自动续跑，直到：模型逐字答复 GOAL_COMPLETE、
+// 用户按 Stop（抑制一次）、或达到上限。任何用户手动 prompt / goal 变更
+// 都重置预算（重新交回 10 次自动续跑）。
+const GOAL_AUTO_CAP = 10;
+const GOAL_CONTINUE_PROMPT =
+	"Continue working toward the current goal. If the goal is fully achieved, reply with exactly GOAL_COMPLETE and nothing else.";
+let goalAutoCount = 0;
+let goalAutoStopped = false; // Stop 按下后抑制紧随的 agent_end 一次
+
+const lastAssistantText = () => {
+	const msgs = agent.state.messages ?? [];
+	const last = [...msgs].reverse().find((m) => m.role === "assistant");
+	return (last?.content ?? [])
+		.filter((c) => c.type === "text")
+		.map((c) => c.text)
+		.join("\n")
+		.trim();
+};
+
+// agent_end 发出时 prompt promise 尚未 resolve——立即 prompt 会报
+// "already processing"。退避重试直到运行时真正空闲；每轮重试前复查
+// Stop 标志，避免用户按下停止后还抢跑一轮。
+const goalAutoRun = async () => {
+	for (let i = 0; i < 30; i++) {
+		if (goalAutoStopped) return;
+		try {
+			await agent.prompt(GOAL_CONTINUE_PROMPT);
+			return;
+		} catch (e) {
+			const msg = String(e?.message ?? e ?? "");
+			if (msg.includes("already processing")) {
+				await new Promise((r) => setTimeout(r, 100));
+				continue;
+			}
+			// Stop 中止：abort 链路的 rejection 可能无消息体，静默收场
+			if (!msg || /abort/i.test(msg)) return;
+			emit({ type: "goal_error", error: msg });
+			return;
+		}
+	}
+	emit({ type: "goal_error", error: "agent stayed busy — auto-continue skipped" });
+};
+
+agent.subscribe((event) => {
+	if (event.type !== "agent_end") return;
+	if (goalAutoStopped) {
+		goalAutoStopped = false;
+		return;
+	}
+	if (!currentGoal || goalAutoCount >= GOAL_AUTO_CAP) return;
+	if (lastAssistantText() === "GOAL_COMPLETE") {
+		emit({ type: "goal_auto_done" });
+		return;
+	}
+	goalAutoCount += 1;
+	emit({ type: "goal_auto_continue", count: goalAutoCount, cap: GOAL_AUTO_CAP });
+	goalAutoRun().catch((e) => {
+		emit({ type: "goal_error", error: String(e?.message ?? e) });
+	});
+});
+
 // Skills（D12）：启用中的技能包注入（宿主 skills.rs 安装/启停，此处只消费）。
 // kick 模式：__pi_skills_apply 立即返回，skills_applied 事件携带注入数量。
 async function refreshSkills() {
@@ -1282,6 +1345,10 @@ globalThis.__pi_prompt = (text) => {
 		const t = typeof text === "string" && text.trim().startsWith("{") ? JSON.parse(text) : String(text);
 		busy = true;
 		lastError = null;
+		// 用户手动交互重置 autoContinue：预算归零 + 清 Stop 抑制
+		//（abort 中止 LLM 流时不发 agent_end，抑制标志可能残留）
+		goalAutoCount = 0;
+		goalAutoStopped = false;
 		// 用户消息先落会话（ensureSession 异步建会话；存储内部队列保证顺序）
 		const userMsg =
 			typeof t === "string" ? { role: "user", content: t, timestamp: Date.now() } : t;

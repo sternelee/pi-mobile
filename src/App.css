@@ -526,6 +526,12 @@ button {
   background: hsl(var(--accent));
 }
 
+/* autoContinue 计数（goal 横幅内联） */
+.goal-auto {
+  opacity: 0.75;
+  font-weight: 400;
+}
+
 /* ── provider/model 选择卡片（首启 + 抽屉共用 providerSection） ── */
 
 .keyform {

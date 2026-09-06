@@ -159,6 +159,8 @@ function App() {
   );
   const [planning, setPlanning] = createSignal(false);
   const [goal, setGoal] = createSignal<string | null>(null);
+  // autoContinue 状态（goal_auto_continue 事件驱动；null = 本回合非自动续跑）
+  const [goalAuto, setGoalAuto] = createSignal<{ count: number; cap: number } | null>(null);
   const [todos, setTodos] = createSignal<{ tasks: TodoTask[]; nextId: number }>({
     tasks: [],
     nextId: 1,
@@ -387,6 +389,17 @@ function App() {
             id: ev.modelId,
             name: ev.name ?? ev.modelId,
           });
+          break;
+        case "goal_auto_continue":
+          setGoalAuto({ count: ev.count ?? 0, cap: ev.cap ?? 10 });
+          break;
+        case "goal_auto_done":
+          setGoalAuto(null);
+          push({ role: "status", text: "goal achieved — auto-continue stopped" });
+          break;
+        case "goal_error":
+          setGoalAuto(null);
+          push({ role: "status", text: `goal auto-continue failed: ${ev.error}` });
           break;
         case "boot_error":
           setBusy(false);
@@ -636,6 +649,7 @@ function App() {
     setInput("");
     if (textareaEl) textareaEl.style.height = "auto";
     setStick(true);
+    setGoalAuto(null); // 用户手动交互重置 autoContinue 预算（bundle 侧同步重置）
     push({ role: "user", text });
     try {
       await invoke("agent_prompt", { text });
@@ -715,6 +729,7 @@ function App() {
       await invoke("goal_clear");
       await invoke("pi_call_global", { fnName: "__pi_goal_apply", arg: "" });
       setGoal(null);
+      setGoalAuto(null);
       push({ role: "status", text: "goal cleared" });
     } catch (e) {
       push({ role: "status", text: `goal clear failed: ${e}` });
@@ -1015,7 +1030,12 @@ function App() {
       <Show when={goal()}>
         {(g) => (
           <div class="goal-banner">
-            <span class="goal-text">🎯 {g()}</span>
+            <span class="goal-text">
+              🎯 {g()}
+              <Show when={goalAuto()}>
+                <span class="goal-auto"> · auto {goalAuto()!.count}/{goalAuto()!.cap}</span>
+              </Show>
+            </span>
             <div class="goal-actions">
               <Show when={!busy()}>
                 <button class="goal-btn" onClick={continueGoal}>
