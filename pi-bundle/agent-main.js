@@ -143,6 +143,14 @@ const askUserTool = {
 			});
 			const reply = await new Promise((resolve) => {
 				pendingAsks.set(reg.id, resolve);
+				// 看门狗：UI 崩溃/重启导致 resolve 永不注入时，防 agent 永久挂死
+				// （kick 模式约束：续体不得只挂在 JS 定时器上——此处 setTimeout 仅作
+				// 兜底超时，正常路径由 Rust 注入；超时后清 pendingAsks 防 stale resolve）。
+				// unref：兜底定时器不挂住事件循环（否则本地测试进程要等满 12 分钟才退）。
+				const watchdog = setTimeout(() => {
+					if (pendingAsks.delete(reg.id)) resolve(null);
+				}, 12 * 60 * 1000);
+				watchdog?.unref?.();
 			});
 			const resp = reply?.response ?? null;
 			if (!resp) {
@@ -286,13 +294,26 @@ const subagentTool = {
 				streamFn: sharedStreamFn,
 				getApiKey: (provider) => getApiKey(provider),
 			});
+			// 主 agent 停止时级联中止子代理（listener 第二参数 = 当前运行 signal）
+			let cascade = undefined;
+			const unsubCascade = agent.subscribe((_ev, signal) => {
+				cascade = signal;
+			});
 			// 子代理事件不上屏（保持主对话可读），仅记日志
 			sub.subscribe((ev) => {
 				if (ev.type === "agent_error") {
 					hostcall("log", { msg: `subagent ${def.name} error: ${ev.error ?? ""}` }).catch(() => {});
 				}
 			});
-			await sub.prompt(params.task);
+			if (cascade?.aborted) sub.abort();
+			const onCascadeAbort = () => sub.abort();
+			cascade?.addEventListener("abort", onCascadeAbort, { once: true });
+			try {
+				await sub.prompt(params.task);
+			} finally {
+				unsubCascade();
+				cascade?.removeEventListener("abort", onCascadeAbort);
+			}
 			const msgs = sub.state.messages ?? [];
 			const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
 			const text = (lastAssistant?.content ?? [])
@@ -945,8 +966,14 @@ globalThis.__pi_persist_direct = (message) => {
 	return "started";
 };
 
-// 会话切换（D7 会话列表）：open 指定会话并回放；new 清空指针，下一 prompt 落新 JSONL
-globalThis.__pi_open_session = async (id) => {
+// 会话切换（D7 会话列表）：open 指定会话并回放；new 清空指针，下一 prompt 落新 JSONL。
+// open 必须 kick+轮询（与 __pi_persist_direct / __pi_goal_apply 同款）：skal_evaluate
+// 对求值结果为 Promise 时走 waitForPromise——阻塞 VM 线程，而 repo.list/open/findEntries
+// 的 fs hostcall（fetch → loopback）恰需该线程 tick 才能完成 → 整个桥死锁
+// （smoke2/ask_user 同族教训：eval 不得返回挂 I/O 的 Promise）。因此同步返回
+// "started"，结果 JSON 落 __pi_session_open_result 供 Rust session_open 轮询。
+globalThis.__pi_session_open_result = null;
+const doOpenSession = async (id) => {
 	try {
 		const metas = await repo.list();
 		const meta = metas.find((m) => m.id === id);
@@ -966,6 +993,17 @@ globalThis.__pi_open_session = async (id) => {
 	} catch (e) {
 		return JSON.stringify({ error: String(e?.message ?? e) });
 	}
+};
+globalThis.__pi_open_session = (id) => {
+	globalThis.__pi_session_open_result = null;
+	doOpenSession(id)
+		.then((r) => {
+			globalThis.__pi_session_open_result = r;
+		})
+		.catch((e) => {
+			globalThis.__pi_session_open_result = JSON.stringify({ error: String(e?.message ?? e) });
+		});
+	return "started";
 };
 
 globalThis.__pi_new_session = () => {

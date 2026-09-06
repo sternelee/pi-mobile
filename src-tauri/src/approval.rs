@@ -83,11 +83,16 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
 /// 审批请求入口（loopback dispatch 调用）。返回 hostcall 应答。
 pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     let tool = payload.get("tool").and_then(|v| v.as_str()).unwrap_or("");
-    let needs_ask = ASK_TOOLS.contains(&tool)
-        && POLICY
-            .get()
-            .map(|p| p.lock().unwrap().write == "ask")
-            .unwrap_or(true);
+    // D11：MCP 工具（mcp__<server>__<tool>）默认全部 ask，不受 write 基线
+    // 影响（per-server 降 auto 见 D11 完整版）；ASK_TOOLS 里的宿主工具
+    // （write/edit/bash）仍走 policy 状态机。
+    let is_mcp = tool.starts_with("mcp__");
+    let needs_ask = is_mcp
+        || (ASK_TOOLS.contains(&tool)
+            && POLICY
+                .get()
+                .map(|p| p.lock().unwrap().write == "ask")
+                .unwrap_or(true));
     if !needs_ask {
         return serde_json::json!({ "decision": "allow", "policy": "auto" });
     }
@@ -159,13 +164,17 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     match rx.recv_timeout(TIMEOUT) {
         Ok(d) => {
             if d == "always" {
-                // “总是允许” = write 基线降为 auto 并持久化（M3 基线粒度）
-                if let Some(p) = POLICY.get() {
-                    let mut g = p.lock().unwrap();
-                    g.write = "auto".into();
-                    save_policy(&g);
+                if !is_mcp {
+                    // “总是允许” = write 基线降为 auto 并持久化（M3 基线粒度）
+                    if let Some(p) = POLICY.get() {
+                        let mut g = p.lock().unwrap();
+                        g.write = "auto".into();
+                        save_policy(&g);
+                    }
+                    return serde_json::json!({ "decision": "allow", "policy": "always" });
                 }
-                return serde_json::json!({ "decision": "allow", "policy": "always" });
+                // MCP 工具：放行本次，但不降 write 基线（per-server 粒度见 D11 完整版）
+                return serde_json::json!({ "decision": "allow" });
             }
             serde_json::json!({ "decision": d })
         }
@@ -208,8 +217,31 @@ mod tests {
         let r = request(&json!({ "tool": "write", "args": { "path": "a.txt", "content": "x" } }));
         assert_eq!(r["decision"], "deny");
 
-        // 挂上 UI sink → ask 策略走 pending/respond 全流程
+        // MCP 工具默认 ask（D11）：进 pending，不受 write 基线影响。
+        // 此处基线仍为 ask，点 always —— 验证 MCP 上的 always 不降 write 基线。
         set_event_sink(|_| {});
+        let h = std::thread::spawn(|| {
+            request(&json!({ "tool": "mcp__srv__echo", "args": { "q": "y" } }))
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let pending = PENDING
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .cloned()
+            .unwrap();
+        respond(&pending, "always").unwrap();
+        let r = h.join().unwrap();
+        assert_eq!(r["decision"], "allow");
+        let saved = std::fs::read_to_string(dir.join("policy.json")).ok();
+        assert!(
+            !saved.as_deref().unwrap_or_default().contains("\"auto\""),
+            "MCP always must not demote write baseline, policy.json: {saved:?}"
+        );
+
+        // 挂上 UI sink → ask 策略走 pending/respond 全流程
         let h = std::thread::spawn(|| {
             request(&json!({ "tool": "write", "args": { "path": "b.txt", "content": "y" } }))
         });
@@ -240,6 +272,23 @@ mod tests {
 
         // 只读工具永不审批
         let r = request(&json!({ "tool": "read", "args": { "path": "a.txt" } }));
+        assert_eq!(r["decision"], "allow");
+
+        // write 基线已降为 auto 后，MCP 工具依旧 ask（不受基线影响）
+        let h = std::thread::spawn(|| {
+            request(&json!({ "tool": "mcp__srv__echo", "args": { "q": "z" } }))
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let pending = PENDING
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .cloned()
+            .unwrap();
+        respond(&pending, "allow").unwrap();
+        let r = h.join().unwrap();
         assert_eq!(r["decision"], "allow");
 
         let _ = std::fs::remove_dir_all(&dir);

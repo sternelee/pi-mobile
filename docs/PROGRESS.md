@@ -2,6 +2,46 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 13:07 — 审查必修三连：桥死锁 / MCP 审批绕过 / 命令未注册 ✅
+
+### 审查确认（三条全部属实，#3 与"真机能用"的矛盾也已厘清）
+1. **`__pi_open_session` 从 eval 返回挂 I/O 的 Promise → 桥死锁**：Rust
+   `session_open` 直接 `evaluate_blocking("globalThis.__pi_open_session(id)")`，
+   skal 对 Promise 走 waitForPromise 阻塞 VM 线程，而 repo.list/open/findEntries
+   的 fs hostcall（fetch → loopback）恰需该线程 tick → 点会话列表即冻结
+   （smoke2/ask_user 同族教训）。是全部被 eval 调用的全局里唯一一处违规
+   （逐一核查：goal_apply/plan_start/btw_start/mcp_reconnect 均已 kick，其余同步）。
+2. **MCP 工具绕过审批**：bundle 的 mcpTool 确实先发 `approval_request`（D11
+   语义没丢），但 Rust `ASK_TOOLS = ["write","edit","bash"]` 匹配不到
+   `mcp__<server>__<tool>` 前缀 → 直接返回 allow。D11"默认全部 ask"实际落空。
+3. **`pi_call_global` 从未注册进 generate_handler**：1b5bc0f 引入时只加了命令
+   定义，handler 列表里从来没有它（`git log -S` 全历史确认）。真机上 /plan
+   /btw /goal 经该命令调用必然 reject——PROGRESS 里"真机验证三个命令"一直
+   挂待办，所谓"能用"从未真正验证过。审查与代码相符。
+
+### 修复
+- **#1（bundle + Rust）**：`__pi_open_session` 改 kick+轮询（`__pi_persist_direct`
+  同款）——同步返回 "started"，结果 JSON 落 `__pi_session_open_result`；
+  Rust `session_open` 轮询该全局（每 200ms 一次 eval，泵 VM 事件循环驱动
+  fs hostcall），30s 超时。session-test phase B 同步改 kick+轮询断言。
+- **#2（Rust approval.rs）**：`mcp__` 前缀工具无条件 ask（不受 write 基线
+  影响）；MCP 上的 "always" 放行本次但不降 write 基线（per-server 粒度留给
+  D11 完整版）。单测并入 approval 全状态机测试：MCP ask → always 不写 auto →
+  write 降 auto 后 MCP 依旧 ask。
+- **#3（Rust lib.rs）**：`pi_call_global` 注册进 `generate_handler!`。
+- **顺带**：ask_user 看门狗 setTimeout（暂存区改动，12 分钟兜底）加 `unref`——
+  不再挂住本地测试进程事件循环（此前 approval-test 断言全过后进程挂 12 分钟）。
+
+### 教训
+- 测试并发踩坑：两个 approval 单测并发共用全局 PENDING 表，`keys().next()`
+  互相偷请求 → 120s 超时假失败。审批断言合并进单测试函数（天然串行）。
+- "真机验证过"要留证据（logcat/截图），PROGRESS 待办与口头记忆冲突时以待办为准。
+
+### 验证
+- cargo test 7/7 ✅；bundle 回归 approval / mcp / local / pi-commands /
+  subagent / session 全绿且进程正常退出 ✅；tsc ✅；bundle 重建 1.44MB ✅。
+- 真机待验证：会话列表切换不再冻结、MCP 调用弹审批卡、/plan /btw /goal 首次真机走通。
+
 ## 2026-09-06 12:20 — /btw 对齐 pi-btw 并行语义（agent 输出时可旁问）✅
 
 - **行为对齐**：`/btw` 不再受 busy 拦截——主任务流式输出期间可直接发送。

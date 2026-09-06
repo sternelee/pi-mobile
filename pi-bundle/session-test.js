@@ -236,8 +236,17 @@ if (PHASE === "B") {
 	}
 	console.log("PHASE B OK — boot restored latest session (B)");
 
-	// 切回 A：历史变为 A 的内容
-	await globalThis.__pi_open_session(idA);
+	// 切回 A：历史变为 A 的内容（kick+轮询——生产时序对齐 Rust session_open：
+	// eval 不得返回挂 I/O 的 Promise，结果经 __pi_session_open_result 轮询）
+	if (globalThis.__pi_open_session(idA) !== "started") {
+		console.error("FAIL: __pi_open_session did not kick (expected 'started')");
+		process.exit(1);
+	}
+	const opened = await waitUntil(() => globalThis.__pi_session_open_result !== null);
+	if (!opened) {
+		console.error("FAIL: __pi_session_open_result never settled");
+		process.exit(1);
+	}
 	h = JSON.parse(globalThis.__pi_history());
 	if (h.sessionId !== idA || !JSON.stringify(h.messages).includes(tokenA) || JSON.stringify(h.messages).includes(tokenB)) {
 		console.error("FAIL: switch back to A failed:", JSON.stringify(h).slice(0, 400));

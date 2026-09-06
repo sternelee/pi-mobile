@@ -251,7 +251,8 @@ pub fn run() {
             mcp_reconnect,
             goal_get,
             goal_set,
-            goal_clear
+            goal_clear,
+            pi_call_global
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

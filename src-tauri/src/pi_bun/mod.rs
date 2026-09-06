@@ -289,6 +289,9 @@ pub fn agent_history() -> Result<String, String> {
 }
 
 /// 切换到指定会话（bundle 内 repo.open + 回放进 agent 状态与 UI 历史）。
+/// kick+轮询模式：__pi_open_session 同步返回 "started"，结果落
+/// __pi_session_open_result。不得直接 eval 挂 I/O 的 Promise——waitForPromise
+/// 会阻塞 VM 线程，而 fs hostcall 恰需该线程 tick → 桥死锁（smoke2 同款教训）。
 pub fn session_open(id: &str) -> Result<(), String> {
     let arg = serde_json::to_string(id).map_err(|e| format!("serialize: {e}"))?;
     let (r, err) = evaluate_blocking(
@@ -298,10 +301,33 @@ pub fn session_open(id: &str) -> Result<(), String> {
     if err {
         return Err(format!("session open threw: {r}"));
     }
-    if r.contains("\"error\"") {
-        return Err(r);
+    if r.trim() != "started" {
+        return Err(format!("unexpected session open result: {r}"));
     }
-    Ok(())
+    // 轮询结果（每次 eval 泵一次 VM 事件循环，驱动 fs hostcall 完成）。
+    // 大会话回放可能较慢，放宽到 30s。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (r, err) = evaluate_blocking(
+            "JSON.stringify(globalThis.__pi_session_open_result)",
+            "pi:session-open-poll",
+        )?;
+        if err {
+            return Err(format!("session open poll threw: {r}"));
+        }
+        match r.trim() {
+            // 仍在跑
+            "null" => {}
+            // 成功：结果字符串 "ok" 的 JSON 编码
+            "\"ok\"" => return Ok(()),
+            // 其余非 null：doOpenSession 的错误 JSON
+            other => return Err(format!("session open failed: {other}")),
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("session open timed out after 30s".into());
+        }
+    }
 }
 
 /// 新建空白会话（下一个 prompt 落新 JSONL）。

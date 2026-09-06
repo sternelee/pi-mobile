@@ -22,11 +22,11 @@
 | `workspace_revert` | `{ path }` | `u64`（字节数） | M3 回滚：恢复该文件最近一次覆盖写入前的内容（消费备份） |
 | `workspace_backup_info` | `{ path }` | `{millis}` / `null` | M3 回滚 UI：该路径是否还有可回滚备份 |
 | `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | M3 会话列表：`{id,createdAt,cwd,modifiedAt,entries,size}` |
-| `session_open` | `{ id }` | `{}` | M3 切换会话：bundle 内 repo.open + 回放进 agent 状态与 UI 历史 |
+| `session_open` | `{ id }` | `{}` | M3 切换会话：kick `__pi_open_session`（同步返回 "started"）+ 轮询 `__pi_session_open_result`（禁止 eval 挂 I/O 的 Promise——waitForPromise 阻塞 VM 线程会桥死锁） |
 | `session_new` | `{}` | `{}` | M3 新建空白会话（下一个 prompt 落新 JSONL） |
 | `mcp_list` / `mcp_add` / `mcp_remove` | `{}` / `{ name, url }` / `{ name }` | `Server[]` / `{}` / `{}` | M4：MCP 服务器配置管理（重启后生效） |
 | `goal_set` / `goal_clear` | `{ objective }` / `{}` | `{}` | M4：持久目标设置/清除（存 goal.json） |
-| `pi_call_global` | `{ fnName, arg }` | `string` | 命令类插件后端：调用 bundle 全局（`__pi_plan` / `__pi_btw` / `__pi_goal_apply`），阻塞至 Promise 落定 |
+| `pi_call_global` | `{ fnName, arg }` | `string` | 命令类插件后端：调用 bundle 全局（`__pi_plan_start` / `__pi_btw_start` / `__pi_goal_apply`，均为 kick 语义同步返回） |
 | `workspace_tree` | `{}` | `{path,kind,size,mtimeMs}[]` | M3 文件树（深度 ≤6 / 条目 ≤500） |
 | `workspace_read` | `{ path }` | `string` | M3 只读预览（上限 256KB，jail 在 workspace 内） |
 
