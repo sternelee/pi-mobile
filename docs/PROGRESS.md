@@ -2,6 +2,39 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 11:10 — 扩展能力层 II：pi-subagents 移动原生化 ✅
+
+### subagent 工具（pi-subagents 核心能力）
+- **语义对齐上游**：工具名 `subagent`、主参数 `agent` + `task`（上游
+  fleet/workflow/mission 机制基于 pi-server 运行时，移动端取单委托核心）；
+  agent 定义与其同格式——markdown + frontmatter（name/description/tools/
+  thinking/systemPromptMode）。
+- **嵌套 Agent**：`new Agent({ 独立 systemPrompt + 受限工具集, streamFn:
+  sharedStreamFn, getApiKey })` —— 子代理有干净上下文，跑完把最后一条
+  assistant 文本作为工具结果返回。递归防护：子代理工具集剔除 `subagent`。
+- **内置三代理**：delegate（继承父工具，append 模式）/ researcher（只读
+  read/ls/grep，replace）/ reviewer（只读 + 审查纪律提示词）。自定义：
+  放 `workspace/agents/*.md`（boot 时经 read 工具加载，frontmatter 解析）。
+- **事件隔离**：子代理 delta 不上屏（保持主对话可读），仅
+  subagent_start/subagent_end 状态行 + 错误进 logcat。
+- **重构**：streamFn 抽为 `sharedStreamFn` 主/子共用；`__PI_CONFIG.baseUrl`
+  可覆盖（本地测试假 LLM 端点）；`__pi_tool_call` 优先查 agent.state.tools
+  （能探到运行期注册的 MCP/subagent 工具）；新增 `__pi_tool_names`。
+
+### 测试
+- 新增 `pi-bundle/subagent-test.js`：假 OpenAI 兼容 LLM 端点（SSE chunk）
+  + mock hostcall 提供 workspace/agents/reviewer.md，全链路验证——未知
+  agent 报可用列表、委托返回子代理最终回复、子代理请求带 reviewer 系统
+  提示 + 受限工具集（无 subagent/write，有 read/grep）。
+- 全回归：approval / session / mcp（JSON+SSE 双模式）/ local / tsc ✅。
+
+### 下一步
+- [ ] 真机验证 subagent（让 pi 委托 researcher 调研 workspace）
+- [ ] 命令面板 UI（/plan /goal /btw 的移动形态）→ 接入剩余三插件
+- [ ] MCP per-server 审批粒度（auto 降级，D11 完整版）
+
+---
+
 ## 2026-09-06 10:30 — ask_user 闪退修复 + M4 开工：MCP 插件支持 ✅
 
 ### 真机闪退定位与修复（ask_user）

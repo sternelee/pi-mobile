@@ -166,6 +166,152 @@ const extensionTools = [askUserTool];
 
 const tools = [...coreTools, ...extensionTools];
 
+// ---- subagents（pi-subagents 移动原生化：agent 委托）----
+// 上游的 fleet/workflow/mission 机制基于 pi-server 运行时，移动端取其核心
+// 能力：subagent 工具把任务委托给具名子代理（独立上下文 + 受限工具集），
+// 跑完把最终回复作为工具结果返回。agent 定义与上游同格式（markdown +
+// frontmatter）：内置 delegate/researcher/reviewer，外加 workspace/agents/*.md。
+const BUILTIN_AGENTS = {
+	delegate: {
+		name: "delegate",
+		description: "General-purpose helper subagent; inherits the parent tool set (minus delegation)",
+		systemPromptMode: "append",
+		tools: ["read", "write", "edit", "ls", "grep"],
+		thinking: "low",
+		body: "You are a delegated agent. Execute the assigned task using the provided tools. Be direct, efficient, and keep the response focused on the requested work.",
+	},
+	researcher: {
+		name: "researcher",
+		description: "Read-only research subagent; investigates and reports findings with evidence",
+		systemPromptMode: "replace",
+		tools: ["read", "ls", "grep"],
+		thinking: "low",
+		body: "You are a research subagent. Investigate using read-only tools (read/ls/grep) and report findings with evidence. You do not guess; you verify from the code, tests, or docs. Be concise and structured.",
+	},
+	reviewer: {
+		name: "reviewer",
+		description: "Review specialist for diffs, plans, and proposed solutions",
+		systemPromptMode: "replace",
+		tools: ["read", "ls", "grep"],
+		thinking: "low",
+		body: "You are a disciplined review subagent. Inspect, evaluate, and report findings with evidence. Verify implementation matches intent, code handles edge cases, and tests cover changes. Report issues by severity.",
+	},
+};
+
+function parseAgentDef(text) {
+	const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+	if (!m) return null;
+	const meta = {};
+	for (const line of m[1].split("\n")) {
+		const kv = line.match(/^(\w+):\s*(.*)$/);
+		if (kv) meta[kv[1].trim()] = kv[2].trim();
+	}
+	return {
+		name: meta.name,
+		description: meta.description ?? "custom subagent",
+		systemPromptMode: meta.systemPromptMode === "append" ? "append" : "replace",
+		tools: (meta.tools ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+		thinking: meta.thinking ?? "minimal",
+		body: m[2].trim(),
+	};
+}
+
+async function loadAgentDefs() {
+	const defs = {};
+	for (const [name, def] of Object.entries(BUILTIN_AGENTS)) defs[name] = { ...def, name };
+	// workspace/agents/*.md 自定义定义（与上游 pi-subagents 格式兼容）
+	try {
+		const ls = await hostcall("tool", { name: "ls", args: { path: "agents" } });
+		if (!ls.error && ls.text && ls.text !== "(empty)") {
+			for (const line of ls.text.split("\n")) {
+				const file = line.replace(/^-\s*/, "").trim();
+				if (!file.endsWith(".md")) continue;
+				const src = await hostcall("tool", { name: "read", args: { path: `agents/${file}` } });
+				if (src.error) continue;
+				const def = parseAgentDef(src.text);
+				if (def?.name) defs[def.name] = def;
+			}
+		}
+	} catch {}
+	return defs;
+}
+
+function resolveSubTools(def) {
+	const available = agent.state.tools ?? tools;
+	const out = [];
+	for (const name of def.tools) {
+		if (name === "subagent") continue; // 递归防护：子代理不得再委托
+		const t = available.find((x) => x.name === name);
+		if (t) out.push(t);
+	}
+	return out;
+}
+
+const subagentTool = {
+	name: "subagent",
+	label: "Subagent",
+	description:
+		"Delegate a focused task to a named subagent. The subagent runs with its own context and a restricted tool set, then its final response is returned as this tool's result. Use for research, review, or self-contained subtasks that would otherwise pollute the main conversation. Available agents are listed in the error message when unknown.",
+	parameters: {
+		type: "object",
+		properties: {
+			agent: { type: "string", description: "Name of the subagent to run (e.g. delegate, researcher, reviewer)" },
+			task: { type: "string", description: "Complete, self-contained task description for the subagent" },
+		},
+		required: ["agent", "task"],
+		additionalProperties: false,
+	},
+	// 与上游一致：委托运行期间阻塞同回合其他工具
+	executionMode: "sequential",
+	async execute(toolCallId, params) {
+		try {
+			const defs = await loadAgentDefs();
+			const def = defs[params.agent];
+			if (!def) {
+				return errContent(
+					`Unknown subagent "${params.agent}". Available: ${Object.keys(defs).join(", ")}`,
+				);
+			}
+			emit({ type: "subagent_start", name: def.name, task: params.task });
+			const sub = new Agent({
+				initialState: {
+					model: DEFAULT_MODEL,
+					thinkingLevel: def.thinking ?? "minimal",
+					systemPrompt:
+						def.systemPromptMode === "append"
+							? `${BASE_SYSTEM_PROMPT()}\n\n${def.body}`
+							: def.body,
+					tools: resolveSubTools(def),
+				},
+				streamFn: sharedStreamFn,
+				getApiKey: (provider) => getApiKey(provider),
+			});
+			// 子代理事件不上屏（保持主对话可读），仅记日志
+			sub.subscribe((ev) => {
+				if (ev.type === "agent_error") {
+					hostcall("log", { msg: `subagent ${def.name} error: ${ev.error ?? ""}` }).catch(() => {});
+				}
+			});
+			await sub.prompt(params.task);
+			const msgs = sub.state.messages ?? [];
+			const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant");
+			const text = (lastAssistant?.content ?? [])
+				.filter((c) => c.type === "text")
+				.map((c) => c.text)
+				.join("\n")
+				.trim();
+			emit({ type: "subagent_end", name: def.name });
+			return { content: [{ type: "text", text: text || "(subagent returned no text)" }], details: {} };
+		} catch (e) {
+			emit({ type: "subagent_end", name: params.agent });
+			return errContent(`Error: ${e?.message ?? e}`);
+		}
+	},
+};
+
+extensionTools.push(subagentTool);
+tools.push(subagentTool); // agent 在下方构造，确保初始工具集包含 subagent
+
 // ---- MCP adapter（pi-mcp-adapter 移动原生化，仅 streamable-http）----
 // 手写最小 MCP 客户端：JSON-RPC over POST，响应兼容 application/json 与
 // text/event-stream。不用 @modelcontextprotocol SDK——其 node 内建依赖与
@@ -420,7 +566,8 @@ const DEFAULT_MODEL = {
 	name: "DeepSeek V4 Flash",
 	api: "openai-completions",
 	provider: "deepseek",
-	baseUrl: "https://api.deepseek.com",
+	// baseUrl 可被 __PI_CONFIG.baseUrl 覆盖（本地测试用假 LLM 端点）
+	baseUrl: globalThis.__PI_CONFIG?.baseUrl ?? "https://api.deepseek.com",
 	reasoning: true,
 	input: ["text"],
 	cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
@@ -443,15 +590,18 @@ const STREAM_SIMPLE = {
 	// "google-generative-ai": google.streamSimple,
 };
 
+// streamFn 主/子 agent 共用（按 model.api 分发 + 凭证注入 + 诊断日志）
+async function sharedStreamFn(model, context, options) {
+	const fn = STREAM_SIMPLE[model.api];
+	if (!fn) throw new Error(`unsupported api: ${model.api}`);
+	const apiKey = await getApiKey(model.provider);
+	hostcall("log", { msg: `streamFn: model=${model.id} api=${model.api} tools=${context.tools?.length ?? 0}` }).catch(() => {});
+	return fn(model, context, { ...options, apiKey });
+}
+
 const agent = new Agent({
 	initialState: { model: DEFAULT_MODEL, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), edit (replace an exact text snippet in a file), grep (search files). write and edit require user approval. When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To change a file, prefer edit with an exact oldText snippet; use write only to create files or rewrite them entirely. The workspace is a sandboxed directory on the device.", tools },
-	streamFn: async (model, context, options) => {
-		const fn = STREAM_SIMPLE[model.api];
-		if (!fn) throw new Error(`unsupported api: ${model.api}`);
-		const apiKey = await getApiKey(model.provider);
-		hostcall("log", { msg: `streamFn: model=${model.id} api=${model.api} tools=${context.tools?.length ?? 0}` }).catch(() => {});
-		return fn(model, context, { ...options, apiKey });
-	},
+	streamFn: sharedStreamFn,
 	getApiKey: (provider) => getApiKey(provider),
 });
 
