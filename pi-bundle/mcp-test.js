@@ -6,45 +6,49 @@ import { createServer } from "node:http";
 
 const rpcOk = (id, result) => JSON.stringify({ jsonrpc: "2.0", id, result });
 const toolCalls = [];
+// MCP_TEST_SSE=1：所有 JSON-RPC 应答用 SSE + CRLF 回（真机 deepwiki 同款形态）
+const USE_SSE = process.env.MCP_TEST_SSE === "1";
 
 const srv = createServer((req, res) => {
 	let body = "";
 	req.on("data", (c) => (body += c));
 	req.on("end", () => {
 		if (req.url === "/mcp") {
-			res.setHeader("content-type", "application/json");
 			const msg = JSON.parse(body || "{}");
+			const reply = (result) => {
+				if (USE_SSE) {
+					res.setHeader("content-type", "text/event-stream");
+					res.end(`event: message\r\ndata: ${rpcOk(msg.id, result)}\r\n\r\n`);
+				} else {
+					res.setHeader("content-type", "application/json");
+					res.end(rpcOk(msg.id, result));
+				}
+			};
 			if (msg.method === "initialize") {
-				res.end(
-					rpcOk(msg.id, {
-						protocolVersion: "2025-06-18",
-						capabilities: { tools: {} },
-						serverInfo: { name: "mock", version: "1.0.0" },
-					}),
-				);
+				reply({
+					protocolVersion: "2025-06-18",
+					capabilities: { tools: {} },
+					serverInfo: { name: "mock", version: "1.0.0" },
+				});
 			} else if (msg.method === "tools/list") {
-				res.end(
-					rpcOk(msg.id, {
-						tools: [
-							{
-								name: "echo",
-								description: "Echo the given text back",
-								inputSchema: {
-									type: "object",
-									properties: { input: { type: "string", description: "text to echo" } },
-									required: ["input"],
-								},
+				reply({
+					tools: [
+						{
+							name: "echo",
+							description: "Echo the given text back",
+							inputSchema: {
+								type: "object",
+								properties: { input: { type: "string", description: "text to echo" } },
+								required: ["input"],
 							},
-						],
-					}),
-				);
+						},
+					],
+				});
 			} else if (msg.method === "tools/call") {
 				toolCalls.push(msg.params);
-				res.end(
-					rpcOk(msg.id, {
-						content: [{ type: "text", text: `echo: ${msg.params.arguments.input}` }],
-					}),
-				);
+				reply({
+					content: [{ type: "text", text: `echo: ${msg.params.arguments.input}` }],
+				});
 			} else if (msg.id === undefined || msg.id === null) {
 				res.statusCode = 202; // notification (initialized)
 				res.end();

@@ -205,29 +205,41 @@ function mcpClient(name, url, headers) {
 		return message.result;
 	}
 
-	// SSE 流里找匹配 id 的 JSON-RPC 响应（跳过通知），找到即断开
+	// SSE 流里找匹配 id 的 JSON-RPC 响应（跳过通知），找到即断开。
+	// 注意：SSE 规范用 \r\n 换行（真机 deepwiki 实测），切分前统一归一化。
 	async function readSseResponse(res, id) {
 		const reader = res.body.getReader();
 		const decoder = new TextDecoder();
 		let buf = "";
+		const takeEvent = () => {
+			const idx = buf.indexOf("\n\n");
+			if (idx === -1) return null;
+			const chunk = buf.slice(0, idx);
+			buf = buf.slice(idx + 2);
+			const data = chunk
+				.split("\n")
+				.filter((l) => l.startsWith("data:"))
+				.map((l) => l.slice(5).trim())
+				.join("\n");
+			return data || null;
+		};
 		try {
 			for (;;) {
 				const { done, value } = await reader.read();
-				if (done) break;
-				buf += decoder.decode(value, { stream: true });
-				let idx;
-				while ((idx = buf.indexOf("\n\n")) !== -1) {
-					const chunk = buf.slice(0, idx);
-					buf = buf.slice(idx + 2);
-					const dataLine = chunk
-						.split("\n")
-						.filter((l) => l.startsWith("data:"))
-						.map((l) => l.slice(5).trim())
-						.join("");
-					if (!dataLine) continue;
-					const msg = JSON.parse(dataLine);
+				if (value) buf += decoder.decode(value, { stream: true });
+				buf = buf.replace(/\r\n/g, "\n");
+				for (;;) {
+					const data = takeEvent();
+					if (data === null) break;
+					const msg = JSON.parse(data);
 					if (msg.id === id) return msg;
 				}
+				if (done) break;
+			}
+			// 流结束但缓冲里还有残缺事件：尽力解析最后一段
+			if (buf.includes("data:")) {
+				const msg = JSON.parse(buf.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join(""));
+				if (msg.id === id) return msg;
 			}
 		} finally {
 			reader.releaseLock?.();
