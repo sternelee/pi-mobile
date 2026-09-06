@@ -2,6 +2,34 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 22:10 — provider 功能真机装机 + 启动验证 ✅（交互验证待用户）
+
+- **装机**：`bun tauri android build --debug` → universal debug APK
+  `adb install -r -g` 流式安装成功 → 冷启动进程稳定（pid 稳定存活）。
+- **启动序列完整**：skills_applied → goal_applied → **providers_listed**
+  （pi-ai 目录在真机工作）→ todo_updated → session_restored → mcp_ready
+  + tools_registered，无报错无崩溃。
+- **包名踩坑备忘**：applicationId 是 `com.sternelee.pi_mobile`（下划线），
+  `am start -n com.sternelee.pi-mobile/.MainActivity` 会报 Activity 不存在；
+  用 `monkey -p com.sternelee.pi_mobile -c android.intent.category.LAUNCHER 1`
+  免记忆组件名。
+- **待用户交互验证**：四家 provider 各配 key 拉列表 → 选模型 → 对话验证
+  热切换 → 杀进程重启验证 provider.json 恢复。旧 DeepSeek key 保留但无
+  "选择"记录，首启卡片会出现一次，选完即持久化不再出现。
+
+### 下一轮方向（已定：M4 收尾——前台服务保活 + 通知）
+1. **▶ M4 收尾：后台保活 + 通知**——前台服务 keep-alive（agent 长任务
+   不被系统杀）+ 通知（审批待决 / 长任务进行中）。这是 agent 应用的
+   核心生产痛点：锁屏/切后台 1-2 分钟即被冻结，多步任务必废。
+2. **pi-goal autoContinue（带上限）**——多步任务自动续跑，与 keep-alive
+   配合才真正"口袋 agent"。上限防失控（如单会话 ≤10 次续跑）。
+3. **MCP per-server 审批粒度**——D11 完整版：per-server auto 降级 +
+   per-tool 记忆。
+4. **M5 关键路径：libpi-bun iOS 静态链路**——源码构建 WebKit JSC +
+   libpi_bun.a（数 GB 下载、数小时构建，可提前挂后台跑资料下载）。
+
+---
+
 ## 2026-09-06 19:40 — M4：AI provider 配置与模型选择（OpenAI/OpenRouter/DeepSeek/Gemini）✅
 
 ### 上游即真源：pi-ai createModels 架构
