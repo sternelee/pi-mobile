@@ -14,6 +14,20 @@ const srv = createServer((req, res) => {
 	req.on("data", (c) => (body += c));
 	req.on("end", () => {
 		if (req.url === "/mcp") {
+			// 验证配置的请求头确实随请求发送
+			if (req.headers.authorization !== "Bearer test123") {
+				res.setHeader("content-type", "application/json");
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						id: null,
+						error: {
+							message: `missing/invalid auth header: ${req.headers.authorization ?? "(none)"}`,
+						},
+					}),
+				);
+				return;
+			}
 			const msg = JSON.parse(body || "{}");
 			const reply = (result) => {
 				if (USE_SSE) {
@@ -66,7 +80,16 @@ const srv = createServer((req, res) => {
 				res.end('{"ok":true}');
 			} else if (method === "mcp_config") {
 				res.end(
-					JSON.stringify({ servers: [{ name: "mock", url: "http://127.0.0.1:19999/mcp" }] }),
+					JSON.stringify({
+						servers: [
+							{
+								name: "mock",
+								url: "http://127.0.0.1:19999/mcp",
+								timeoutMs: 5000,
+								headers: { Authorization: "Bearer test123" },
+							},
+						],
+					}),
 				);
 			} else if (method === "approval_request") {
 				res.end(JSON.stringify({ decision: "allow" }));

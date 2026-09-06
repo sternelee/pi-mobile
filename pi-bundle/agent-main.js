@@ -320,11 +320,12 @@ tools.push(subagentTool); // agent 在下方构造，确保初始工具集包含
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 
-function mcpClient(name, url, headers) {
+function mcpClient(name, url, headers, timeoutMs) {
 	let nextId = 1;
 	let sessionId = null;
+	const timeout = timeoutMs > 0 ? timeoutMs : 30_000;
 
-	async function rpc(method, params, { signal } = {}) {
+	async function rpc(method, params) {
 		const id = nextId++;
 		const res = await fetch(url, {
 			method: "POST",
@@ -335,7 +336,7 @@ function mcpClient(name, url, headers) {
 				...(headers ?? {}),
 			},
 			body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
-			signal,
+			signal: AbortSignal.timeout(timeout),
 		});
 		const sid = res.headers.get("mcp-session-id");
 		if (sid) sessionId = sid;
@@ -481,7 +482,7 @@ async function connectMcpServers() {
 		const mcpTools = [];
 		for (const s of servers) {
 			try {
-				const client = mcpClient(s.name, s.url, s.headers);
+				const client = mcpClient(s.name, s.url, s.headers, s.timeoutMs);
 				emit({ type: "mcp_connecting", server: s.name });
 				await client.connect();
 				const toolDefs = await client.listTools();

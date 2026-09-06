@@ -107,9 +107,11 @@ function App() {
   const [ask, setAsk] = createSignal<AskRequest | null>(null);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
-  const [mcpServers, setMcpServers] = createSignal<{ name: string; url: string }[]>([]);
+  const [mcpServers, setMcpServers] = createSignal<{ name: string; url: string; timeoutMs?: number; headers?: Record<string, string> }[]>([]);
   const [mcpName, setMcpName] = createSignal("");
   const [mcpUrl, setMcpUrl] = createSignal("");
+  const [mcpTimeout, setMcpTimeout] = createSignal("");
+  const [mcpHeaders, setMcpHeaders] = createSignal("");
   const [currentSession, setCurrentSession] = createSignal<string | null>(null);
   const [filesOpen, setFilesOpen] = createSignal(false);
   const [tree, setTree] = createSignal<TreeEntry[]>([]);
@@ -615,12 +617,29 @@ function App() {
   async function addMcpServer(e: Event) {
     e.preventDefault();
     if (!mcpName().trim() || !mcpUrl().trim()) return;
+    // 请求头：每行 "Key: Value"，解析为 JSON 对象
+    const headers: Record<string, string> = {};
+    for (const line of mcpHeaders().split("\n")) {
+      const idx = line.indexOf(":");
+      if (idx === -1) continue;
+      const key = line.slice(0, idx).trim();
+      const val = line.slice(idx + 1).trim();
+      if (key && val) headers[key] = val;
+    }
+    const timeoutMs = Number(mcpTimeout()) || 30_000;
     try {
-      await invoke("mcp_add", { name: mcpName().trim(), url: mcpUrl().trim() });
+      await invoke("mcp_add", {
+        name: mcpName().trim(),
+        url: mcpUrl().trim(),
+        timeoutMs,
+        headers,
+      });
       setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
       setMcpName("");
       setMcpUrl("");
-      push({ role: "status", text: `mcp ${mcpName() || "server"} saved — reconnecting…` });
+      setMcpTimeout("");
+      setMcpHeaders("");
+      push({ role: "status", text: `mcp server saved — reconnecting…` });
       await invoke("mcp_reconnect");
     } catch (e) {
       push({ role: "status", text: `mcp_add failed: ${e}` });
@@ -1095,6 +1114,13 @@ function App() {
                   <div class="item-card">
                     <div class="item-title">{s.name}</div>
                     <div class="item-sub mcp-url">{s.url}</div>
+                    <div class="item-sub">
+                      timeout {s.timeoutMs ?? 30000}ms
+                      <Show when={s.headers && Object.keys(s.headers ?? {}).length > 0}>
+                        {" · headers: "}
+                        {Object.keys(s.headers ?? {}).join(", ")}
+                      </Show>
+                    </div>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -1118,6 +1144,20 @@ function App() {
                   placeholder="https://…/mcp"
                   value={mcpUrl()}
                   onInput={(e) => setMcpUrl(e.currentTarget.value)}
+                />
+                <input
+                  class="ask-input"
+                  type="number"
+                  placeholder="timeout ms (default 30000)"
+                  value={mcpTimeout()}
+                  onInput={(e) => setMcpTimeout(e.currentTarget.value)}
+                />
+                <textarea
+                  class="ask-input"
+                  rows="2"
+                  placeholder={"headers (optional, one per line): Authorization: Bearer …"}
+                  value={mcpHeaders()}
+                  onInput={(e) => setMcpHeaders(e.currentTarget.value)}
                 />
                 <Button variant="outline" size="sm" type="submit">
                   Add server

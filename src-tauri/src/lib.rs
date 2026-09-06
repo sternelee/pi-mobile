@@ -96,9 +96,15 @@ fn mcp_list(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn mcp_add(app: tauri::AppHandle, name: String, url: String) -> Result<(), String> {
+fn mcp_add(
+    app: tauri::AppHandle,
+    name: String,
+    url: String,
+    timeout_ms: Option<u64>,
+    headers: Option<serde_json::Value>,
+) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
-    mcp::add(&dir, &name, &url)
+    mcp::add(&dir, &name, &url, timeout_ms, headers)
 }
 
 #[tauri::command]
