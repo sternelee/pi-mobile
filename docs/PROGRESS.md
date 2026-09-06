@@ -2,6 +2,53 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 10:30 — ask_user 闪退修复 + M4 开工：MCP 插件支持 ✅
+
+### 真机闪退定位与修复（ask_user）
+- **现象**：模型调用 ask_user 瞬间 SIGSEGV（空指针），线程 `HeapHelper`
+  （嵌入 bun 内部 GC 线程）。
+- **根因**：长挂起 fetch——hostcall 在 Rust 侧阻塞等用户作答（最长 600s），
+  JS 侧 fetch 挂着 + `AbortSignal.timeout(30_000)` 定时器。此前所有 hostcall
+  都是 13ms 级短往返，从未暴露。与"动态 import 是纯微任务"同级的嵌入式
+  runtime 约束：**禁止长阻塞 fetch（含长时间 armed 的 AbortSignal）**。
+- **修复**：改 kick+事件注入（仓库已验证模式）——
+  `ask_user_register` hostcall 立即返回 id → JS 把 resolver 挂进 pendingAsks
+  Map → 用户作答后 Rust 命令 `ask_user_respond`（spawn_blocking）经注入的
+  resolver 反向 `skal_evaluate("globalThis.__pi_ask_resolve(id, answer)")`，
+  该函数 resolve pending promise 后返回一个两拍微任务才 settle 的 promise，
+  让 waitForPromise 把工具 continuation 泵完。长阻塞 fetch 与 AbortSignal
+  定时器从 ask 路径彻底消失。
+- 教训固化：PROGRESS 约束清单 +1。
+
+### MCP 插件支持（pi-mcp-adapter 移动原生化，M4 主菜第一块）
+- **决策**：手写最小 MCP streamable-http 客户端（~150 行，零新依赖），不用
+  @modelcontextprotocol SDK——其 node 内建依赖与原生模块在嵌入 JSC 不可用
+  （SIGSEGV 前科）。stdio 明确不支持（D11 修订）。长轮询类调用一律 SSE 流式
+  （头部/数据持续流动 = 与 LLM 流同款已验证安全形态），tools/call 不挂
+  AbortSignal。
+- **bundle**：`mcpClient(name, url, headers)`（initialize / notifications/
+  initialized / tools/list / tools/call，mcp-session-id 透传，SSE 响应解析）；
+  boot 异步 `connectMcpServers()`：`mcp_config` hostcall 读服务器列表 →
+  逐个连接（失败 emit mcp_error 继续）→ 工具注册为 `mcp__<server>__<tool>`
+  → `agent.state.tools` 动态并入（D11：MCP 工具默认全部走 ask 审批）。
+- **Rust `mcp.rs`**：`{data_dir}/mcp.json` 配置增删查 +
+  `mcp_list/mcp_add/mcp_remove` 命令 + `mcp_config` hostcall；单测覆盖
+  重名/非法 url/不存在删除。
+- **UI**：会话抽屉底部 MCP servers 管理节（列表 + 删除 + 添加表单，
+  标注"重启后生效、调用需审批"）。
+- **测试**：`pi-bundle/mcp-test.js` 本地 mock MCP 服务器端到端（JSON-RPC
+  initialize → tools/list → 注册 `mcp__mock__echo` → 带审批的 tools/call →
+  文本结果断言）✅；cargo 6/6 ✅。
+- 修了个自死锁测试 bug（ask_user 单测持锁跨 respond——sample 工具定位）。
+
+### 下一步
+- [ ] 真机验证：MCP 服务器添加 → 重启 → 工具注册 → 审批调用
+- [ ] 真实 MCP 服务器实测（如 Context7 / 自建 echo server）
+- [ ] MCP 工具审批粒度（per-server 降 auto，D11 完整版）
+- [ ] pi-subagents 等价物；命令面板（/plan /goal /btw）
+
+---
+
 ## 2026-09-06 02:20 — M3 扩展能力层 I：插件架构 + pi-ask-user 移动原生化 ✅
 
 ### 调研结论（决定架构）

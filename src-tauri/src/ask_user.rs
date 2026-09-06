@@ -77,11 +77,15 @@ pub fn respond(request_id: &str, answer_json: &str) -> Result<(), String> {
     if serde_json::from_str::<serde_json::Value>(answer_json).is_err() {
         return Err("answer must be valid JSON".into());
     }
-    PENDING
+    let existed = PENDING
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap()
-        .remove(request_id);
+        .remove(request_id)
+        .is_some();
+    if !existed {
+        return Err(format!("unknown or resolved request: {request_id}"));
+    }
     let resolver = RESOLVER
         .get()
         .ok_or_else(|| "resolver not configured (agent not initialized)".to_string())?;
@@ -93,6 +97,7 @@ pub fn respond(request_id: &str, answer_json: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -103,22 +108,18 @@ mod tests {
         let r = register(&json!({ "question": "q?" }));
         assert_eq!(r["state"], "cancelled");
 
-        // 有 UI：emit 事件 → respond 经 resolver 注入
-        let seen = StdMutex::new(Vec::new());
-        {
-            let seen = &seen;
-            set_event_sink(move |s| seen.lock().unwrap().push(s.to_string()));
-        }
-        let injected = StdMutex::new(Vec::new());
-        {
-            let injected = &injected;
-            set_resolver(move |id, answer| {
-                injected
-                    .lock()
-                    .unwrap()
-                    .push((id.to_string(), answer.to_string()));
-            });
-        }
+        // 有 UI：emit 事件 → respond 经 resolver 注入（'static 闭包 → Arc 所有权）
+        let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen_sink = Arc::clone(&seen);
+        set_event_sink(move |s| seen_sink.lock().unwrap().push(s.to_string()));
+        let injected: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let injected_resolver = Arc::clone(&injected);
+        set_resolver(move |id, answer| {
+            injected_resolver
+                .lock()
+                .unwrap()
+                .push((id.to_string(), answer.to_string()));
+        });
 
         let r = register(&json!({ "question": "pick one", "options": [{"title": "A"}, {"title": "B"}] }));
         assert_eq!(r["state"], "pending");
@@ -133,10 +134,12 @@ mod tests {
 
         let answer = json!({ "response": { "kind": "selection", "selections": ["B"] } }).to_string();
         respond(&id, &answer).unwrap();
-        let injected = injected.lock().unwrap();
-        assert_eq!(injected.len(), 1);
-        assert_eq!(injected[0].0, id);
-        assert_eq!(injected[0].1, answer);
+        {
+            let injected = injected.lock().unwrap();
+            assert_eq!(injected.len(), 1);
+            assert_eq!(injected[0].0, id);
+            assert_eq!(injected[0].1, answer);
+        } // guard 先释放 —— 下面的 respond 会经 resolver 拿同一把锁
 
         // 重复 respond 同一 id → 已消费，报错
         assert!(respond(&id, &answer).is_err());

@@ -101,6 +101,9 @@ function App() {
   const [ask, setAsk] = createSignal<AskRequest | null>(null);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
+  const [mcpServers, setMcpServers] = createSignal<{ name: string; url: string }[]>([]);
+  const [mcpName, setMcpName] = createSignal("");
+  const [mcpUrl, setMcpUrl] = createSignal("");
   const [currentSession, setCurrentSession] = createSignal<string | null>(null);
   const [filesOpen, setFilesOpen] = createSignal(false);
   const [tree, setTree] = createSignal<TreeEntry[]>([]);
@@ -241,6 +244,15 @@ function App() {
             freeform: "",
             comment: "",
           });
+          break;
+        case "mcp_ready":
+          push({ role: "status", text: `mcp ${ev.server} ready — ${(ev.tools ?? []).length} tools` });
+          break;
+        case "mcp_error":
+          push({ role: "status", text: `mcp ${ev.server}: ${ev.error}` });
+          break;
+        case "mcp_tools_registered":
+          push({ role: "status", text: `mcp tools registered (${ev.count})` });
           break;
         case "boot_error":
           setBusy(false);
@@ -475,8 +487,35 @@ function App() {
     setDrawerOpen(true);
     try {
       setSessions(JSON.parse(await invoke<string>("session_list")));
+      setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
     } catch (e) {
       push({ role: "status", text: `session_list failed: ${e}` });
+    }
+  }
+
+  async function addMcpServer(e: Event) {
+    e.preventDefault();
+    if (!mcpName().trim() || !mcpUrl().trim()) return;
+    try {
+      await invoke("mcp_add", { name: mcpName().trim(), url: mcpUrl().trim() });
+      setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
+      setMcpName("");
+      setMcpUrl("");
+      push({
+        role: "status",
+        text: "MCP server saved — reconnects on next app start",
+      });
+    } catch (e) {
+      push({ role: "status", text: `mcp_add failed: ${e}` });
+    }
+  }
+
+  async function removeMcpServer(name: string) {
+    try {
+      await invoke("mcp_remove", { name });
+      setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
+    } catch (e) {
+      push({ role: "status", text: `mcp_remove failed: ${e}` });
     }
   }
 
@@ -847,6 +886,46 @@ function App() {
             <Show when={!sessions().length}>
               <div class="empty-note">no sessions yet</div>
             </Show>
+
+            <div class="mt-4">
+              <strong class="text-sm">MCP servers</strong>
+              <For each={mcpServers()}>
+                {(s) => (
+                  <div class="item-card">
+                    <div class="item-title">{s.name}</div>
+                    <div class="item-sub mcp-url">{s.url}</div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="mt-1 h-7 text-xs text-muted-foreground"
+                      onClick={() => removeMcpServer(s.name)}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                )}
+              </For>
+              <form onSubmit={addMcpServer} class="mt-2 flex flex-col gap-1.5">
+                <input
+                  class="ask-input"
+                  placeholder="name (e.g. docs)"
+                  value={mcpName()}
+                  onInput={(e) => setMcpName(e.currentTarget.value)}
+                />
+                <input
+                  class="ask-input"
+                  placeholder="https://…/mcp"
+                  value={mcpUrl()}
+                  onInput={(e) => setMcpUrl(e.currentTarget.value)}
+                />
+                <Button variant="outline" size="sm" type="submit">
+                  Add server
+                </Button>
+              </form>
+              <div class="item-sub mt-1">
+                tools register on next app start · calls require approval
+              </div>
+            </div>
           </div>
         </SheetContent>
       </Sheet>

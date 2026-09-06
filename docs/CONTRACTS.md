@@ -24,6 +24,7 @@
 | `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | M3 会话列表：`{id,createdAt,cwd,modifiedAt,entries,size}` |
 | `session_open` | `{ id }` | `{}` | M3 切换会话：bundle 内 repo.open + 回放进 agent 状态与 UI 历史 |
 | `session_new` | `{}` | `{}` | M3 新建空白会话（下一个 prompt 落新 JSONL） |
+| `mcp_list` / `mcp_add` / `mcp_remove` | `{}` / `{ name, url }` / `{ name }` | `Server[]` / `{}` / `{}` | M4：MCP 服务器配置管理（重启后生效） |
 | `workspace_tree` | `{}` | `{path,kind,size,mtimeMs}[]` | M3 文件树（深度 ≤6 / 条目 ≤500） |
 | `workspace_read` | `{ path }` | `string` | M3 只读预览（上限 256KB，jail 在 workspace 内） |
 
@@ -52,6 +53,8 @@
 | `agent_event` | agent 事件 JSON | `{ok}` | Rust sink → `emit("pi-agent-event")` |
 | `approval_request` | `{ tool, args }` | `{ decision: allow/deny, reason? }`（阻塞至 UI 决策/超时 120s） | M3：mutating 工具（write/edit/bash）执行前调用；Rust policy 状态机（`{data_dir}/policy.json`，write: ask→auto 经 "always" 持久化）；ask 时 emit `approval_required`（含 unified diff，上限 16KB） |
 | `ask_user` | `{ question, context?, options?[{title,description?}], allowMultiple?, allowFreeform?, allowComment? }` | `{ response: {kind:"selection",selections} \| {kind:"freeform",text} \| null, reason?, cancelled? }`（阻塞至用户作答/跳过/超时 600s） | 扩展能力层 #1（pi-ask-user 移动原生化）：emit `ask_user` 事件 → 提问卡；schema 与 npm:pi-ask-user 对齐 |
+| `ask_user_register` | 同 `ask_user` | `{ id, state: "pending"/"cancelled" }`（立即返回） | ask_user 的 kick+事件注入形态（禁长挂起 fetch）；作答经 `ask_user_respond` → `__pi_ask_resolve` 注入 |
+| `mcp_config` | `{}` | `{ servers: [{name, url}] }` | M4：MCP 服务器配置（存 `{data_dir}/mcp.json`）；bundle boot 时逐个 streamable-http 连接，工具注册为 `mcp__<server>__<tool>`（默认 ask 审批） |
 
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 

@@ -2,6 +2,7 @@
 mod approval;
 mod ask_user;
 mod creds;
+mod mcp;
 mod pi_bun;
 mod sessions;
 
@@ -84,6 +85,25 @@ fn set_creds(app: tauri::AppHandle, provider: String, api_key: String) -> Result
 #[tauri::command]
 fn approval_respond(request_id: String, decision: String) -> Result<(), String> {
     approval::respond(&request_id, &decision)
+}
+
+/// M4：MCP 服务器配置增删查（存 mcp.json，重启/重连后生效）。
+#[tauri::command]
+fn mcp_list(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    mcp::list(&dir)
+}
+
+#[tauri::command]
+fn mcp_add(app: tauri::AppHandle, name: String, url: String) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    mcp::add(&dir, &name, &url)
+}
+
+#[tauri::command]
+fn mcp_remove(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    mcp::remove(&dir, &name)
 }
 
 /// 扩展：回填 ask_user 答案（JSON：{response: ...} 或 {response: null, cancelled: true}）。
@@ -182,7 +202,10 @@ pub fn run() {
             workspace_read,
             session_list,
             session_open,
-            session_new
+            session_new,
+            mcp_list,
+            mcp_add,
+            mcp_remove
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

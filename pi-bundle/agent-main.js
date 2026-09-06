@@ -166,6 +166,185 @@ const extensionTools = [askUserTool];
 
 const tools = [...coreTools, ...extensionTools];
 
+// ---- MCP adapter（pi-mcp-adapter 移动原生化，仅 streamable-http）----
+// 手写最小 MCP 客户端：JSON-RPC over POST，响应兼容 application/json 与
+// text/event-stream。不用 @modelcontextprotocol SDK——其 node 内建依赖与
+// 原生模块在嵌入 JSC 不可用（@google/genai SIGSEGV 前科）。stdio 不支持。
+// 工具命名 mcp__<server>__<tool>（D11），执行前走 ask 审批。
+
+const MCP_PROTOCOL_VERSION = "2025-06-18";
+
+function mcpClient(name, url, headers) {
+	let nextId = 1;
+	let sessionId = null;
+
+	async function rpc(method, params, { signal } = {}) {
+		const id = nextId++;
+		const res = await fetch(url, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				...(sessionId ? { "mcp-session-id": sessionId } : {}),
+				...(headers ?? {}),
+			},
+			body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
+			signal,
+		});
+		const sid = res.headers.get("mcp-session-id");
+		if (sid) sessionId = sid;
+		if (!res.ok) throw new Error(`mcp ${name}: HTTP ${res.status}`);
+		const ct = res.headers.get("content-type") ?? "";
+		let message;
+		if (ct.includes("text/event-stream") && res.body) {
+			message = await readSseResponse(res, id);
+		} else {
+			message = await res.json();
+		}
+		if (message.error) throw new Error(`mcp ${name}.${method}: ${message.error.message ?? "error"}`);
+		return message.result;
+	}
+
+	// SSE 流里找匹配 id 的 JSON-RPC 响应（跳过通知），找到即断开
+	async function readSseResponse(res, id) {
+		const reader = res.body.getReader();
+		const decoder = new TextDecoder();
+		let buf = "";
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buf += decoder.decode(value, { stream: true });
+				let idx;
+				while ((idx = buf.indexOf("\n\n")) !== -1) {
+					const chunk = buf.slice(0, idx);
+					buf = buf.slice(idx + 2);
+					const dataLine = chunk
+						.split("\n")
+						.filter((l) => l.startsWith("data:"))
+						.map((l) => l.slice(5).trim())
+						.join("");
+					if (!dataLine) continue;
+					const msg = JSON.parse(dataLine);
+					if (msg.id === id) return msg;
+				}
+			}
+		} finally {
+			reader.releaseLock?.();
+			try {
+				res.body.cancel();
+			} catch {}
+		}
+		throw new Error(`mcp ${name}: stream ended without response`);
+	}
+
+	return {
+		name,
+		async connect() {
+			await rpc("initialize", {
+				protocolVersion: MCP_PROTOCOL_VERSION,
+				capabilities: {},
+				clientInfo: { name: "pi-mobile", version: "0.1.0" },
+			});
+			// initialized 通知（无 id）：服务器可能回 202 空体，忽略解析失败
+			await fetch(url, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					accept: "application/json, text/event-stream",
+					...(sessionId ? { "mcp-session-id": sessionId } : {}),
+					...(headers ?? {}),
+				},
+				body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+			}).catch(() => {});
+		},
+		async listTools() {
+			const result = await rpc("tools/list", {});
+			return (result?.tools ?? []).map((t) => ({
+				name: t.name,
+				description: t.description ?? "",
+				inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+			}));
+		},
+		async callTool(toolName, args) {
+			const result = await rpc("tools/call", { name: toolName, arguments: args ?? {} });
+			const text = (result?.content ?? [])
+				.filter((c) => c.type === "text")
+				.map((c) => c.text)
+				.join("\n");
+			return { text, isError: Boolean(result?.isError) };
+		},
+	};
+}
+
+function jsonSchemaToObj(schema) {
+	// MCP inputSchema 即 JSON Schema；属性描述透传给模型
+	const props = schema?.properties ?? {};
+	const required = schema?.required ?? Object.keys(props);
+	const out = { type: "object", properties: {}, required, additionalProperties: false };
+	for (const [key, val] of Object.entries(props)) {
+		out.properties[key] = {
+			type: val.type ?? "string",
+			...(val.description ? { description: val.description } : {}),
+		};
+	}
+	return out;
+}
+
+function mcpTool(server, tool) {
+	const fullName = `mcp__${server.name}__${tool.name}`;
+	return {
+		name: fullName,
+		label: `${server}: ${tool.name}`,
+		description: `${tool.description}\n(via MCP server "${server}")`,
+		parameters: jsonSchemaToObj(tool.inputSchema),
+		// D11：MCP 工具默认全部 ask 审批
+		async execute(toolCallId, params) {
+			try {
+				const apr = await hostcall("approval_request", { tool: fullName, args: params });
+				if (apr.error) return errContent(`approval failed: ${apr.error}`);
+				if (apr.decision !== "allow")
+					return errContent(`User did not approve the ${fullName} call. Nothing was executed.`);
+				const r = await server.client.callTool(tool.name, params);
+				return { content: [{ type: "text", text: r.text }], details: {} };
+			} catch (e) {
+				return errContent(`Error: ${e?.message ?? e}`);
+			}
+		},
+	};
+}
+
+// boot 后异步连接所有已配置的 MCP 服务器并注册工具（挂在真实网络 I/O 上）
+async function connectMcpServers() {
+	try {
+		const cfg = await hostcall("mcp_config", {}, { noTimeout: true });
+		const servers = cfg.servers ?? [];
+		const mcpTools = [];
+		for (const s of servers) {
+			try {
+				const client = mcpClient(s.name, s.url, s.headers);
+				emit({ type: "mcp_connecting", server: s.name });
+				await client.connect();
+				const toolDefs = await client.listTools();
+				for (const t of toolDefs) {
+					const wrapped = mcpTool({ name: s.name, client }, t);
+					mcpTools.push(wrapped);
+				}
+				emit({ type: "mcp_ready", server: s.name, tools: toolDefs.map((t) => t.name) });
+			} catch (e) {
+				emit({ type: "mcp_error", server: s.name, error: String(e?.message ?? e) });
+			}
+		}
+		if (mcpTools.length) {
+			agent.state.tools = [...tools, ...mcpTools];
+			emit({ type: "mcp_tools_registered", count: mcpTools.length });
+		}
+	} catch (e) {
+		emit({ type: "mcp_error", server: "(config)", error: String(e?.message ?? e) });
+	}
+}
+connectMcpServers().catch(() => {});
+
 // ask_user 的 kick+事件注入：Rust 在用户作答后经 skal_evaluate 调
 // __pi_ask_resolve(id, answerJson) 反向解析 pending promise。返回两拍后才
 // settle 的 promise，让 waitForPromise 把工具 continuation 泵完。
@@ -187,8 +366,11 @@ globalThis.__pi_ask_resolve = (id, answerJson) => {
 };
 
 // 诊断/测试缝：直接执行一个工具（与 agent 循环同一 execute 路径，含审批）。
+// 优先查 agent.state.tools（含运行期注册的 MCP 工具），回退静态列表。
 globalThis.__pi_tool_call = async (name, args) => {
-	const tool = tools.find((t) => t.name === name);
+	const tool =
+		(agent.state.tools ?? []).find((t) => t.name === name) ??
+		tools.find((t) => t.name === name);
 	if (!tool) return { error: `unknown tool: ${name}` };
 	return tool.execute("test-call-id", args ?? {});
 };
@@ -474,6 +656,9 @@ globalThis.__pi_prompt = (text) => {
 
 globalThis.__pi_status = () =>
 	JSON.stringify({ busy, lastError, queued: agent.hasQueuedMessages() });
+
+// 诊断：当前 agent 全量工具名（含运行期注册的 MCP 工具）
+globalThis.__pi_tool_names = () => (agent.state.tools ?? []).map((t) => t.name);
 
 // 重启恢复给 UI 的历史（boot 时从最新会话回放；同步求值用内存副本）
 globalThis.__pi_history = () =>

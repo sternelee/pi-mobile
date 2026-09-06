@@ -485,6 +485,10 @@ button {
   border-color: hsl(var(--ring) / 0.6);
 }
 
+.mcp-url {
+  word-break: break-all;
+}
+
 /* ── 输入区 ───────────────────────────────────────────── */
 
 .composer {

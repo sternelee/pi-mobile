@@ -758,6 +758,15 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
         "fs" => fs_op(payload),
         "approval_request" => crate::approval::request(payload),
         "ask_user_register" => crate::ask_user::register(payload),
+        "mcp_config" => match DATA_DIR.get() {
+            Some(dir) => {
+                let v = crate::mcp::list(dir).unwrap_or_else(|_| "[]".into());
+                let servers =
+                    serde_json::from_str::<serde_json::Value>(&v).unwrap_or(serde_json::json!([]));
+                serde_json::json!({ "servers": servers })
+            }
+            None => serde_json::json!({ "servers": [] }),
+        },
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());
