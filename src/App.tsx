@@ -4,10 +4,15 @@ import {
   For,
   Show,
   createEffect,
+  createMemo,
   createSignal,
   onCleanup,
   onMount,
+  type Signal,
 } from "solid-js";
+import { createScrollPosition } from "@solid-primitives/scroll";
+import { makePersisted } from "@solid-primitives/storage";
+import { createMediaQuery } from "@solid-primitives/media";
 import { Markdown } from "./ui/Markdown";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -132,7 +137,9 @@ function App() {
   const [items, setItems] = createSignal<ChatItem[]>([
     { role: "status", text: "booting embedded pi agent…" },
   ]);
-  const [input, setInput] = createSignal("");
+  const [input, setInput] = makePersisted<string, Signal<string>>(createSignal(""), {
+    name: "pi-draft",
+  });
   const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [approval, setApproval] = createSignal<Approval | null>(null);
@@ -178,7 +185,27 @@ function App() {
   const [currentModel, setCurrentModel] = createSignal<CurrentModel | null>(null);
 
   let chatEl: HTMLDivElement | undefined;
+  // 滚动位置响应式跟踪（@solid-primitives/scroll）——滚离底部 >240px 时浮出跳底按钮
+  const chatScroll = createScrollPosition(() => chatEl);
+  const awayFromBottom = () => {
+    const el = chatEl;
+    if (!el) return 0;
+    return el.scrollHeight - chatScroll.y - el.clientHeight;
+  };
+  const jumpToLatest = () => {
+    chatEl?.scrollTo({
+      top: chatEl.scrollHeight,
+      behavior: reducedMotion() ? "auto" : "smooth",
+    });
+    setStick(true);
+  };
   let textareaEl: HTMLTextAreaElement | undefined;
+
+  // ── UI 2.0：动效偏好 / 会话搜索 / 设置页导航（@solid-primitives）──
+  const reducedMotion = createMediaQuery("(prefers-reduced-motion: reduce)");
+  const [sessionSearch, setSessionSearch] = createSignal("");
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [settingsView, setSettingsView] = createSignal<"root" | "model" | "mcp" | "skills">("root");
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
   const updateItem = (toolCallId: string, patch: Partial<ChatItem>) =>
@@ -190,6 +217,26 @@ function App() {
 
   const hasConversation = () =>
     items().some((i) => i.role === "user" || i.role === "assistant" || i.role === "tool");
+
+  // 会话分组（Today / Yesterday / Earlier）+ 搜索过滤（id 前缀匹配）
+  const sessionGroups = createMemo(() => {
+    const q = sessionSearch().trim().toLowerCase();
+    const list = sessions().filter((s) => !q || s.id.toLowerCase().includes(q));
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const yesterday = dayStart.getTime() - 86_400_000;
+    const groups: { label: string; items: SessionMeta[] }[] = [
+      { label: "Today", items: [] },
+      { label: "Yesterday", items: [] },
+      { label: "Earlier", items: [] },
+    ];
+    for (const s of list) {
+      if (s.modifiedAt >= dayStart.getTime()) groups[0].items.push(s);
+      else if (s.modifiedAt >= yesterday) groups[1].items.push(s);
+      else groups[2].items.push(s);
+    }
+    return groups.filter((g) => g.items.length > 0);
+  });
 
   // ── 自动滚动：贴底跟随，用户上翻即暂停 ──
   createEffect(() => {
@@ -1179,6 +1226,12 @@ function App() {
         </For>
       </div>
 
+      <Show when={awayFromBottom() > 240}>
+        <button class="jump-btn" onClick={jumpToLatest} aria-label="jump to latest">
+          ↓
+        </button>
+      </Show>
+
       <Show when={approval()}>
         {(a) => (
           <div class="approval">
@@ -1359,38 +1412,40 @@ function App() {
       </Show>
 
       <form class="composer" onSubmit={onSubmit}>
-        <textarea
-          ref={textareaEl}
-          rows="1"
-          placeholder={
-            ready() ? (busy() ? "Queue a message while pi works…" : "Ask pi to do something…") : "agent booting…"
-          }
-          disabled={!ready()}
-          value={input()}
-          onInput={(e) => {
-            setInput(e.currentTarget.value);
-            autoGrow();
-          }}
-          onKeyDown={onKeydown}
-        />
-        <Show
-          when={busy() && !input().trim()}
-          fallback={
-            <button
-              type="submit"
-              class="send-btn"
-              disabled={!ready() || !input().trim()}
-              aria-label="send"
-            >
-              ➤
+        <div class="composer-pill">
+          <textarea
+            ref={textareaEl}
+            rows="1"
+            placeholder={
+              ready() ? (busy() ? "Queue a message while pi works…" : "Ask pi to do something…") : "agent booting…"
+            }
+            disabled={!ready()}
+            value={input()}
+            onInput={(e) => {
+              setInput(e.currentTarget.value);
+              autoGrow();
+            }}
+            onKeyDown={onKeydown}
+          />
+          <Show
+            when={busy() && !input().trim()}
+            fallback={
+              <button
+                type="submit"
+                class="send-btn"
+                disabled={!ready() || !input().trim()}
+                aria-label="send"
+              >
+                ➤
+              </button>
+            }
+          >
+            {/* 仅在「空内容 + 响应中」显示停止；有内容时始终显示发送（消息入队） */}
+            <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
+              ■
             </button>
-          }
-        >
-          {/* 仅在「空内容 + 响应中」显示停止；有内容时始终显示发送（消息入队） */}
-          <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
-            ■
-          </button>
-        </Show>
+          </Show>
+        </div>
       </form>
 
       <Sheet open={drawerOpen()} onOpenChange={setDrawerOpen}>
@@ -1401,30 +1456,137 @@ function App() {
           <SheetHeader>
             <SheetTitle class="text-base">Sessions</SheetTitle>
           </SheetHeader>
-          <Button variant="outline" size="sm" onClick={newSession}>
-            ＋ New session
-          </Button>
+          <button class="new-chat-btn" onClick={newSession}>
+            ＋ New chat
+          </button>
+          <input
+            class="session-search"
+            placeholder="Search sessions…"
+            value={sessionSearch()}
+            onInput={(e) => setSessionSearch(e.currentTarget.value)}
+          />
           <div class="-mx-1 flex-1 overflow-y-auto px-1">
-            <For each={sessions()}>
-              {(s) => (
-                <div
-                  class={`item-card ${s.id === currentSession() ? "active" : ""}`}
-                  onClick={() => switchSession(s.id)}
-                >
-                  <div class="item-title">{s.id.slice(0, 8)}</div>
-                  <div class="item-sub">
-                    {fmtRel(s.modifiedAt)} · {s.entries} messages
-                  </div>
-                </div>
+            <For each={sessionGroups()}>
+              {(grp) => (
+                <>
+                  <div class="session-group-label">{grp.label}</div>
+                  <For each={grp.items}>
+                    {(s) => (
+                      <div
+                        class={`item-card ${s.id === currentSession() ? "active" : ""}`}
+                        onClick={() => switchSession(s.id)}
+                      >
+                        <div class="item-title">{s.id.slice(0, 8)}</div>
+                        <div class="item-sub">
+                          {fmtRel(s.modifiedAt)} · {s.entries} messages
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </>
               )}
             </For>
-            <Show when={!sessions().length}>
-              <div class="empty-note">no sessions yet</div>
+            <Show when={!sessionGroups().length}>
+              <div class="empty-note">no sessions match</div>
             </Show>
 
             <div class="mt-4">
+              <div
+                class="settings-row"
+                onClick={() => {
+                  setSettingsView("root");
+                  setDrawerOpen(false);
+                  setSettingsOpen(true);
+                }}
+              >
+                <span class="settings-row-icon">⚙️</span>
+                <div class="settings-row-body">
+                  <div class="settings-row-title">Settings</div>
+                  <div class="settings-row-sub">AI model · MCP servers · Skills</div>
+                </div>
+                <span class="settings-chevron">›</span>
+              </div>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={settingsOpen()} onOpenChange={setSettingsOpen}>
+        <SheetContent
+          side="right"
+          class="w-full max-w-md gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+        >
+          <Show
+            when={settingsView() !== "root"}
+            fallback={
+              <>
+                <SheetHeader>
+                  <SheetTitle class="text-base">Settings</SheetTitle>
+                </SheetHeader>
+                <div class="flex flex-col gap-2">
+                  <div class="settings-row" onClick={() => setSettingsView("model")}>
+                    <span class="settings-row-icon">🤖</span>
+                    <div class="settings-row-body">
+                      <div class="settings-row-title">AI Model</div>
+                      <div class="settings-row-sub">
+                        {currentModel()
+                          ? `${currentModel()!.name} · ${currentModel()!.provider}`
+                          : "not selected — tap to configure"}
+                      </div>
+                    </div>
+                    <span class="settings-chevron">›</span>
+                  </div>
+                  <div class="settings-row" onClick={() => setSettingsView("mcp")}>
+                    <span class="settings-row-icon">🔌</span>
+                    <div class="settings-row-body">
+                      <div class="settings-row-title">MCP Servers</div>
+                      <div class="settings-row-sub">{mcpServers().length} configured</div>
+                    </div>
+                    <span class="settings-chevron">›</span>
+                  </div>
+                  <div class="settings-row" onClick={() => setSettingsView("skills")}>
+                    <span class="settings-row-icon">🧩</span>
+                    <div class="settings-row-body">
+                      <div class="settings-row-title">Skills</div>
+                      <div class="settings-row-sub">
+                        {skills().length} installed · {skills().filter((s) => s.enabled).length} enabled
+                      </div>
+                    </div>
+                    <span class="settings-chevron">›</span>
+                  </div>
+                </div>
+              </>
+            }
+          >
+            <button class="settings-back" onClick={() => setSettingsView("root")}>
+              ‹ Settings
+            </button>
+          </Show>
+
+          <Show when={settingsView() === "model"}>
+            <div class="settings-section-title">AI Model</div>
+            <div class="-mx-1 flex-1 overflow-y-auto px-1">
+              <Show
+                when={currentModel()}
+                fallback={<div class="item-sub">no model selected — pick a provider below</div>}
+              >
+                <div class="item-card active">
+                  <div class="item-title">{currentModel()!.name}</div>
+                  <div class="item-sub">{currentModel()!.provider}</div>
+                </div>
+              </Show>
+              {providerSection()}
+              <div class="item-sub mt-1">
+                selection persists across restarts · subagents follow the active model
+              </div>
+            </div>
+          </Show>
+
+          <Show when={settingsView() === "mcp"}>
+            <div class="settings-section-title">MCP Servers</div>
+            <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <div class="flex items-center justify-between">
-                <strong class="text-sm">MCP servers</strong>
+                <span />
                 <Button variant="ghost" size="sm" class="h-7 text-xs" onClick={reconnectMcp}>
                   ⟳ Reconnect
                 </Button>
@@ -1485,26 +1647,11 @@ function App() {
               </form>
               <div class="item-sub mt-1">calls require approval · ⟳ Reconnect applies config changes</div>
             </div>
+          </Show>
 
-            <div class="mt-4">
-              <strong class="text-sm">AI model</strong>
-              <Show
-                when={currentModel()}
-                fallback={<div class="item-sub">no model selected — pick a provider below</div>}
-              >
-                <div class="item-card active">
-                  <div class="item-title">{currentModel()!.name}</div>
-                  <div class="item-sub">{currentModel()!.provider}</div>
-                </div>
-              </Show>
-              {providerSection()}
-              <div class="item-sub mt-1">
-                selection persists across restarts · subagents follow the active model
-              </div>
-            </div>
-
-            <div class="mt-4">
-              <strong class="text-sm">Skills</strong>
+          <Show when={settingsView() === "skills"}>
+            <div class="settings-section-title">Skills</div>
+            <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <For each={skills()}>
                 {(s) => (
                   <div class="item-card">
@@ -1557,7 +1704,7 @@ function App() {
                 SKILL.md instructions inject into the system prompt · disabled = not injected · no code runs
               </div>
             </div>
-          </div>
+          </Show>
         </SheetContent>
       </Sheet>
 

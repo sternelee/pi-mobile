@@ -2,6 +2,43 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-07 00:20 — UI/UX 2.0：ChatGPT 移动端参考重设计（对话/会话列表/设置页）✅
+
+### 设计原则（apple-design 技能落地）
+- **材质分层**：topbar 与 composer 改半透明 + `backdrop-filter: blur(20px)
+  saturate(180%)`——内容从其下滚过，层级靠材质而非硬分割线。
+- **气泡层级**（ChatGPT 式）：user 右对齐 `surface-3` 胶囊（20px 圆角）；
+  assistant 全宽无框排版，copy 动作右上角。
+- **按压即时反馈**：所有可点卡/按钮 `:active` 即刻 `scale(0.97)`（100ms
+  ease-out）——反馈发生在 pointer-down 而非松手。
+- **可访问性双降级**：`prefers-reduced-motion` 全动效转淡入淡出；
+  `prefers-reduced-transparency` 材质面转实底。
+
+### 三个界面
+- **对话界面**：composer 胶囊化（textarea 与发送键同住 24px 圆角胶囊，
+  focus 描边）；滚离底部 >240px 浮出跳底按钮（`@solid-primitives/scroll`
+  的 `createScrollPosition` 响应式跟踪，跳转按 `prefers-reduced-motion`
+  选择 smooth/auto——`@solid-primitives/media`）。
+- **会话列表**：搜索过滤（id 前缀）+ Today/Yesterday/Earlier 分组 + 提级
+  的 "＋ New chat" 主按钮；设置入口为行式导航项。
+- **设置页**：从会话抽屉独立成整页导航（根列表 → AI Model / MCP Servers /
+  Skills 三个子页，行式导航 + chevron + 返回），根列表行内直接显示当前
+  模型 / 配置数 / 启用数。会话抽屉回归纯粹的会话管理。
+- **草稿持久化**：composer 输入经 `@solid-primitives/storage` 的
+  `makePersisted` 落 localStorage——误杀进程不丢草稿。
+
+### 验证
+- tsc ✅；vite build ✅（CSS 28.2KB / JS 126KB）；bundle 测试不涉及 UI 层。
+- APK 构建成功；装机待设备重连（本次 adb 断连）。
+
+### 下一步
+- [ ] 装机走查新 UI（跳底按钮、搜索分组、设置页导航、材质层次）
+- [ ] 真机交互验证存量项：provider 选择流程、锁屏保活、/goal autoContinue
+- [ ] MCP per-server 审批粒度（D11 完整版）
+- [ ] M5：libpi-bun iOS 静态链路
+
+---
+
 ## 2026-09-06 23:30 — M4：pi-goal autoContinue 自动续跑（带上限）✅
 
 ### 状态机（bundle，上游 Sisyphus 语义 + 移动端安全边界）
