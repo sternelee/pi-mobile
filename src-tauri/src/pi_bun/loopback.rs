@@ -797,10 +797,14 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());
             }
-            logcat(&format!(
-                "agent_event: {}",
-                payload.get("type").and_then(|v| v.as_str()).unwrap_or("?")
-            ));
+            let ev_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+            // M4 保活：agent 运行期保持前台服务（best-effort，失败只进日志）
+            match ev_type {
+                "agent_start" => crate::keepalive::on_agent_start(),
+                "agent_end" | "agent_error" => crate::keepalive::on_agent_end(),
+                _ => {}
+            }
+            logcat(&format!("agent_event: {ev_type}"));
             serde_json::json!({ "ok": true })
         }
         other => serde_json::json!({ "error": format!("unknown method: {other}") }),

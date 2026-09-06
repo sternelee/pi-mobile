@@ -160,9 +160,12 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
             .to_string(),
         );
     }
+    // M4 保活：常驻通知切高优先级（审批在 agent 运行期内，前台服务已升）
+    crate::keepalive::on_approval_pending(tool);
 
     match rx.recv_timeout(TIMEOUT) {
         Ok(d) => {
+            crate::keepalive::on_approval_resolved();
             if d == "always" {
                 if !is_mcp {
                     // “总是允许” = write 基线降为 auto 并持久化（M3 基线粒度）
@@ -180,6 +183,7 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
         }
         Err(_) => {
             pending.lock().unwrap().remove(&id); // 超时：rx 即将析构，清表防 stale
+            crate::keepalive::on_approval_resolved();
             serde_json::json!({ "decision": "deny", "reason": "timeout" })
         }
     }

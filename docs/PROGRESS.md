@@ -2,6 +2,47 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 22:35 — M4：前台服务保活 + 通知（keep-alive）✅
+
+### Kotlin ForegroundService（gen/android）
+- **静态入口设计**：`start(context, label)` / `notify(context, channel, title, text)` /
+  `stop(context)` 全部 `@JvmStatic`——Rust `call_static_method` 直接可达，
+  不需要 service 实例或 binder。`onStartCommand` 每次重跑 `startForeground`
+  即通知内容热切换（审批待决 ↔ 工作态）。
+- **双通道**：`pi_agent_work`（IMPORTANCE_LOW，常驻不打扰）/
+  `pi_agent_approval`（IMPORTANCE_HIGH，抬头提醒）。点通知回 App。
+- **Manifest**：`FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` +
+  `POST_NOTIFICATIONS` 权限；`<service foregroundServiceType="dataSync" exported="false">`
+  （shell `am start-foreground-service` 被拒 = 只有应用自身 UID 能拉起，
+  预期姿态）。
+- **MainActivity**：Android 13+ 运行时请求 POST_NOTIFICATIONS（首启弹一次）。
+
+### Rust keepalive.rs（JNI 桥，非 Android 全 no-op）
+- `ndk_context` 拿 WryActivity → `JavaVM::attach_current_thread` →
+  `call_static_method` 驱动 Kotlin 静态方法。失败仅记 logcat（best-effort，
+  不阻塞 agent 流程）。
+- **挂钩点（全自动，无 UI 改动）**：loopback `agent_event` sink 拦
+  `agent_start`→start、`agent_end|agent_error`→stop；approval.rs
+  `request()`→on_approval_pending、`respond()`/超时→on_approval_resolved。
+- **依赖**：`[target.'cfg(target_os = "android")'.dependencies]` jni 0.21 +
+  ndk-context 0.1（均在 tauri 依赖树内，零新增体积）。
+
+### 验证
+- 桌面 cargo 12/12 ✅；aarch64-linux-android + aarch64-apple-ios 双目标
+  check ✅（keepalive 非 Android 全 no-op）；APK 构建 + 装机成功，冷启动
+  序列干净（无 AndroidRuntime FATAL）。
+- **端到端待用户**：首条消息触发 agent_start 升前台（通知栏出现
+  "pi mobile — agent working"），锁屏跑长任务验证不被冻结；审批弹卡时
+  通知升高优先级。
+
+### 下一步
+- [ ] 真机交互验证：锁屏长任务存活、审批通知、provider 选择流程
+- [ ] pi-goal autoContinue（带上限）——配合保活的"口袋 agent"闭环
+- [ ] MCP per-server 审批粒度（D11 完整版）
+- [ ] M5：libpi-bun iOS 静态链路
+
+---
+
 ## 2026-09-06 22:10 — provider 功能真机装机 + 启动验证 ✅（交互验证待用户）
 
 - **装机**：`bun tauri android build --debug` → universal debug APK

@@ -3,6 +3,7 @@ mod approval;
 mod ask_user;
 mod creds;
 mod goal;
+mod keepalive;
 mod mcp;
 mod pi_bun;
 mod sessions;
