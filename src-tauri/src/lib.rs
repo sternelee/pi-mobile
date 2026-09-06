@@ -2,6 +2,7 @@
 mod approval;
 mod ask_user;
 mod creds;
+mod goal;
 mod mcp;
 mod pi_bun;
 mod sessions;
@@ -114,6 +115,33 @@ async fn mcp_reconnect() -> Result<(), String> {
         .map_err(|e| format!("join: {e}"))?
 }
 
+/// 扩展（pi-goal 移动原生化）：持久目标设置/清除/查询。
+/// set/clear 后 UI 调 mcp_reconnect 同款机制经 `__pi_goal_apply` 热生效。
+#[tauri::command]
+fn goal_get(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    goal::get(&dir)
+}
+
+#[tauri::command]
+async fn pi_call_global(fn_name: String, arg: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || pi_bun::call_string_global(&fn_name, &arg))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+#[tauri::command]
+fn goal_set(app: tauri::AppHandle, objective: String) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    goal::set(&dir, &objective)
+}
+
+#[tauri::command]
+fn goal_clear(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    goal::clear(&dir)
+}
+
 /// 扩展：回填 ask_user 答案（JSON：{response: ...} 或 {response: null, cancelled: true}）。
 /// 经 resolver 反向 skal_evaluate 注入运行时 —— 必须 off main thread。
 #[tauri::command]
@@ -214,7 +242,10 @@ pub fn run() {
             mcp_list,
             mcp_add,
             mcp_remove,
-            mcp_reconnect
+            mcp_reconnect,
+            goal_get,
+            goal_set,
+            goal_clear
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

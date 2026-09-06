@@ -80,6 +80,12 @@ const SUGGESTIONS = [
   "What can you do?",
 ];
 
+const COMMANDS = [
+  { cmd: "/plan", desc: "draft an implementation plan" },
+  { cmd: "/btw", desc: "quick side question (context-aware)" },
+  { cmd: "/goal", desc: "set a persistent objective (/goal off clears)" },
+];
+
 function fmtRel(ms: number): string {
   const mins = Math.floor((Date.now() - ms) / 60000);
   if (mins < 1) return "just now";
@@ -111,6 +117,11 @@ function App() {
     null,
   );
   const [stick, setStick] = createSignal(true);
+  const [plan, setPlan] = createSignal<{ objective: string; content: string } | null>(
+    null,
+  );
+  const [planning, setPlanning] = createSignal(false);
+  const [goal, setGoal] = createSignal<string | null>(null);
 
   let chatEl: HTMLDivElement | undefined;
   let textareaEl: HTMLTextAreaElement | undefined;
@@ -344,6 +355,9 @@ function App() {
     try {
       await invoke("agent_init");
       await loadHistory();
+      // 持久目标（pi-goal）：boot 恢复横幅
+      const g = JSON.parse(await invoke<string>("goal_get"));
+      setGoal(typeof g === "string" ? g : null);
     } catch (e) {
       push({ role: "status", text: `agent_init failed: ${e}` });
     }
@@ -375,6 +389,12 @@ function App() {
   async function sendText(raw: string) {
     const text = raw.trim();
     if (!text || !ready() || busy()) return;
+    if (text.startsWith("/")) {
+      setInput("");
+      if (textareaEl) textareaEl.style.height = "auto";
+      await handleCommand(text);
+      return;
+    }
     setInput("");
     if (textareaEl) textareaEl.style.height = "auto";
     setStick(true);
@@ -383,6 +403,95 @@ function App() {
       await invoke("agent_prompt", { text });
     } catch (e) {
       push({ role: "status", text: `prompt failed: ${e}` });
+    }
+  }
+
+  // ── 命令类插件（/plan /btw /goal）──
+  async function handleCommand(text: string) {
+    const [cmd, ...rest] = text.split(/\s+/);
+    const arg = rest.join(" ").trim();
+    if (cmd === "/plan") {
+      if (!arg || planning()) {
+        push({ role: "status", text: "usage: /plan <objective>" });
+        return;
+      }
+      setPlanning(true);
+      push({ role: "status", text: `drafting plan: ${arg}` });
+      try {
+        const content = await invoke<string>("pi_call_global", {
+          fnName: "__pi_plan",
+          arg,
+        });
+        setPlan({ objective: arg, content });
+      } catch (e) {
+        push({ role: "status", text: `plan failed: ${e}` });
+      } finally {
+        setPlanning(false);
+      }
+      return;
+    }
+    if (cmd === "/btw") {
+      if (!arg) {
+        push({ role: "status", text: "usage: /btw <question>" });
+        return;
+      }
+      push({ role: "status", text: `btw: ${arg}` });
+      try {
+        const answer = await invoke<string>("pi_call_global", {
+          fnName: "__pi_btw",
+          arg,
+        });
+        push({ role: "assistant", text: `💬 ${arg}\n\n${answer}` });
+      } catch (e) {
+        push({ role: "status", text: `btw failed: ${e}` });
+      }
+      return;
+    }
+    if (cmd === "/goal") {
+      try {
+        if (arg === "off" || arg === "clear") {
+          await invoke("goal_clear");
+          await invoke("pi_call_global", { fnName: "__pi_goal_apply", arg: "" });
+          setGoal(null);
+          push({ role: "status", text: "goal cleared" });
+        } else if (arg) {
+          await invoke("goal_set", { objective: arg });
+          await invoke("pi_call_global", { fnName: "__pi_goal_apply", arg: "" });
+          setGoal(arg);
+          push({ role: "status", text: `goal set: ${arg}` });
+        } else {
+          push({ role: "status", text: "usage: /goal <objective> | /goal off" });
+        }
+      } catch (e) {
+        push({ role: "status", text: `goal failed: ${e}` });
+      }
+      return;
+    }
+    push({ role: "status", text: `unknown command ${cmd} — try ${COMMANDS.map((c) => c.cmd).join(", ")}` });
+  }
+
+  async function continueGoal() {
+    const g = goal();
+    if (!g || busy()) return;
+    setStick(true);
+    push({ role: "user", text: "▶ continue the current goal" });
+    try {
+      await invoke("agent_prompt", {
+        text: `Continue working toward the current goal: ${g}. Pick up where you left off.`,
+      });
+    } catch (e) {
+      push({ role: "status", text: `prompt failed: ${e}` });
+    }
+  }
+
+  async function clearGoal() {
+    try {
+      await invoke("goal_clear");
+      await invoke("pi_call_global", { fnName: "__pi_goal_apply", arg: "" });
+      setGoal(null);
+      push({ role: "status", text: "goal cleared" });
+    } catch (e) {
+      push({ role: "status", text: `goal clear failed: ${e}` });
     }
   }
 
@@ -598,6 +707,24 @@ function App() {
           <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
         </div>
       </header>
+
+      <Show when={goal()}>
+        {(g) => (
+          <div class="goal-banner">
+            <span class="goal-text">🎯 {g()}</span>
+            <div class="goal-actions">
+              <Show when={!busy()}>
+                <button class="goal-btn" onClick={continueGoal}>
+                  ▶ Continue
+                </button>
+              </Show>
+              <button class="goal-btn" onClick={clearGoal}>
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+      </Show>
 
       <Show when={!ready()}>
         <form class="keyform" onSubmit={saveKey}>
@@ -831,6 +958,55 @@ function App() {
             </div>
           </div>
         )}
+      </Show>
+
+      <Show when={input().startsWith("/")}>
+        <div class="cmd-palette">
+          <For each={COMMANDS}>
+            {(c) => (
+              <button
+                class="cmd-row"
+                onClick={() => {
+                  setInput(`${c.cmd} `);
+                  textareaEl?.focus();
+                }}
+              >
+                <span class="cmd-name">{c.cmd}</span>
+                <span class="cmd-desc">{c.desc}</span>
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+
+      <Show when={plan()}>
+        {(p) => (
+          <div class="approval">
+            <div class="approval-title">📋 Plan — {p().objective}</div>
+            <div class="md plan-body">
+              <Markdown text={p().content} />
+            </div>
+            <div class="approval-actions">
+              <Button variant="secondary" onClick={() => setPlan(null)}>
+                Discard
+              </Button>
+              <Button
+                class="bg-success text-success-foreground hover:bg-success/90"
+                onClick={() => {
+                  const planData = plan();
+                  setPlan(null);
+                  if (planData) sendText(`✅ Plan approved — execute it now:\n\n${planData.content}`);
+                }}
+              >
+                ▶ Approve & run
+              </Button>
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={planning()}>
+        <div class="planning-note">drafting plan…</div>
       </Show>
 
       <form class="composer" onSubmit={onSubmit}>

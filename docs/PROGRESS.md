@@ -2,6 +2,43 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 11:50 — 扩展能力层 III：pi-plan / pi-goal / pi-btw ✅（六插件全就位）
+
+### 命令基础设施（D7 命令面板的最小形态）
+- 输入 `/` 前缀弹出命令面板（/plan /btw /goal，含描述，点击回填）；
+  composer 发送时拦截命令进 `handleCommand`，不污染会话历史。
+- Rust 新增通用 `pi_call_global(fn, arg)` 命令：eval bundle 内返回字符串的
+  全局函数（skal waitForPromise 等待 Promise 落定，plan/btw 的嵌套 Agent
+  运行期间事件仍经 loopback 流动）。
+
+### 三个插件的移动原生化
+- **/plan（@devkade/pi-plan 等价）**：`__pi_plan(objective)` 起草只读规划
+  agent（read/ls/grep，禁止代码输出）→ 计划卡（markdown 渲染 +
+  Discard / **▶ Approve & run**）。批准 = 计划文本作为普通 prompt 进入主
+  对话执行（上游 approval-based execution 语义）。
+- **/goal（pi-goal 等价）**：Rust `goal.rs` 持久化 `{data_dir}/goal.json`；
+  boot 时 `goal_get` hostcall 注入 systemPrompt "Current goal" 节（与
+  AGENTS.md 统一由 applySystemPrompt 组装）；UI 黄色 goal 横幅（目标 +
+  ▶ Continue + ✕ 清除），set/clear 经 `__pi_goal_apply` 热生效。
+  autoContinue（上游 Sisyphus 自动续跑）暂以手动 ▶ 替代，防失控。
+- **/btw（pi-btw 等价）**：`__pi_btw(question)` 旁路子代理——带主对话
+  近 12 条消息摘要作为上下文 + 只读工具，答案以 💬 assistant 卡片显示，
+  **不写入会话/不进主任务上下文**。
+
+### 测试
+- `pi-commands-test.js`（假 LLM）：plan 只读运行产出计划、btw 带主上下文、
+  goal 经 `__pi_goal_apply` 注入 systemPrompt（`__pi_system_prompt` 诊断缝）。
+- 途中修复：mock 缺 apiKey 导致静默失败（agent.prompt 出错时 resolve 不
+  reject——写测试时要注意查 agent_error 事件）。
+- cargo 7/7；全回归 approval/session/mcp×2/subagent/local ✅；tsc ✅。
+
+### 下一步
+- [ ] 真机验证三个命令（/plan 批准执行、/goal 横幅、/btw 旁答）
+- [ ] 自动续跑（pi-goal autoContinue，带上限）、/todos 面板
+- [ ] M4 剩余：Skills（D12）、前台服务保流、通知
+
+---
+
 ## 2026-09-06 11:10 — 扩展能力层 II：pi-subagents 移动原生化 ✅
 
 ### subagent 工具（pi-subagents 核心能力）

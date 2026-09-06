@@ -768,19 +768,49 @@ async function restoreLatest() {
 	emit({ type: "session_restored", sessionId: latest.id, messages: restoredMessages.length });
 }
 
-const BASE_SYSTEM_PROMPT = () => agent.state.systemPrompt.split("\n\n# Project instructions")[0].trim();
+const BASE_SYSTEM_PROMPT = () =>
+	agent.state.systemPrompt
+		.split("\n\n# Project instructions")[0]
+		.split("\n\n# Current goal")[0]
+		.trim();
 
-// AGENTS.md 注入（pi 语义：workspace 规则进 system prompt）。boot/切会话时刷新。
+// AGENTS.md + 持久目标（pi-goal 移动原生化）统一组装 systemPrompt
+let agentsMdCache = null;
+let currentGoal = null;
+
+async function applySystemPrompt() {
+	let prompt = BASE_SYSTEM_PROMPT();
+	if (agentsMdCache) prompt += `\n\n# Project instructions (AGENTS.md)\n\n${agentsMdCache}`;
+	if (currentGoal)
+		prompt += `\n\n# Current goal\n\nWork persistently toward this objective across turns until the user clears it: ${currentGoal}`;
+	agent.state.systemPrompt = prompt;
+}
+
 async function refreshAgentsMd() {
 	try {
 		const r = await hostcall("tool", { name: "read", args: { path: "AGENTS.md" } });
-		if (r.error || !r.text?.trim()) return;
-		agent.state.systemPrompt = `${BASE_SYSTEM_PROMPT()}\n\n# Project instructions (AGENTS.md)\n\n${r.text}`;
-		emit({ type: "agents_md_loaded", bytes: r.text.length });
+		agentsMdCache = r.error || !r.text?.trim() ? null : r.text;
 	} catch {
-		// 无 AGENTS.md —— 保持基线 prompt
+		agentsMdCache = null;
 	}
+	await applySystemPrompt();
+	emit({ type: "agents_md_loaded", bytes: agentsMdCache?.length ?? 0 });
 }
+
+async function refreshGoal() {
+	try {
+		const r = await hostcall("goal_get", {}, { noTimeout: true });
+		currentGoal = r.objective ?? null;
+	} catch {
+		currentGoal = null;
+	}
+	await applySystemPrompt();
+	emit({ type: "goal_applied", objective: currentGoal });
+}
+globalThis.__pi_goal_apply = () => {
+	refreshGoal().catch(() => {});
+	return "started";
+};
 
 const sessionPersistError = (e) =>
 	emit({ type: "session_error", error: String(e?.message ?? e) });
@@ -791,6 +821,63 @@ restoreLatest()
 		globalThis.__pi_restored = true;
 	});
 refreshAgentsMd().catch(() => {});
+refreshGoal().catch(() => {});
+
+// ── 命令类插件后端：/plan（只读规划）与 /btw（旁路问答）──
+// 均为一次性嵌套 Agent（read-only 工具），返回文本给 UI 呈现；
+// 计划批准后由 UI 作为普通 prompt 进入主对话（上游 approval-based execution 语义）。
+async function runNested(prompt, tools, systemPrompt, thinking) {
+	const sub = new Agent({
+		initialState: {
+			model: DEFAULT_MODEL,
+			thinkingLevel: thinking ?? "minimal",
+			systemPrompt,
+			tools: resolveSubTools({ tools }),
+		},
+		streamFn: sharedStreamFn,
+		getApiKey: (provider) => getApiKey(provider),
+	});
+	await sub.prompt(prompt);
+	const msgs = sub.state.messages ?? [];
+	const last = [...msgs].reverse().find((m) => m.role === "assistant");
+	return (last?.content ?? [])
+		.filter((c) => c.type === "text")
+		.map((c) => c.text)
+		.join("\n")
+		.trim();
+}
+
+	globalThis.__pi_plan = async (objective) => {
+	emit({ type: "plan_drafting", objective });
+	const plan = await runNested(
+		`Draft an implementation plan for this objective. Investigate the workspace with read-only tools first. Output numbered steps, each one line with the files involved. No code unless essential.\n\nObjective: ${objective}`,
+		["read", "ls", "grep"],
+		"You are a planning subagent. Using read-only tools, investigate what is needed and draft a concise, actionable plan. No code unless essential.",
+		"minimal",
+	);
+	emit({ type: "plan_drafted", objective });
+	return plan || "(planning produced no output)";
+};
+
+globalThis.__pi_btw = async (question) => {
+	const ctx = (agent.state.messages ?? [])
+		.slice(-12)
+		.map((m) => {
+			const t = (m.content ?? [])
+				.filter((c) => c.type === "text")
+				.map((c) => c.text)
+				.join(" ");
+			return `${m.role}: ${t.slice(0, 400)}`;
+		})
+		.filter((l) => !l.endsWith(": "))
+		.join("\n");
+	return await runNested(
+		`Main conversation so far:\n${ctx || "(empty)"}\n\nQuestion: ${question}`,
+		["read", "ls", "grep"],
+		"You are a side-conversation assistant. The user asks a quick question ('by the way') while the main task continues. Answer briefly using the main-conversation context above and read-only tools if needed. Do not continue the main task.",
+		"minimal",
+	);
+};
 
 // ---- host-facing controls (kick+poll contract) ----
 let lastError = null;
@@ -827,6 +914,7 @@ globalThis.__pi_status = () =>
 
 // 诊断：当前 agent 全量工具名（含运行期注册的 MCP 工具）
 globalThis.__pi_tool_names = () => (agent.state.tools ?? []).map((t) => t.name);
+globalThis.__pi_system_prompt = () => agent.state.systemPrompt;
 
 // 重启恢复给 UI 的历史（boot 时从最新会话回放；同步求值用内存副本）
 globalThis.__pi_history = () =>

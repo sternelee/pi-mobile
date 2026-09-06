@@ -767,6 +767,10 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             }
             None => serde_json::json!({ "servers": [] }),
         },
+        "goal_get" => match DATA_DIR.get() {
+            Some(dir) => serde_json::json!({ "objective": serde_json::from_str::<serde_json::Value>(&crate::goal::get(dir).unwrap_or_else(|_| "null".into())).unwrap_or(serde_json::Value::Null) }),
+            None => serde_json::json!({ "objective": null }),
+        },
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());

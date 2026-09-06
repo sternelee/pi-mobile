@@ -489,6 +489,96 @@ button {
   word-break: break-all;
 }
 
+/* ── goal 横幅（pi-goal 移动原生化） ──────────────────── */
+
+.goal-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  background: hsl(var(--warning) / 0.12);
+  border-bottom: 1px solid hsl(var(--warning) / 0.4);
+}
+
+.goal-text {
+  flex: 1;
+  font-size: 0.75rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.goal-btn {
+  background: var(--surface-3);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.68rem;
+}
+
+.goal-btn:active {
+  background: hsl(var(--accent));
+}
+
+/* ── / 命令面板 ───────────────────────────────────────── */
+
+.cmd-palette {
+  border-top: 1px solid hsl(var(--border));
+  background: var(--surface);
+  padding: 0.25rem 0.4rem;
+}
+
+.cmd-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-radius: var(--radius-sm);
+}
+
+.cmd-row:active {
+  background: var(--surface-2);
+}
+
+.cmd-name {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: hsl(var(--primary));
+}
+
+.cmd-desc {
+  font-size: 0.72rem;
+  color: var(--text-faint);
+}
+
+/* ── 计划卡 ───────────────────────────────────────────── */
+
+.plan-body {
+  max-height: 40vh;
+  overflow-y: auto;
+  margin-top: 0.4rem;
+  padding: 0.45rem;
+  background: var(--bg);
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 4px);
+}
+
+.planning-note {
+  padding: 0.3rem 0.6rem;
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
 /* ── 输入区 ───────────────────────────────────────────── */
 
 .composer {

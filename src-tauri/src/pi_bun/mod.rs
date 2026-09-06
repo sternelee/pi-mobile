@@ -331,6 +331,20 @@ pub fn mcp_reconnect() -> Result<(), String> {
     Ok(())
 }
 
+/// 命令类插件后端：调用 bundle 里返回字符串的 async/sync 全局函数
+/// （__pi_plan / __pi_btw / __pi_goal_apply）。skal waitForPromise 会等待
+/// Promise 落定（smoke2 已验证），plan/btw 的嵌套 Agent 运行期间事件仍经
+/// loopback 流动。
+pub fn call_string_global(fn_name: &str, arg: &str) -> Result<String, String> {
+    let f = serde_json::to_string(fn_name).map_err(|e| format!("serialize: {e}"))?;
+    let a = serde_json::to_string(arg).map_err(|e| format!("serialize: {e}"))?;
+    let (r, err) = evaluate_blocking(&format!("globalThis[{f}]({a})"), "pi:call-global")?;
+    if err {
+        return Err(format!("{fn_name} threw: {r}"));
+    }
+    Ok(r)
+}
+
 /// PoC 冒烟 v2：初始化 → 注入配置 → 安装桥 → loopback hostcall 往返。
 /// 注意：`skal_evaluate` 同步阻塞（会等待 Promise 落定），调用方须在
 /// blocking 线程（本函数由 async command 经 spawn_blocking 调用）。
