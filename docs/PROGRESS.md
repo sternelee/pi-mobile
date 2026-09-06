@@ -2,6 +2,39 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 14:46 — M5 开工：iOS 平台支持（工程 + 编译 + 模拟器）✅
+
+### iOS 工程落地
+- `bun tauri ios init` → `src-tauri/gen/apple`（xcodegen 工程，Podfile/Externals/
+  Sources 模板齐备）。Tauri 的 iOS 模板目录名就叫 `apple`，与 Android 并列。
+- **Rust 侧 iOS 门控**：`pi_bun::init` 在 `cfg(target_os = "ios")` 下返回明确
+  错误（"libpi-bun static link pending"）——libpi-bun 静态库需从源码构建
+  WebKit JSC（skal build-jsc-ios.sh + link-skal-ios.sh 工艺，LIBPI-BUN-NOTES
+  §2 已预留链路），dlopen .so 路径在 iOS 不可用。App 其余能力（workspace
+  工具、会话、MCP/Skills 配置、审批流 UI）在 iOS 全量编译。
+- **双目标编译绿**：`aarch64-apple-ios`（真机）+ `aarch64-apple-ios-sim`
+  （模拟器）cargo check 通过；桌面/Android 测试 11/11 无回归。
+- **模拟器端到端**：`tauri ios build --target aarch64-sim --debug` 产出
+  pi-mobile.app → simctl 安装 iPhone 16（iOS 18.5）→ 启动进程稳定存活，
+  WKWebView 正常挂载。（CLI target 名与 rust triple 不同：`aarch64-sim`。）
+- **真机签名**：project.yml 配 DEVELOPMENT_TEAM（自动签名，team ID 来自本机
+  证书）；xcodeproj 需 `xcodegen` 重生成才生效（tauri CLI 复用已有 pbxproj，
+  改 project.yml 后要手动重生成——踩坑记录）。
+
+### 真机部署卡点（用户 GUI 一步）
+- xcodebuild 报 "No Accounts"：本机无任何 provisioning profile，自动生成
+  需要 Apple ID 在 Xcode 登录（Settings → Accounts）。用户操作：Xcode 打开
+  `gen/apple/pi-mobile.xcodeproj` → 登录账号 → 选 iPhone → ▶ Run；或登录后
+  我重跑 `tauri ios build --target aarch64 --debug` 即可。
+
+### 下一步
+- [ ] 真机装机验证（等用户 Xcode 账号登录）
+- [ ] **libpi-bun iOS 静态链路（M5 关键路径）**：源码构建 WebKit JSC +
+  libpi_bun.a + pi_bun 模块静态链接（cfg ios 分支换实现）
+- [ ] 桌面同构验证；v2 零拷贝桥
+
+---
+
 ## 2026-09-06 14:04 — M4：Skills 管理（D12）✅
 
 ### Rust `skills.rs`（安装器 + registry + 宿主过滤）

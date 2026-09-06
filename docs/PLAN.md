@@ -359,7 +359,12 @@ pi-mobile/
 - **出口条件**：接入 1 个真实 MCP 服务器端到端；安装 1 个真实 skill 并影响 agent 行为；锁屏/切后台不丢流
 
 ### M5 —— iOS、桌面同构与桥优化
-- [ ] `bun tauri ios init` + iOS `libpi_bun.a` 静态库 + 审核合规评估（嵌入式 JIT，见风险表）
+- [x] **iOS 开工（2026-09-06）**：`tauri ios init`（gen/apple）+ 双 iOS 目标编译绿
+  + 模拟器构建/安装/启动验证；agent 运行时 iOS 门控（init 返回明确错误，
+  其余能力全量可用）。真机自动签名配置进 project.yml（DEVELOPMENT_TEAM）。
+- [ ] iOS `libpi_bun.a` 静态库：从源码构建 WebKit JSC（skal `build-jsc-ios.sh` +
+  `link-skal-ios.sh` 工艺，见 LIBPI-BUN-NOTES §2）+ pi_bun 模块静态链接路径
+  + 审核合规评估（嵌入式 JIT，见风险表）——本项为 M5 关键路径
 - [ ] 桌面 Tauri 同构验证（同一 libpi-bun 跑 darwin，桌面作开发调试宿主）
 - [ ] v2 桥：skal 式零拷贝共享内存环（接口不变）
 - [ ] Backlog 排期：git 远程工作流 / Share Sheet / 会话云同步 / 端侧小模型（见 §10.2）

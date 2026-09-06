@@ -28,6 +28,8 @@ const SMOKE2_JS: &str = include_str!("../../../pi-bundle/smoke2.js");
 type SkalHandle = i64;
 
 #[allow(non_snake_case)]
+// iOS：init 被 cfg 门控（静态链路待 M5），ABI 类型别名暂未使用
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 mod abi {
     use std::ffi::{c_char, c_int};
 
@@ -85,6 +87,17 @@ pub(crate) fn logcat(msg: &str) {
 }
 
 /// 初始化（懒加载）：dlopen + create_runtime，失败原因显式返回。
+/// 初始化（懒加载）：dlopen + create_runtime，失败原因显式返回。
+#[cfg(target_os = "ios")]
+fn init(_data_dir: &str) -> Result<(), String> {
+    // iOS：libpi-bun 需静态链接（.a + 从源码构建 WebKit JSC，见
+    // LIBPI-BUN-NOTES §2 —— skal build-jsc-ios.sh + link-skal-ios.sh 工艺），
+    // dlopen 路径不可用。App 其余能力（workspace 工具/会话/MCP 配置/审批）
+    // 在 iOS 全量编译可用，agent 运行时待 M5 静态链路落地。
+    Err("pi runtime is not yet available on iOS — libpi-bun static link pending".into())
+}
+
+#[cfg(not(target_os = "ios"))]
 fn init(data_dir: &str) -> Result<(), String> {
     let mut guard = runtime_lock().lock().unwrap();
     if guard.is_some() {
