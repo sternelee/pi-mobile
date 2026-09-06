@@ -8,9 +8,16 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 /// 列出全部会话元数据（JSON 数组，modifiedAt 倒序）。
+/// 根目录不存在时返回空数组（iOS 首启：agent 运行时门控下无人建目录）。
 pub fn list(sessions_root: &str) -> Result<String, String> {
     let root = Path::new(sessions_root);
-    let rd = std::fs::read_dir(root).map_err(|e| format!("sessions: {e}"))?;
+    let rd = match std::fs::read_dir(root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok("[]".into());
+        }
+        Err(e) => return Err(format!("sessions: {e}")),
+    };
     let mut out = Vec::new();
     for dir in rd.flatten() {
         if !dir.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -73,6 +80,13 @@ pub fn list(sessions_root: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_root_returns_empty() {
+        let dir = std::env::temp_dir().join(format!("pi-sessions-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(list(dir.to_str().unwrap()).unwrap(), "[]");
+    }
 
     #[test]
     fn lists_sessions_sorted_by_modified_desc() {

@@ -32,6 +32,12 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<String, String> {
         .to_string_lossy()
         .into_owned();
     std::fs::create_dir_all(&dir).map_err(|e| format!("create data dir: {e}"))?;
+    // 标准子目录无条件创建：iOS 上 agent 运行时被门控（agent_init 提前返回），
+    // 目录若只在 agent_init 里建，session_list / 文件树等命令会报 ENOENT。
+    for sub in ["sessions", "workspace"] {
+        std::fs::create_dir_all(format!("{dir}/{sub}"))
+            .map_err(|e| format!("create {sub} dir: {e}"))?;
+    }
     Ok(dir)
 }
 

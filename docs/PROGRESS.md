@@ -2,6 +2,27 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 17:25 — iOS 真机跑通：签名闭环 + 首启目录修复 ✅
+
+### 真机端到端（Honor 替换为 iPhone：Sterne 的 iPhone se）
+- **Xcode 登录后 CLI 构建走通**：`tauri ios build --target aarch64 --debug`
+  产出 pi-mobile.ipa → `devicectl device install app` 装机 → 首启需在
+  设置 → 通用 → VPN 与设备管理里信任开发者证书（免费账号标准流程）→
+  二次启动正常（devicectl launch 验证）。
+- **真机首启日志**：WebView 页面加载完成，无 panic、无 session 错误。
+- **顺带修复 session_list ENOENT**：sessions/workspace 目录原先只在
+  agent_init 里建——iOS 上运行时门控提前返回导致无人建目录，UI 报
+  "session_list failed: ENOENT"。修复：① app_data_dir 无条件创建标准
+  子目录（sessions/workspace）；② sessions::list 对缺失根目录返回空数组
+  （iOS 首启防御）+ 单测。
+
+### 下一步
+- [ ] **libpi-bun iOS 静态链路（M5 关键路径）**：源码构建 WebKit JSC +
+  libpi_bun.a + pi_bun 模块静态链接（cfg ios 分支换实现）
+- [ ] 桌面同构验证；v2 零拷贝桥
+
+---
+
 ## 2026-09-06 14:46 — M5 开工：iOS 平台支持（工程 + 编译 + 模拟器）✅
 
 ### iOS 工程落地
