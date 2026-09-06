@@ -265,6 +265,29 @@ function App() {
         case "mcp_tools_registered":
           push({ role: "status", text: `mcp tools registered (${ev.count})` });
           break;
+        case "plan_drafted":
+          setPlanning(false);
+          setPlan({ objective: ev.objective, content: ev.content ?? "" });
+          break;
+        case "plan_error":
+          setPlanning(false);
+          push({ role: "status", text: `plan failed: ${ev.error}` });
+          break;
+        case "btw_thinking":
+          push({ role: "status", text: `btw: ${ev.question} — thinking…` });
+          break;
+        case "btw_answer":
+          push({ role: "assistant", text: `💬 ${ev.question}\n\n${ev.answer ?? ""}` });
+          break;
+        case "btw_error":
+          push({ role: "status", text: `btw failed: ${ev.error}` });
+          break;
+        case "subagent_start":
+          push({ role: "status", text: `delegating to ${ev.name}…` });
+          break;
+        case "subagent_end":
+          push({ role: "status", text: `${ev.name} finished` });
+          break;
         case "boot_error":
           setBusy(false);
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
@@ -388,13 +411,16 @@ function App() {
 
   async function sendText(raw: string) {
     const text = raw.trim();
-    if (!text || !ready() || busy()) return;
+    if (!text || !ready()) return;
+    // 命令不依赖 busy：/btw 与主任务并行（pi-btw 并行旁问语义），/plan 亦可
+    // 随时起草；仅普通 prompt 在 busy 时被拦（走 Stop 或排队语义）。
     if (text.startsWith("/")) {
       setInput("");
       if (textareaEl) textareaEl.style.height = "auto";
       await handleCommand(text);
       return;
     }
+    if (busy()) return;
     setInput("");
     if (textareaEl) textareaEl.style.height = "auto";
     setStick(true);
@@ -416,18 +442,8 @@ function App() {
         return;
       }
       setPlanning(true);
-      push({ role: "status", text: `drafting plan: ${arg}` });
-      try {
-        const content = await invoke<string>("pi_call_global", {
-          fnName: "__pi_plan",
-          arg,
-        });
-        setPlan({ objective: arg, content });
-      } catch (e) {
-        push({ role: "status", text: `plan failed: ${e}` });
-      } finally {
-        setPlanning(false);
-      }
+      // kick + 事件回投：plan_drafted 事件到达后弹出计划卡
+      await invoke("pi_call_global", { fnName: "__pi_plan_start", arg });
       return;
     }
     if (cmd === "/btw") {
@@ -435,16 +451,8 @@ function App() {
         push({ role: "status", text: "usage: /btw <question>" });
         return;
       }
-      push({ role: "status", text: `btw: ${arg}` });
-      try {
-        const answer = await invoke<string>("pi_call_global", {
-          fnName: "__pi_btw",
-          arg,
-        });
-        push({ role: "assistant", text: `💬 ${arg}\n\n${answer}` });
-      } catch (e) {
-        push({ role: "status", text: `btw failed: ${e}` });
-      }
+      // 并行旁问：与主任务同时跑，答案经 btw_answer 事件回来
+      await invoke("pi_call_global", { fnName: "__pi_btw_start", arg });
       return;
     }
     if (cmd === "/goal") {
@@ -1025,9 +1033,21 @@ function App() {
         <Show
           when={!busy()}
           fallback={
-            <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
-              ■
-            </button>
+            <div class="stop-row">
+              <Show when={/^\/btw\b/.test(input())}>
+                <button
+                  type="button"
+                  class="send-btn"
+                  onClick={() => sendText(input())}
+                  aria-label="ask btw"
+                >
+                  💬
+                </button>
+              </Show>
+              <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
+                ■
+              </button>
+            </div>
           }
         >
           <button

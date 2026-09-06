@@ -4,6 +4,7 @@
 import { createServer } from "node:http";
 
 const llmRequests = [];
+const events = [];
 let goalOnServer = null;
 
 const srv = createServer((req, res) => {
@@ -31,6 +32,7 @@ const srv = createServer((req, res) => {
 			const { method, payload } = JSON.parse(body || "{}");
 			res.setHeader("content-type", "application/json");
 			if (method === "agent_event") {
+				events.push(payload);
 				res.end('{"ok":true}');
 			} else if (method === "goal_get") {
 				res.end(JSON.stringify({ objective: goalOnServer }));
@@ -57,12 +59,23 @@ globalThis.__PI_CONFIG = {
 await import("./dist/agent.js");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await sleep(200);
+const waitFor = async (fn, ms = 15_000) => {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		const v = fn();
+		if (v) return v;
+		await sleep(150);
+	}
+	return fn();
+};
 
-// 1) /plan 后端：规划提示 + 只读工具
-const plan = await globalThis.__pi_plan("add a search feature");
-if (!plan.includes("step one")) {
-	console.error("FAIL plan result:", plan.slice(0, 200));
-	console.error("DEBUG llm requests:", JSON.stringify(llmRequests).slice(0, 900));
+// 1) /plan 后端：kick + plan_drafted 事件回投，规划运行只读
+globalThis.__pi_plan_start("add a search feature");
+const planEv = await waitFor(() =>
+	events.find((e) => e.type === "plan_drafted" && e.objective === "add a search feature"),
+);
+if (!planEv?.content?.includes("step one")) {
+	console.error("FAIL plan event:", JSON.stringify(events).slice(0, 400));
 	process.exit(1);
 }
 const planReq = llmRequests.find((r) =>
@@ -77,22 +90,24 @@ if (planTools.includes("write") || planTools.includes("subagent")) {
 	console.error("FAIL: planning run must be read-only:", planTools);
 	process.exit(1);
 }
-console.log("OK __pi_plan: nested read-only run produced the plan");
+console.log("OK __pi_plan_start: nested read-only run produced the plan via event");
 
-// 2) /btw 后端：带主对话上下文的旁路问答
-const btw = await globalThis.__pi_btw("what did we decide?");
-if (!btw.includes("step one")) {
-	console.error("FAIL btw result:", btw.slice(0, 200));
+// 2) /btw 后端：并行旁问，btw_answer 事件带主对话上下文
+const before = llmRequests.length;
+globalThis.__pi_btw_start("what did we decide?");
+const btwEv = await waitFor(() => events.find((e) => e.type === "btw_answer"));
+if (!btwEv.answer.includes("step one")) {
+	console.error("FAIL btw answer:", btwEv.answer.slice(0, 200));
 	process.exit(1);
 }
-const btwReq = llmRequests.find((r) =>
+const btwReq = llmRequests.slice(before).find((r) =>
 	typeof r.messages?.[0]?.content === "string" && r.messages[0].content.includes("side-conversation"),
 );
 if (!btwReq || !JSON.stringify(btwReq.messages).includes("Main conversation so far")) {
 	console.error("FAIL: btw run missing side-conversation context");
 	process.exit(1);
 }
-console.log("OK __pi_btw: side conversation carries main context");
+console.log("OK __pi_btw_start: side conversation carries main context");
 
 // 3) goal_get hostcall：模拟 Rust 侧已存目标 → __pi_goal_apply 应用
 goalOnServer = "ship the m4 milestone";

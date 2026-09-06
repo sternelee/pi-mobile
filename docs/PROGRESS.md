@@ -2,6 +2,21 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 12:20 — /btw 对齐 pi-btw 并行语义（agent 输出时可旁问）✅
+
+- **行为对齐**：`/btw` 不再受 busy 拦截——主任务流式输出期间可直接发送。
+  `/plan` 同样随时可起草。
+- **后端改 kick+事件回投**：`__pi_plan_start` / `__pi_btw_start` 立即返回，
+  嵌套 Agent 与主任务**并行**跑（共享 bun 事件循环，各自 fetch 在 eval 间隙
+  泵动——与主任务流式同款已验证形态），完成后 emit `plan_drafted` /
+  `btw_answer`（或 *_error）事件。此前的阻塞式 eval 会占住 runtime 锁，
+  旁问期间 Stop 将失灵——kick 模式下锁不被占用。
+- **UI**：busy 时 composer 显示 Stop（红）+ 💬（输入以 /btw 开头时）双按钮；
+  答案经 `btw_answer` 事件渲染为 💬 卡片；计划经 `plan_drafted` 弹出计划卡。
+- **测试**：pi-commands-test 改为 kick+事件断言（轮询 events）。
+
+---
+
 ## 2026-09-06 11:50 — 扩展能力层 III：pi-plan / pi-goal / pi-btw ✅（六插件全就位）
 
 ### 命令基础设施（D7 命令面板的最小形态）

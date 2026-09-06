@@ -824,9 +824,10 @@ refreshAgentsMd().catch(() => {});
 refreshGoal().catch(() => {});
 
 // ── 命令类插件后端：/plan（只读规划）与 /btw（旁路问答）──
-// 均为一次性嵌套 Agent（read-only 工具），返回文本给 UI 呈现；
-// 计划批准后由 UI 作为普通 prompt 进入主对话（上游 approval-based execution 语义）。
-async function runNested(prompt, tools, systemPrompt, thinking) {
+// kick+事件回投模式：立即返回，嵌套 Agent 与主流式并行跑（共享 bun 事件循环，
+// 各自的 fetch 在 eval 间隙泵动），完成后 emit plan_drafted / btw_answer 事件。
+// 不占用 runtime 锁 —— 旁问期间 Stop 等操作保持可用。
+async function runNestedCollect(prompt, tools, systemPrompt, thinking) {
 	const sub = new Agent({
 		initialState: {
 			model: DEFAULT_MODEL,
@@ -847,36 +848,51 @@ async function runNested(prompt, tools, systemPrompt, thinking) {
 		.trim();
 }
 
-	globalThis.__pi_plan = async (objective) => {
+globalThis.__pi_plan_start = (objective) => {
 	emit({ type: "plan_drafting", objective });
-	const plan = await runNested(
-		`Draft an implementation plan for this objective. Investigate the workspace with read-only tools first. Output numbered steps, each one line with the files involved. No code unless essential.\n\nObjective: ${objective}`,
-		["read", "ls", "grep"],
-		"You are a planning subagent. Using read-only tools, investigate what is needed and draft a concise, actionable plan. No code unless essential.",
-		"minimal",
-	);
-	emit({ type: "plan_drafted", objective });
-	return plan || "(planning produced no output)";
+	(async () => {
+		try {
+			const plan = await runNestedCollect(
+				`Draft an implementation plan for this objective. Investigate the workspace with read-only tools first. Output numbered steps, each one line with the files involved. No code unless essential.\n\nObjective: ${objective}`,
+				["read", "ls", "grep"],
+				"You are a planning subagent. Using read-only tools, investigate what is needed and draft a concise, actionable plan. No code unless essential.",
+				"minimal",
+			);
+			emit({ type: "plan_drafted", objective, content: plan || "(planning produced no output)" });
+		} catch (e) {
+			emit({ type: "plan_error", objective, error: String(e?.message ?? e) });
+		}
+	})();
+	return "started";
 };
 
-globalThis.__pi_btw = async (question) => {
-	const ctx = (agent.state.messages ?? [])
-		.slice(-12)
-		.map((m) => {
-			const t = (m.content ?? [])
-				.filter((c) => c.type === "text")
-				.map((c) => c.text)
-				.join(" ");
-			return `${m.role}: ${t.slice(0, 400)}`;
-		})
-		.filter((l) => !l.endsWith(": "))
-		.join("\n");
-	return await runNested(
-		`Main conversation so far:\n${ctx || "(empty)"}\n\nQuestion: ${question}`,
-		["read", "ls", "grep"],
-		"You are a side-conversation assistant. The user asks a quick question ('by the way') while the main task continues. Answer briefly using the main-conversation context above and read-only tools if needed. Do not continue the main task.",
-		"minimal",
-	);
+globalThis.__pi_btw_start = (question) => {
+	emit({ type: "btw_thinking", question });
+	(async () => {
+		try {
+			const ctx = (agent.state.messages ?? [])
+				.slice(-12)
+				.map((m) => {
+					const t = (m.content ?? [])
+						.filter((c) => c.type === "text")
+						.map((c) => c.text)
+						.join(" ");
+					return `${m.role}: ${t.slice(0, 400)}`;
+				})
+				.filter((l) => !l.endsWith(": "))
+				.join("\n");
+			const answer = await runNestedCollect(
+				`Main conversation so far:\n${ctx || "(empty)"}\n\nQuestion: ${question}`,
+				["read", "ls", "grep"],
+				"You are a side-conversation assistant. The user asks a quick question ('by the way') while the main task continues. Answer briefly using the main-conversation context above and read-only tools if needed. Do not continue the main task.",
+				"minimal",
+			);
+			emit({ type: "btw_answer", question, answer: answer || "(no answer)" });
+		} catch (e) {
+			emit({ type: "btw_error", question, error: String(e?.message ?? e) });
+		}
+	})();
+	return "started";
 };
 
 // ---- host-facing controls (kick+poll contract) ----
