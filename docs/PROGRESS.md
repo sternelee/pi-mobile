@@ -22,10 +22,17 @@
   改 project.yml 后要手动重生成——踩坑记录）。
 
 ### 真机部署卡点（用户 GUI 一步）
-- xcodebuild 报 "No Accounts"：本机无任何 provisioning profile，自动生成
-  需要 Apple ID 在 Xcode 登录（Settings → Accounts）。用户操作：Xcode 打开
-  `gen/apple/pi-mobile.xcodeproj` → 登录账号 → 选 iPhone → ▶ Run；或登录后
-  我重跑 `tauri ios build --target aarch64 --debug` 即可。
+- xcodebuild 报 "No Account for Team"：本机无任何 provisioning profile，自动
+  生成需要 Xcode 账号会话。team 配置写进 project.yml（DEVELOPMENT_TEAM +
+  CODE_SIGN_STYLE Automatic，target settings.base 层级——项目级不传导）。
+- **FORCE_COLOR 陷阱（通用坑）**：tauri 生成的 Xcode 构建脚本含
+  `${FORCE_COLOR}`；本环境导出 FORCE_COLOR=0，展开成位置参数 "0"，
+  tauri-cli 把它当 arch 解析直接报 "Arch specified by Xcode was invalid"。
+  修复：project.yml 脚本里删掉该参数 + xcodegen 重生成。
+- **改 project.yml 后必须手动 `xcodegen` 重生成 pbxproj**——tauri CLI 复用
+  已有 pbxproj，不会自动重生成（踩坑两次）。
+- 用户路径：Xcode 打开 gen/apple/pi-mobile.xcodeproj → Signing 选 team →
+  ▶ Run（注册设备 + 生成 profile）→ 之后 CLI 构建即可走通。
 
 ### 下一步
 - [ ] 真机装机验证（等用户 Xcode 账号登录）
