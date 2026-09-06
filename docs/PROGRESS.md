@@ -2,6 +2,42 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 15:40 — 扩展能力层 IV：@juicesharp/rpiv-todo 移动原生化 ✅
+
+### 上游语义（tool-schema.md 逐条对齐，模型视角不变）
+- **`todo` 工具**：6 动作（create/update/list/get/delete/clear）、4 态状态机
+  （pending → in_progress → completed，deleted 为墓碑；非法迁移拒绝、同状态
+  no-op 报 "No change"）、blockedBy 依赖图校验（未知/墓碑/自阻塞/环，先校验
+  后变更）、content 字符串与错误文案逐字对齐上游（`Created #3: … (pending)` /
+  `Updated #3 (pending → in_progress)` / `⛓ #1,#2` 行格式等）。
+- **持久化 = 上游同款"不落盘"哲学**：每个 toolResult 的 details 携带全量
+  快照，状态从会话消息回放重建（restoreLatest / 切会话 / new session 三处
+  接入 replayTodos；新会话清空任务槽）。纯 JS 工具，零 hostcall、零审批。
+- **prompt 引导**：上游 8 条 promptGuidelines 原文注入 systemPrompt
+  （"# Todo list" 节，BASE_SYSTEM_PROMPT 同步剥离，应用/重装不叠加）。
+
+### 移动形态（上游 TUI overlay → WebView 常驻面板）
+- `todo_updated` 事件（全量快照）驱动 UI：列表非空自动弹面板、清空自动收起；
+  ✓ 完成（划线）/ ◐ 进行中（activeForm 斜体）/ ○ 待办；`/todos` 命令手动开关
+  （命令面板第 4 项）。
+
+### 测试
+- 新增 `pi-bundle/todo-test.js`（mock loopback）：content 文案、状态机、
+  依赖图三拒、墓碑、get 反向 blocks 边、clear 重置 id、合成消息回放 +
+  回放后续号、prompt 注入、todo_updated 事件流，14 组断言全绿。
+- 排坑：纯 JS 工具调用的测试全是微任务，不泵 I/O——boot 异步收尾
+  （applySystemPrompt 依赖 refresh* 完成）与 fire-and-forget 的 emit 必须显式
+  sleep 等待/flush，否则断言竞态（prompt 缺节、事件计数 0）。
+- 全回归 approval/mcp/local/pi-commands/subagent/session ✅；tsc ✅；
+  bundle 1.45MB ✅。lint 报错为基线既有（HEAD 同样报错），未新增。
+
+### 下一步
+- [ ] 真机验证：多步任务 todo 面板联动、切会话/重启后面板随快照恢复
+- [ ] M4 剩余：Skills（D12）、前台服务保流、通知
+- [ ] 自动续跑（pi-goal autoContinue 带上限）、MCP per-server 审批粒度
+
+---
+
 ## 2026-09-06 13:07 — 审查必修三连：桥死锁 / MCP 审批绕过 / 命令未注册 ✅
 
 ### 审查确认（三条全部属实，#3 与"真机能用"的矛盾也已厘清）

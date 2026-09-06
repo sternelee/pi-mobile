@@ -333,6 +333,226 @@ const subagentTool = {
 extensionTools.push(subagentTool);
 tools.push(subagentTool); // agent 在下方构造，确保初始工具集包含 subagent
 
+// ---- todo（@juicesharp/rpiv-todo 移动原生化：Claude-Code 对齐任务清单）----
+// 语义逐条对齐上游 tool-schema.md：6 动作（create/update/list/get/delete/clear）、
+// 4 态状态机（deleted 为墓碑）、blockedBy 依赖图校验（未知/墓碑/自阻塞/环）。
+// 持久化走上游同款哲学：每个 toolResult 的 details 携带全量快照，状态从会话
+// 消息回放重建（restoreLatest / 切会话 / new），不写磁盘。纯 JS 工具，零 hostcall。
+// 交互层：todo_updated 事件 → WebView 常驻面板（上游 TUI overlay 的移动形态）。
+
+const TODO_TRANSITIONS = {
+	pending: ["in_progress", "completed", "deleted"],
+	in_progress: ["pending", "completed", "deleted"],
+	completed: ["deleted"],
+	deleted: [],
+};
+
+let todoState = { tasks: [], nextId: 1 };
+const todoTask = (id) => todoState.tasks.find((t) => t.id === id);
+
+// blockedBy 校验（先校验后变更，拒绝时状态不动）：依赖须存在且非墓碑、
+// 不得自阻塞、新增边不得成环（从新依赖沿 blockedBy DFS，回到自身即环——
+// 已有图无环是不变量，故只需检查新边）。
+function todoDepError(id, deps) {
+	for (const d of deps) {
+		const dep = todoTask(d);
+		if (!dep) return `blockedBy: #${d} not found`;
+		if (dep.status === "deleted") return `blockedBy: #${d} is deleted`;
+		if (dep.id === id) return `cannot block #${id} on itself`;
+	}
+	const seen = new Set();
+	const stack = [...deps];
+	while (stack.length) {
+		const cur = todoTask(stack.pop());
+		if (!cur || seen.has(cur.id)) continue;
+		if (cur.id === id) return "addBlockedBy would create a cycle in the blockedBy graph";
+		seen.add(cur.id);
+		for (const b of cur.blockedBy ?? []) stack.push(b);
+	}
+	return null;
+}
+
+const todoRow = (t) =>
+	`[${t.status}] #${t.id} ${t.subject}` +
+	(t.activeForm ? ` (${t.activeForm})` : "") +
+	(t.blockedBy?.length ? ` ⛓ ${t.blockedBy.map((b) => `#${b}`).join(",")}` : "");
+
+function todoApply(action, p) {
+	const snapshot = () => JSON.parse(JSON.stringify(todoState));
+	const envelope = (text, error) => ({
+		text,
+		details: { action, params: p, tasks: snapshot().tasks, nextId: todoState.nextId, ...(error ? { error } : {}) },
+	});
+	// 拒绝：content 带 "Error: …"，details.error 带裸消息，状态不动
+	const fail = (msg) => ({ ...envelope(`Error: ${msg}`, msg), error: msg });
+
+	switch (action) {
+		case "create": {
+			const subject = (p.subject ?? "").trim();
+			if (!subject) return fail("subject required for create");
+			if (p.blockedBy?.length) {
+				const err = todoDepError(todoState.nextId, p.blockedBy);
+				if (err) return fail(err);
+			}
+			const task = { id: todoState.nextId++, subject, status: "pending" };
+			if (p.description != null) task.description = p.description;
+			if (p.activeForm != null) task.activeForm = p.activeForm;
+			if (p.owner != null) task.owner = p.owner;
+			if (p.metadata != null) task.metadata = p.metadata;
+			if (p.blockedBy?.length) task.blockedBy = [...p.blockedBy];
+			todoState.tasks.push(task);
+			return envelope(`Created #${task.id}: ${subject} (pending)`);
+		}
+		case "update": {
+			if (p.id == null) return fail("id required for update");
+			const task = todoTask(p.id);
+			if (!task) return fail(`#${p.id} not found`);
+			const mutable = ["subject", "description", "activeForm", "status", "owner", "metadata", "addBlockedBy", "removeBlockedBy"];
+			if (!mutable.some((k) => p[k] !== undefined))
+				return fail(
+					"update requires at least one mutable field: subject, description, activeForm, status, owner, metadata, addBlockedBy, or removeBlockedBy",
+				);
+			// 状态机：同状态 = no-op；非法迁移拒绝（先校验后变更）
+			if (p.status != null && p.status !== task.status && !TODO_TRANSITIONS[task.status].includes(p.status))
+				return fail(`illegal transition ${task.status} → ${p.status}`);
+			if (p.addBlockedBy?.length || p.removeBlockedBy?.length) {
+				const add = p.addBlockedBy ?? [];
+				if (add.length) {
+					const err = todoDepError(task.id, add);
+					if (err) return fail(err);
+				}
+				const cur = new Set(task.blockedBy ?? []);
+				for (const d of add) cur.add(d);
+				for (const d of p.removeBlockedBy ?? []) cur.delete(d);
+				if (cur.size) task.blockedBy = [...cur].sort((a, b) => a - b);
+				else delete task.blockedBy;
+			}
+			let changed = false;
+			for (const k of ["subject", "description", "activeForm", "owner"]) {
+				if (p[k] !== undefined && p[k] !== task[k]) {
+					if (p[k] === "") delete task[k];
+					else task[k] = p[k];
+					changed = true;
+				}
+			}
+			if (p.metadata != null) {
+				task.metadata ??= {};
+				for (const [k, v] of Object.entries(p.metadata)) {
+					if (v === null) delete task.metadata[k];
+					else task.metadata[k] = v;
+				}
+				if (!Object.keys(task.metadata).length) delete task.metadata;
+				changed = true;
+			}
+			const prevStatus = task.status;
+			if (p.status != null && p.status !== prevStatus) {
+				task.status = p.status;
+				changed = true;
+			}
+			if (p.addBlockedBy?.length || p.removeBlockedBy?.length) changed = true;
+			if (!changed)
+				return envelope(`No change: #${task.id} already matches the requested values (status: ${task.status})`);
+			return envelope(
+				p.status != null && p.status !== prevStatus
+					? `Updated #${task.id} (${prevStatus} → ${p.status})`
+					: `Updated #${task.id}`,
+			);
+		}
+		case "list": {
+			let tasks = todoState.tasks.filter((t) => t.status !== "deleted" || p.includeDeleted);
+			if (p.status) tasks = tasks.filter((t) => t.status === p.status);
+			return envelope(tasks.length ? tasks.map(todoRow).join("\n") : "No tasks");
+		}
+		case "get": {
+			if (p.id == null) return fail("id required for get");
+			const task = todoTask(p.id);
+			if (!task) return fail(`#${p.id} not found`);
+			const lines = [todoRow(task)];
+			if (task.description) lines.push(task.description);
+			if (task.blockedBy?.length) lines.push(`blockedBy: ${task.blockedBy.map((b) => `#${b}`).join(",")}`);
+			const blocks = todoState.tasks.filter((t) => (t.blockedBy ?? []).includes(task.id) && t.status !== "deleted");
+			if (blocks.length) lines.push(`blocks: ${blocks.map((b) => `#${b.id}`).join(",")}`);
+			return envelope(lines.join("\n"));
+		}
+		case "delete": {
+			if (p.id == null) return fail("id required for delete");
+			const task = todoTask(p.id);
+			if (!task) return fail(`#${p.id} not found`);
+			if (task.status === "deleted") return fail(`#${p.id} is already deleted`);
+			task.status = "deleted";
+			return envelope(`Deleted #${task.id}: ${task.subject}`);
+		}
+		case "clear": {
+			const n = todoState.tasks.length;
+			todoState = { tasks: [], nextId: 1 };
+			return envelope(`Cleared ${n} tasks`);
+		}
+		default:
+			return fail(`unknown action: ${action}`);
+	}
+}
+
+// 会话回放：取最后一个携带 details.tasks 的 todo toolResult（上游 replayFromBranch
+// 同语义——全量快照在 details 里，walk 分支取最后一份）
+function replayTodos(messages) {
+	let found = null;
+	for (const m of messages) {
+		if (m?.role === "toolResult" && m.toolName === "todo" && Array.isArray(m.details?.tasks)) found = m.details;
+	}
+	todoState = found
+		? { tasks: found.tasks, nextId: found.nextId ?? 1 }
+		: { tasks: [], nextId: 1 };
+	emit({ type: "todo_updated", tasks: todoState.tasks, nextId: todoState.nextId });
+}
+
+// prompt 引导（上游 DEFAULT_PROMPT_SNIPPET / DEFAULT_PROMPT_GUIDELINES 原文）
+const TODO_PROMPT_GUIDELINES = [
+	"Use `todo` for complex work with 3+ steps, when the user gives you a list of tasks, or immediately after receiving new instructions to capture requirements. Skip it for single trivial tasks and purely conversational requests.",
+	"When starting a task from the todo list, mark it in_progress BEFORE beginning work. Mark it completed IMMEDIATELY when done — never batch completions. Exactly one task in_progress at a time.",
+	"Never mark a task completed if tests are failing, the implementation is partial, or you hit unresolved errors — keep it in_progress and create a new task for the blocker instead.",
+	"Task status is a 4-state machine: pending → in_progress → completed, plus deleted as a tombstone. Pass activeForm (present-continuous label, e.g. 'researching existing tool') when marking in_progress.",
+	'To change a task\'s status, call update with the task id and the target status, e.g. {"action":"update","id":3,"status":"completed"} or {"action":"update","id":3,"status":"in_progress","activeForm":"writing tests"}. status is the field that changes the task; an update without a mutable field (status or another) is rejected.',
+	"Use blockedBy to express dependencies (A is blocked by B). On create, pass blockedBy as the initial set. On update, use addBlockedBy / removeBlockedBy (additive merge — do not resend the full array). Cycles are rejected.",
+	"list hides tombstoned (deleted) tasks by default; pass includeDeleted:true to see them. Pass status to filter by a single status.",
+	"Subject must be short and imperative (e.g. 'Research existing tool'); description is for long-form detail. activeForm is a present-continuous label shown while in_progress.",
+];
+
+const todoTool = {
+	name: "todo",
+	label: "Todo",
+	description:
+		"Manage a task list for tracking multi-step progress. Actions: create (new task), update (change status/fields/dependencies), list (all tasks, optionally filtered by status), get (single task details), delete (tombstone), clear (reset all). Status: pending → in_progress → completed, plus deleted tombstone. Use this to plan and track multi-step work like research, design, and implementation.",
+	parameters: {
+		type: "object",
+		properties: {
+			action: { type: "string", enum: ["create", "update", "list", "get", "delete", "clear"], description: "The operation to perform" },
+			subject: { type: "string", description: "(create/update) short imperative task title" },
+			description: { type: "string", description: "(create/update) long-form detail" },
+			activeForm: { type: "string", description: "(create/update) present-continuous label shown while in_progress, e.g. 'writing tests'" },
+			owner: { type: "string", description: "(create/update) agent/owner assigned to this task" },
+			metadata: { type: "object", description: "(create/update) arbitrary key-value; on update, null deletes a key" },
+			blockedBy: { type: "array", items: { type: "integer" }, description: "(create) ids this task waits on" },
+			addBlockedBy: { type: "array", items: { type: "integer" }, description: "(update) additive merge into blockedBy" },
+			removeBlockedBy: { type: "array", items: { type: "integer" }, description: "(update) additive removal from blockedBy" },
+			id: { type: "integer", description: "(update/get/delete) task id" },
+			status: { type: "string", enum: ["pending", "in_progress", "completed", "deleted"], description: "(update) target status; (list) filter" },
+			includeDeleted: { type: "boolean", description: "(list) include tombstoned tasks. Default: false" },
+		},
+		required: ["action"],
+		additionalProperties: false,
+	},
+	async execute(toolCallId, params) {
+		const r = todoApply(params?.action ?? "", params ?? {});
+		if (!r.error) {
+			emit({ type: "todo_updated", tasks: todoState.tasks, nextId: todoState.nextId });
+		}
+		return { content: [{ type: "text", text: r.text }], details: r.details };
+	},
+};
+
+extensionTools.push(todoTool);
+tools.push(todoTool);
+
 // ---- MCP adapter（pi-mcp-adapter 移动原生化，仅 streamable-http）----
 // 手写最小 MCP 客户端：JSON-RPC over POST，响应兼容 application/json 与
 // text/event-stream。不用 @modelcontextprotocol SDK——其 node 内建依赖与
@@ -787,6 +1007,7 @@ async function restoreLatest() {
 	if (restoredMessages.length) {
 		agent.state.messages = restoredMessages;
 	}
+	replayTodos(restoredMessages); // todo 状态随会话回放重建（上游 replayFromBranch 语义）
 	emit({ type: "session_restored", sessionId: latest.id, messages: restoredMessages.length });
 }
 
@@ -794,6 +1015,7 @@ const BASE_SYSTEM_PROMPT = () =>
 	agent.state.systemPrompt
 		.split("\n\n# Project instructions")[0]
 		.split("\n\n# Current goal")[0]
+		.split("\n\n# Todo list")[0]
 		.trim();
 
 // AGENTS.md + 持久目标（pi-goal 移动原生化）统一组装 systemPrompt
@@ -802,6 +1024,7 @@ let currentGoal = null;
 
 async function applySystemPrompt() {
 	let prompt = BASE_SYSTEM_PROMPT();
+	prompt += `\n\n# Todo list\n\nManage a task list to track multi-step progress (the \`todo\` tool):\n${TODO_PROMPT_GUIDELINES.map((g) => `- ${g}`).join("\n")}`;
 	if (agentsMdCache) prompt += `\n\n# Project instructions (AGENTS.md)\n\n${agentsMdCache}`;
 	if (currentGoal)
 		prompt += `\n\n# Current goal\n\nWork persistently toward this objective across turns until the user clears it: ${currentGoal}`;
@@ -954,6 +1177,13 @@ globalThis.__pi_status = () =>
 globalThis.__pi_tool_names = () => (agent.state.tools ?? []).map((t) => t.name);
 globalThis.__pi_system_prompt = () => agent.state.systemPrompt;
 
+// todo 诊断/测试缝：状态快照 + 合成消息回放（同步、无 I/O——eval 安全）
+globalThis.__pi_todo_state = () => JSON.stringify(todoState);
+globalThis.__pi_todo_replay = (messagesJson) => {
+	replayTodos(JSON.parse(messagesJson));
+	return "ok";
+};
+
 // 重启恢复给 UI 的历史（boot 时从最新会话回放；同步求值用内存副本）
 globalThis.__pi_history = () =>
 	JSON.stringify({ sessionId, messages: restoredMessages });
@@ -988,6 +1218,7 @@ const doOpenSession = async (id) => {
 			.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
 			.map((e) => e.message);
 		if (restoredMessages.length) agent.state.messages = restoredMessages;
+		replayTodos(restoredMessages); // 切会话：todo 状态随目标会话重建
 		emit({ type: "session_restored", sessionId: meta.id, messages: restoredMessages.length });
 		return "ok";
 	} catch (e) {
@@ -1012,6 +1243,8 @@ globalThis.__pi_new_session = () => {
 	restoredMessages = [];
 	ensurePromise = null;
 	agent.state.messages = [];
+	todoState = { tasks: [], nextId: 1 }; // 新会话 = 空任务槽（上游按 sessionId 分槽）
+	emit({ type: "todo_updated", tasks: [], nextId: 1 });
 	emit({ type: "session_new" });
 	return "ok";
 };

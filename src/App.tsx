@@ -74,6 +74,16 @@ type TreeEntry = {
   mtimeMs: number;
 };
 
+type TodoTask = {
+  id: number;
+  subject: string;
+  description?: string;
+  activeForm?: string;
+  status: "pending" | "in_progress" | "completed" | "deleted";
+  blockedBy?: number[];
+  owner?: string;
+};
+
 const SUGGESTIONS = [
   "List my workspace files",
   "Create hello.py that prints a greeting",
@@ -84,6 +94,7 @@ const COMMANDS = [
   { cmd: "/plan", desc: "draft an implementation plan" },
   { cmd: "/btw", desc: "quick side question (context-aware)" },
   { cmd: "/goal", desc: "set a persistent objective (/goal off clears)" },
+  { cmd: "/todos", desc: "show/hide the agent's task list panel" },
 ];
 
 function fmtRel(ms: number): string {
@@ -124,6 +135,11 @@ function App() {
   );
   const [planning, setPlanning] = createSignal(false);
   const [goal, setGoal] = createSignal<string | null>(null);
+  const [todos, setTodos] = createSignal<{ tasks: TodoTask[]; nextId: number }>({
+    tasks: [],
+    nextId: 1,
+  });
+  const [todoOpen, setTodoOpen] = createSignal(false);
 
   let chatEl: HTMLDivElement | undefined;
   let textareaEl: HTMLTextAreaElement | undefined;
@@ -290,6 +306,13 @@ function App() {
         case "subagent_end":
           push({ role: "status", text: `${ev.name} finished` });
           break;
+        case "todo_updated": {
+          // rpiv-todo 移动原生化：列表非空自动弹面板，清空自动收起
+          const tasks: TodoTask[] = ev.tasks ?? [];
+          setTodos({ tasks, nextId: ev.nextId ?? 1 });
+          setTodoOpen(tasks.length > 0);
+          break;
+        }
         case "boot_error":
           setBusy(false);
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
@@ -479,6 +502,11 @@ function App() {
       }
       return;
     }
+    if (cmd === "/todos") {
+      // 面板由 todo_updated 事件驱动；/todos 手动开关（上游为 TUI overlay）
+      setTodoOpen(!todoOpen());
+      return;
+    }
     push({ role: "status", text: `unknown command ${cmd} — try ${COMMANDS.map((c) => c.cmd).join(", ")}` });
   }
 
@@ -506,6 +534,18 @@ function App() {
       push({ role: "status", text: `goal clear failed: ${e}` });
     }
   }
+
+  // ── todo 面板（@juicesharp/rpiv-todo 移动原生化）──
+  // 上游 TUI overlay 的移动形态：列表非空自动显示（todo_updated 事件驱动），
+  // ✓ 完成 / ◐ 进行中（带 activeForm）/ ○ 待办；墓碑行不上屏。
+  const visibleTodos = () => todos().tasks.filter((t) => t.status !== "deleted");
+  const todoHeading = () => {
+    const all = visibleTodos();
+    const done = all.filter((t) => t.status === "completed").length;
+    return `Todos (${done}/${all.length})`;
+  };
+  const todoGlyph = (t: TodoTask) =>
+    t.status === "completed" ? "✓" : t.status === "in_progress" ? "◐" : "○";
 
   const onSubmit = (e: Event) => {
     e.preventDefault();
@@ -1036,6 +1076,35 @@ function App() {
 
       <Show when={planning()}>
         <div class="planning-note">drafting plan…</div>
+      </Show>
+
+      <Show when={todoOpen()}>
+        <div class="todo-panel">
+          <div class="todo-head">
+            <span class="todo-title">{todoHeading()}</span>
+            <button class="goal-btn" onClick={() => setTodoOpen(false)} aria-label="hide todos">
+              ✕
+            </button>
+          </div>
+          <Show
+            when={visibleTodos().length > 0}
+            fallback={<div class="todo-row todo-empty">No todos yet. Ask the agent to add some!</div>}
+          >
+            <For each={visibleTodos()}>
+              {(t) => (
+                <div class={`todo-row todo-${t.status}`}>
+                  <span class="todo-glyph">{todoGlyph(t)}</span>
+                  <span class="todo-subject">
+                    #{t.id} {t.subject}
+                    <Show when={t.status === "in_progress" && t.activeForm}>
+                      <span class="todo-active"> ({t.activeForm})</span>
+                    </Show>
+                  </span>
+                </div>
+              )}
+            </For>
+          </Show>
+        </div>
       </Show>
 
       <form class="composer" onSubmit={onSubmit}>

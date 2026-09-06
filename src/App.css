@@ -526,6 +526,67 @@ button {
   background: hsl(var(--accent));
 }
 
+/* ── todo 面板（rpiv-todo 移动原生化） ─────────────────── */
+
+.todo-panel {
+  border-top: 1px solid hsl(var(--border));
+  background: var(--surface);
+  padding: 0.35rem 0.6rem;
+  max-height: 9.5rem;
+  overflow-y: auto;
+}
+
+.todo-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.15rem;
+}
+
+.todo-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.todo-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--text);
+  padding: 0.1rem 0;
+}
+
+.todo-row.todo-empty {
+  color: var(--text-dim);
+}
+
+.todo-glyph {
+  flex: none;
+  width: 1em;
+  text-align: center;
+}
+
+.todo-in_progress .todo-glyph {
+  color: hsl(var(--accent));
+}
+
+.todo-completed .todo-glyph {
+  color: hsl(142 60% 45%);
+}
+
+.todo-completed .todo-subject {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}
+
+.todo-active {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
 /* ── / 命令面板 ───────────────────────────────────────── */
 
 .cmd-palette {

@@ -34,7 +34,7 @@
 
 | 事件 | Payload | 说明 |
 |------|---------|------|
-| `pi-agent-event` | agent 事件 JSON（透传） | 见 §2.4 事件类型；含 `agent_ready` / `session_restored` / `session_created` / `session_error` / `agent_error` / `boot_error` / `approval_required` |
+| `pi-agent-event` | agent 事件 JSON（透传） | 见 §2.4 事件类型；含 `agent_ready` / `session_restored` / `session_created` / `session_error` / `agent_error` / `boot_error` / `approval_required` / `todo_updated`（rpiv-todo 移动原生化：`{tasks, nextId}` 全量快照，成功变更即发；回放/切会话/新建同步发出；UI 据此渲染常驻面板，`/todos` 命令手动开关） |
 
 （原规划的 `agent:delta` 16ms 合并等随 M3 后续落地。）
 
