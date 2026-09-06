@@ -38,13 +38,9 @@ const srv = createServer((req, res) => {
 			// deny 首次（write），其余放行
 			const decision = approvalsSeen === 1 ? "deny" : "allow";
 			res.end(JSON.stringify({ decision }));
-		} else if (method === "ask_user") {
-			// 模拟用户作答：选 B + 备注语
-			res.end(
-				JSON.stringify({
-					response: { kind: "selection", selections: ["Option B"], comment: "because B" },
-				}),
-			);
+		} else if (method === "ask_user_register") {
+			// 模拟 Rust 注册：固定 id，测试代码稍后经 __pi_ask_resolve 注入答案
+			res.end(JSON.stringify({ id: "ask_test_1", state: "pending" }));
 		} else if (method === "tool") {
 			if (payload.name === "write") {
 				writeFileSync(path.join(ws, payload.args.path), payload.args.content);
@@ -132,17 +128,23 @@ if (!/not found/i.test(miss.content?.[0]?.text ?? "")) {
 }
 console.log("OK edit: missing oldText reported as error");
 
-// 5) ask_user（pi-ask-user 等价）：hostcall 返回答案 → 工具格式化结果
-const asked = await globalThis.__pi_tool_call("ask_user", {
+// 5) ask_user（pi-ask-user 等价）：register → 测试注入答案（模拟 Rust 反向 eval）
+const askedPromise = globalThis.__pi_tool_call("ask_user", {
 	question: "Which option?",
 	options: [{ title: "Option A" }, { title: "Option B" }],
 });
+await new Promise((r) => setTimeout(r, 200)); // 等 register hostcall 落地
+globalThis.__pi_ask_resolve(
+	"ask_test_1",
+	JSON.stringify({ response: { kind: "selection", selections: ["Option B"], comment: "because B" } }),
+);
+const asked = await askedPromise;
 const askedText = asked.content?.[0]?.text ?? "";
 if (!askedText.includes("Option B") || !askedText.includes("because B")) {
 	console.error("FAIL ask_user:", askedText.slice(0, 200));
 	process.exit(1);
 }
-console.log("OK ask_user: answer formatted into tool result");
+console.log("OK ask_user: answer injected and formatted into tool result");
 
 // 6) 只读工具不应触发审批（write×2 + edit×2，含未命中 edit —— 审批在执行前）
 await globalThis.__pi_tool_call("ls", {});

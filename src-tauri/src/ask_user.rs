@@ -5,28 +5,35 @@
 //! 换成宿主事件 → WebView 提问卡。模型视角与桌面 pi 一致：调用 ask_user →
 //! 用户作答 → 工具结果返回回答文本。
 //!
-//! 流程：bundle ask_user 工具 execute → `ask_user` hostcall（阻塞）→ 本模块
-//! emit `ask_user` 事件 → UI `ask_user_respond` 命令回填 → hostcall 返回
-//! `{ response: {...} }`（cancelled 时 response 为 null）。
+//! 通信为 kick+事件注入模式（真机实测：长挂起 fetch + AbortSignal 会触发
+//! 嵌入 bun 的 HeapHelper 线程 SIGSEGV，禁止长阻塞 hostcall）：
+//! 1. bundle 工具 execute → `ask_user_register` hostcall（立即返回 id）
+//! 2. 本模块 emit `ask_user` 事件 → WebView 提问卡
+//! 3. 用户作答 → `ask_user_respond` 命令 → resolver（pi_bun 注入的
+//!    skal_evaluate 调 `__pi_ask_resolve(id, answer)`）反向解析 pending
+//!    promise → 工具 continuation 由 waitForPromise 泵动
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const TIMEOUT: Duration = Duration::from_secs(600);
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static EVENT_SINK: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
-static PENDING: OnceLock<Mutex<HashMap<String, Sender<String>>>> = OnceLock::new();
+static RESOLVER: OnceLock<Box<dyn Fn(&str, &str) + Send + Sync>> = OnceLock::new();
+static PENDING: OnceLock<Mutex<HashMap<String, ()>>> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     EVENT_SINK.set(Box::new(f)).ok();
 }
 
-/// 审批请求入口（loopback dispatch 调用）。payload 原样转发给 UI。
-pub fn request(payload: &serde_json::Value) -> serde_json::Value {
+/// pi_bun 在 agent_init 时注入：把答案经 skal_evaluate 打回运行时。
+pub fn set_resolver(f: impl Fn(&str, &str) + Send + Sync + 'static) {
+    RESOLVER.set(Box::new(f)).ok();
+}
+
+/// 注册提问（`ask_user_register` hostcall）。立即返回 id，交互异步完成。
+pub fn register(payload: &serde_json::Value) -> serde_json::Value {
     let id = format!(
         "ask_{:x}_{:x}",
         SystemTime::now()
@@ -35,103 +42,103 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
             .unwrap_or(0),
         SEQ.fetch_add(1, Ordering::Relaxed),
     );
-    let (tx, rx) = channel::<String>();
-    let pending = PENDING.get_or_init(|| Mutex::new(HashMap::new()));
-    pending.lock().unwrap().insert(id.clone(), tx);
+    PENDING
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(id.clone(), ());
 
-    if EVENT_SINK.get().is_none() {
-        pending.lock().unwrap().remove(&id);
-        return serde_json::json!({ "response": null, "reason": "no ui attached" });
-    }
-    if let Some(sink) = EVENT_SINK.get() {
-        sink(
-            &serde_json::json!({
-                "type": "ask_user",
-                "requestId": id,
-                "question": payload.get("question").cloned().unwrap_or(serde_json::json!("")),
-                "context": payload.get("context").cloned().unwrap_or(serde_json::Value::Null),
-                "options": payload.get("options").cloned().unwrap_or(serde_json::json!([])),
-                "allowMultiple": payload.get("allowMultiple").cloned().unwrap_or(serde_json::json!(false)),
-                "allowFreeform": payload.get("allowFreeform").cloned().unwrap_or(serde_json::json!(true)),
-                "allowComment": payload.get("allowComment").cloned().unwrap_or(serde_json::json!(false)),
-            })
-            .to_string(),
-        );
-    }
-
-    match rx.recv_timeout(TIMEOUT) {
-        Ok(answer) => serde_json::from_str::<serde_json::Value>(&answer)
-            .unwrap_or(serde_json::json!({ "response": null, "reason": "bad answer" })),
-        Err(_) => {
-            pending.lock().unwrap().remove(&id);
-            serde_json::json!({ "response": null, "reason": "timeout" })
-        }
-    }
+    let Some(sink) = EVENT_SINK.get() else {
+        PENDING
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(&id);
+        return serde_json::json!({ "id": id, "state": "cancelled", "reason": "no ui attached" });
+    };
+    sink(
+        &serde_json::json!({
+            "type": "ask_user",
+            "requestId": id,
+            "question": payload.get("question").cloned().unwrap_or(serde_json::json!("")),
+            "context": payload.get("context").cloned().unwrap_or(serde_json::Value::Null),
+            "options": payload.get("options").cloned().unwrap_or(serde_json::json!([])),
+            "allowMultiple": payload.get("allowMultiple").cloned().unwrap_or(serde_json::json!(false)),
+            "allowFreeform": payload.get("allowFreeform").cloned().unwrap_or(serde_json::json!(true)),
+            "allowComment": payload.get("allowComment").cloned().unwrap_or(serde_json::json!(false)),
+        })
+        .to_string(),
+    );
+    serde_json::json!({ "id": id, "state": "pending" })
 }
 
-/// UI 决策回填（Tauri 命令调用）。answer_json 为 `{response: ...}` JSON。
+/// UI 回填答案 → 经 resolver 注入运行时（answer_json 为 `{response: ...}`）。
 pub fn respond(request_id: &str, answer_json: &str) -> Result<(), String> {
     if serde_json::from_str::<serde_json::Value>(answer_json).is_err() {
         return Err("answer must be valid JSON".into());
     }
-    let sender = PENDING
+    PENDING
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap()
-        .remove(request_id)
-        .ok_or_else(|| format!("unknown or resolved request: {request_id}"))?;
-    sender
-        .send(answer_json.to_string())
-        .map_err(|e| format!("send answer: {e}"))
+        .remove(request_id);
+    let resolver = RESOLVER
+        .get()
+        .ok_or_else(|| "resolver not configured (agent not initialized)".to_string())?;
+    resolver(request_id, answer_json);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
-    fn ask_user_respond_roundtrip_and_cancel() {
+    fn register_emit_and_respond_injects_via_resolver() {
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("pi-ask-test"));
-        // 无 UI：立即返回 cancelled
-        let r = request(&json!({ "question": "q?" }));
-        assert_eq!(r["response"], serde_json::Value::Null);
 
-        // 有 UI：respond 回填答案
-        set_event_sink(|_| {});
-        let h = std::thread::spawn(|| request(&json!({ "question": "pick one", "options": [{"title": "A"}, {"title": "B"}] })));
-        std::thread::sleep(Duration::from_millis(100));
-        let id = PENDING
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap();
-        respond(
-            &id,
-            &json!({ "response": { "kind": "selection", "selections": ["B"] } }).to_string(),
-        )
-        .unwrap();
-        let r = h.join().unwrap();
-        assert_eq!(r["response"]["kind"], "selection");
-        assert_eq!(r["response"]["selections"][0], "B");
+        // 无 UI：注册即取消
+        let r = register(&json!({ "question": "q?" }));
+        assert_eq!(r["state"], "cancelled");
 
-        // 取消路径：response null + cancelled
-        let h = std::thread::spawn(|| request(&json!({ "question": "again" })));
-        std::thread::sleep(Duration::from_millis(100));
-        let id = PENDING
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap();
-        respond(&id, &json!({ "response": null, "cancelled": true }).to_string()).unwrap();
-        let r = h.join().unwrap();
-        assert_eq!(r["response"], serde_json::Value::Null);
-        assert_eq!(r["cancelled"], true);
+        // 有 UI：emit 事件 → respond 经 resolver 注入
+        let seen = StdMutex::new(Vec::new());
+        {
+            let seen = &seen;
+            set_event_sink(move |s| seen.lock().unwrap().push(s.to_string()));
+        }
+        let injected = StdMutex::new(Vec::new());
+        {
+            let injected = &injected;
+            set_resolver(move |id, answer| {
+                injected
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), answer.to_string()));
+            });
+        }
+
+        let r = register(&json!({ "question": "pick one", "options": [{"title": "A"}, {"title": "B"}] }));
+        assert_eq!(r["state"], "pending");
+        let id = r["id"].as_str().unwrap().to_string();
+
+        let events = seen.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let ev: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+        assert_eq!(ev["type"], "ask_user");
+        assert_eq!(ev["question"], "pick one");
+        drop(events);
+
+        let answer = json!({ "response": { "kind": "selection", "selections": ["B"] } }).to_string();
+        respond(&id, &answer).unwrap();
+        let injected = injected.lock().unwrap();
+        assert_eq!(injected.len(), 1);
+        assert_eq!(injected[0].0, id);
+        assert_eq!(injected[0].1, answer);
+
+        // 重复 respond 同一 id → 已消费，报错
+        assert!(respond(&id, &answer).is_err());
     }
 }

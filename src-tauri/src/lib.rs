@@ -87,9 +87,12 @@ fn approval_respond(request_id: String, decision: String) -> Result<(), String> 
 }
 
 /// 扩展：回填 ask_user 答案（JSON：{response: ...} 或 {response: null, cancelled: true}）。
+/// 经 resolver 反向 skal_evaluate 注入运行时 —— 必须 off main thread。
 #[tauri::command]
-fn ask_user_respond(request_id: String, answer: String) -> Result<(), String> {
-    ask_user::respond(&request_id, &answer)
+async fn ask_user_respond(request_id: String, answer: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || ask_user::respond(&request_id, &answer))
+        .await
+        .map_err(|e| format!("join: {e}"))?
 }
 
 /// M3：回滚 workspace 文件到上一次覆盖写入前（消费对应备份）。

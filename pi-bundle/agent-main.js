@@ -23,12 +23,12 @@ import * as openaiResponses from "@earendil-works/pi-ai/api/openai-responses";
 
 const LOOPBACK = `http://127.0.0.1:${globalThis.__PI_CONFIG?.port ?? 19999}`;
 
-async function hostcall(method, payload) {
+async function hostcall(method, payload, opts = {}) {
 	const res = await fetch(LOOPBACK + "/hostcall", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ method, payload }),
-		signal: AbortSignal.timeout(30_000),
+		signal: opts.noTimeout ? undefined : AbortSignal.timeout(30_000),
 	});
 	if (!res.ok) throw new Error(`hostcall ${method}: HTTP ${res.status}`);
 	return res.json();
@@ -130,7 +130,10 @@ const askUserTool = {
 	executionMode: "sequential",
 	async execute(toolCallId, params) {
 		try {
-			const r = await hostcall("ask_user", {
+			// kick+事件注入模式（禁用长挂起 fetch）：真机实测长 pending fetch +
+			// AbortSignal 定时器会触发嵌入 bun 的 HeapHelper 线程 SIGSEGV。
+			// 注册即返回 → Rust 侧等用户作答 → 经 __pi_ask_resolve 反向注入。
+			const reg = await hostcall("ask_user_register", {
 				question: params.question,
 				context: params.context,
 				options: params.options ?? [],
@@ -138,10 +141,13 @@ const askUserTool = {
 				allowFreeform: params.allowFreeform ?? true,
 				allowComment: params.allowComment ?? false,
 			});
-			const resp = r.response;
+			const reply = await new Promise((resolve) => {
+				pendingAsks.set(reg.id, resolve);
+			});
+			const resp = reply?.response ?? null;
 			if (!resp) {
 				return errContent(
-					`The user dismissed the question${r.reason ? ` (${r.reason})` : ""}. Continue with your best judgment and clearly state the assumption you are making.`,
+					"The user dismissed the question. Continue with your best judgment and clearly state the assumption you are making.",
 				);
 			}
 			let text =
@@ -159,6 +165,26 @@ const askUserTool = {
 const extensionTools = [askUserTool];
 
 const tools = [...coreTools, ...extensionTools];
+
+// ask_user 的 kick+事件注入：Rust 在用户作答后经 skal_evaluate 调
+// __pi_ask_resolve(id, answerJson) 反向解析 pending promise。返回两拍后才
+// settle 的 promise，让 waitForPromise 把工具 continuation 泵完。
+const pendingAsks = new Map();
+globalThis.__pi_ask_resolve = (id, answerJson) => {
+	const resolve = pendingAsks.get(id);
+	if (!resolve) return "no such ask";
+	pendingAsks.delete(id);
+	let parsed;
+	try {
+		parsed = JSON.parse(answerJson);
+	} catch {
+		parsed = { response: null, reason: "bad answer" };
+	}
+	resolve(parsed);
+	return new Promise((done) => {
+		queueMicrotask(() => queueMicrotask(done));
+	});
+};
 
 // 诊断/测试缝：直接执行一个工具（与 agent 循环同一 execute 路径，含审批）。
 globalThis.__pi_tool_call = async (name, args) => {

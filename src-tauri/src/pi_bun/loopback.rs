@@ -757,7 +757,7 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
         }
         "fs" => fs_op(payload),
         "approval_request" => crate::approval::request(payload),
-        "ask_user" => crate::ask_user::request(payload),
+        "ask_user_register" => crate::ask_user::register(payload),
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());

@@ -182,6 +182,14 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
         .map_err(|e| format!("sessions: {e}"))?;
     loopback::configure(&workspace, data_dir);
     crate::approval::configure(data_dir);
+    crate::ask_user::set_resolver(|id, answer| {
+        let id_j = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".into());
+        let ans_j = serde_json::to_string(answer).unwrap_or_else(|_| "\"\"".into());
+        let _ = evaluate_blocking(
+            &format!("globalThis.__pi_ask_resolve({id_j}, {ans_j})"),
+            "pi:ask-resolve",
+        );
+    });
 
     // 异步引导（dynamic import 等）需要 VM tick 数拍——轮询 __pi_ready。
     // null result 视为瞬时失败可重试（实测出现过）。
