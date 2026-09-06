@@ -220,7 +220,21 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
         last
     };
 
-    let cfg_json = serde_json::json!({ "port": port, "dataDir": data_dir });
+    let mut cfg = serde_json::json!({ "port": port, "dataDir": data_dir });
+    // 上次保存的默认模型选择：bundle 用 pi-ai 目录解析 (provider, modelId)
+    // 为完整模型对象（无选择或目录缺模型时 bundle 落回兜底模型）。
+    if let Ok(raw) = std::fs::read_to_string(
+        std::path::Path::new(data_dir).join("provider.json"),
+    ) {
+        if let Ok(sel) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if sel.get("provider").and_then(|v| v.as_str()).is_some()
+                && sel.get("modelId").and_then(|v| v.as_str()).is_some()
+            {
+                cfg["providerConfig"] = sel;
+            }
+        }
+    }
+    let cfg_json = cfg;
     let (r, err) = eval_retry(
         &format!("globalThis.__PI_CONFIG = {};", cfg_json),
         "pi:agent-config",

@@ -18,7 +18,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "~/components/ui/sheet";
-import { TextField, TextFieldInput } from "~/components/ui/text-field";
 import "./App.css";
 
 type ChatItem = {
@@ -95,6 +94,18 @@ type SkillMeta = {
   installedAt: number;
 };
 
+// AI provider / model（pi-ai createModels 目录，bundle 侧解析完整模型对象）
+type ProviderModel = { id: string; name: string };
+type ProviderInfo = { id: string; name: string; models: ProviderModel[] };
+type CurrentModel = { provider: string; id: string; name: string };
+
+const UI_PROVIDERS: ProviderInfo[] = [
+  { id: "openai", name: "OpenAI", models: [] },
+  { id: "openrouter", name: "OpenRouter", models: [] },
+  { id: "deepseek", name: "DeepSeek", models: [] },
+  { id: "google-gemini", name: "Google Gemini", models: [] },
+];
+
 const SUGGESTIONS = [
   "List my workspace files",
   "Create hello.py that prints a greeting",
@@ -122,7 +133,6 @@ function App() {
     { role: "status", text: "booting embedded pi agent…" },
   ]);
   const [input, setInput] = createSignal("");
-  const [apiKey, setApiKey] = createSignal("");
   const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [approval, setApproval] = createSignal<Approval | null>(null);
@@ -154,6 +164,16 @@ function App() {
     nextId: 1,
   });
   const [todoOpen, setTodoOpen] = createSignal(false);
+
+  // ── AI provider / model 选择（pi-ai createModels 目录驱动）──
+  // 静态清单先渲染（产品定死 4 家）；runtime 的 providers_listed 事件带
+  // 完整目录（含模型列表）后覆盖。OpenRouter 为动态目录，首次刷新才拉全量。
+  const [providers, setProviders] = createSignal<ProviderInfo[]>(UI_PROVIDERS);
+  const [selProvider, setSelProvider] = createSignal("");
+  const [providerKey, setProviderKey] = createSignal("");
+  const [keySaved, setKeySaved] = createSignal(false);
+  const [loadingModels, setLoadingModels] = createSignal(false);
+  const [currentModel, setCurrentModel] = createSignal<CurrentModel | null>(null);
 
   let chatEl: HTMLDivElement | undefined;
   let textareaEl: HTMLTextAreaElement | undefined;
@@ -236,6 +256,16 @@ function App() {
   }
 
   onMount(async () => {
+    // 持久化的模型选择先回显（agent_ready 后 __pi_model_current 会校正 name）
+    try {
+      const raw = await invoke<string>("get_default_model");
+      const sel = JSON.parse(raw);
+      if (sel?.provider) {
+        setCurrentModel({ provider: sel.provider, id: sel.modelId, name: sel.modelId });
+      }
+    } catch {
+      // 未配置：首启卡片引导选择
+    }
     const un = await listen<string>("pi-agent-event", (e) => {
       let ev: any;
       try {
@@ -246,6 +276,14 @@ function App() {
       switch (ev.type) {
         case "agent_ready":
           setReady(true);
+          // 目录与当前模型回读（runtime 就绪后才有意义）
+          refreshProviders();
+          invoke<string>("pi_call_global", { fnName: "__pi_model_current", arg: "" })
+            .then((r) => {
+              const m = JSON.parse(r);
+              if (m?.id) setCurrentModel(m);
+            })
+            .catch(() => {});
           break;
         case "agent_start":
           setBusy(true);
@@ -327,6 +365,29 @@ function App() {
           setTodoOpen(tasks.length > 0);
           break;
         }
+        case "providers_listed":
+          setProviders(ev.providers ?? []);
+          break;
+        case "providers_error":
+          push({ role: "status", text: `providers: ${ev.error}` });
+          break;
+        case "models_listed":
+          setLoadingModels(false);
+          setProviders((ps) =>
+            ps.map((p) => (p.id === ev.provider ? { ...p, models: ev.models ?? [] } : p)),
+          );
+          break;
+        case "models_error":
+          setLoadingModels(false);
+          push({ role: "status", text: `models ${ev.provider}: ${ev.error}` });
+          break;
+        case "model_applied":
+          setCurrentModel({
+            provider: ev.provider,
+            id: ev.modelId,
+            name: ev.name ?? ev.modelId,
+          });
+          break;
         case "boot_error":
           setBusy(false);
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
@@ -437,16 +498,127 @@ function App() {
     });
   }
 
-  async function saveKey(e: Event) {
-    e.preventDefault();
-    if (!apiKey().trim()) return;
-    await invoke("set_creds", {
-      provider: "deepseek",
-      apiKey: apiKey().trim(),
-    });
-    setApiKey("");
-    push({ role: "status", text: "API key saved (deepseek)" });
+  // ── AI provider / model 选择流程 ──
+  // 目录来自 bundle 的 providers_listed/models_listed 事件；key 存 Rust
+  // creds（D4）；选择经 set_default_model 持久化、__pi_model_select 热切换。
+  const providerModels = () => providers().find((p) => p.id === selProvider())?.models ?? [];
+  const providerLabel = (id: string) => providers().find((p) => p.id === id)?.name ?? id;
+
+  async function refreshProviders() {
+    try {
+      await invoke("pi_call_global", { fnName: "__pi_providers_list", arg: "" });
+    } catch {
+      // runtime 未就绪：保留静态清单，agent_ready 后会再拉
+    }
   }
+
+  async function chooseProvider(id: string) {
+    setSelProvider(id);
+    try {
+      setKeySaved(await invoke<boolean>("has_creds", { provider: id }));
+    } catch {
+      setKeySaved(false);
+    }
+    if (keySaved() && providerModels().length === 0) await loadModels(id);
+  }
+
+  async function saveProviderKey(e: Event) {
+    e.preventDefault();
+    const p = selProvider();
+    if (!p || !providerKey().trim()) return;
+    try {
+      await invoke("set_creds", { provider: p, apiKey: providerKey().trim() });
+      setProviderKey("");
+      setKeySaved(true);
+      push({ role: "status", text: `API key saved (${p})` });
+      await loadModels(p);
+    } catch (err) {
+      push({ role: "status", text: `save key failed: ${err}` });
+    }
+  }
+
+  async function loadModels(id: string) {
+    setLoadingModels(true);
+    try {
+      await invoke("pi_call_global", { fnName: "__pi_models_refresh", arg: id });
+    } catch (err) {
+      setLoadingModels(false);
+      push({ role: "status", text: `model list failed: ${err}` });
+    }
+  }
+
+  async function selectModel(p: string, m: ProviderModel) {
+    try {
+      const r = await invoke<string>("pi_call_global", {
+        fnName: "__pi_model_select",
+        arg: JSON.stringify({ provider: p, modelId: m.id }),
+      });
+      if (r !== "started") throw new Error(r);
+      await invoke("set_default_model", { provider: p, modelId: m.id });
+      setCurrentModel({ provider: p, id: m.id, name: m.name });
+      push({ role: "status", text: `model set: ${m.name}` });
+    } catch (err) {
+      push({ role: "status", text: `model select failed: ${err}` });
+    }
+  }
+
+  // Provider 选择节：首启卡片与抽屉共用（chooseProvider 自动拉已配置
+  // provider 的模型列表；OpenRouter 动态目录首次刷新拉全量）。
+  const providerSection = () => (
+    <div class="flex flex-col gap-1.5">
+      <div class="flex flex-wrap gap-1">
+        <For each={providers()}>
+          {(p) => (
+            <Button
+              variant={selProvider() === p.id ? "default" : "outline"}
+              size="sm"
+              class="h-7 text-xs"
+              onClick={() => chooseProvider(p.id)}
+            >
+              {p.name}
+            </Button>
+          )}
+        </For>
+      </div>
+      <Show when={selProvider()}>
+        <Show
+          when={!keySaved()}
+          fallback={
+            <div class="item-sub">
+              API key configured ·{" "}
+              <span class="underline" onClick={() => setKeySaved(false)}>
+                replace
+              </span>
+            </div>
+          }
+        >
+          <form class="flex flex-col gap-1.5" onSubmit={saveProviderKey}>
+            <input
+              class="ask-input"
+              type="password"
+              placeholder={`${providerLabel(selProvider())} API key…`}
+              value={providerKey()}
+              onInput={(e) => setProviderKey(e.currentTarget.value)}
+            />
+            <Button variant="outline" size="sm" type="submit">
+              Save key & load models
+            </Button>
+          </form>
+        </Show>
+        <Show when={loadingModels()}>
+          <div class="item-sub">loading models…</div>
+        </Show>
+        <For each={providerModels()}>
+          {(m) => (
+            <div class="item-card" onClick={() => selectModel(selProvider(), m)}>
+              <div class="item-title">{m.name}</div>
+              <div class="item-sub mcp-url">{m.id}</div>
+            </div>
+          )}
+        </For>
+      </Show>
+    </div>
+  );
 
   async function sendText(raw: string) {
     const text = raw.trim();
@@ -858,18 +1030,14 @@ function App() {
         )}
       </Show>
 
-      <Show when={!ready()}>
-        <form class="keyform" onSubmit={saveKey}>
-          <TextField class="flex-1">
-            <TextFieldInput
-              type="password"
-              placeholder="DeepSeek API key…"
-              value={apiKey()}
-              onInput={(e) => setApiKey(e.currentTarget.value)}
-            />
-          </TextField>
-          <Button type="submit">Save</Button>
-        </form>
+      <Show when={!ready() || !currentModel()}>
+        <div class="keyform provider-setup">
+          <div class="item-sub">
+            Choose an AI provider — the model list loads automatically after your
+            key is saved.
+          </div>
+          {providerSection()}
+        </div>
       </Show>
 
       <div class="chat" ref={chatEl} onScroll={onChatScroll}>
@@ -1296,6 +1464,23 @@ function App() {
                 </Button>
               </form>
               <div class="item-sub mt-1">calls require approval · ⟳ Reconnect applies config changes</div>
+            </div>
+
+            <div class="mt-4">
+              <strong class="text-sm">AI model</strong>
+              <Show
+                when={currentModel()}
+                fallback={<div class="item-sub">no model selected — pick a provider below</div>}
+              >
+                <div class="item-card active">
+                  <div class="item-title">{currentModel()!.name}</div>
+                  <div class="item-sub">{currentModel()!.provider}</div>
+                </div>
+              </Show>
+              {providerSection()}
+              <div class="item-sub mt-1">
+                selection persists across restarts · subagents follow the active model
+              </div>
             </div>
 
             <div class="mt-4">

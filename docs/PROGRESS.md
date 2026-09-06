@@ -2,6 +2,36 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-06 19:40 — M4：AI provider 配置与模型选择（OpenAI/OpenRouter/DeepSeek/Gemini）✅
+
+### 上游即真源：pi-ai createModels 架构
+- **provider 语义零手写**：bundle 侧 `createModels({ credentials: hostCredsStore })`
+  + 内置 provider 工厂（openai/openrouter/deepseek）。模型目录（compat/
+  contextWindow/thinkingLevel）、动态列表刷新（OpenRouter）、凭证解析、
+  streamSimple 分发全部来自 `@earendil-works/pi-ai`。旧 STREAM_SIMPLE
+  手写分发与 getApiKey 缓存删除。
+- **Gemini 兼容层**：内置 google provider 内部驱动 @google/genai（设备实测
+  嵌入 JSC SIGSEGV），改用 pi-ai 的 `createProvider` + 自带 openai-completions
+  实现 + Gemini 官方 OpenAI 兼容端点；模型数据仍取自 pi-ai 生成的 google
+  catalog（仅重映射 api/baseUrl）。
+- **选择流程**：UI 首启卡片 + 抽屉 "AI model" 节 → 选 provider → key 入
+  creds（D4）→ 自动拉模型列表（静态目录即时；OpenRouter 走
+  `models.refresh` 网络刷新）→ 点选模型：`__pi_model_select` 热切换 +
+  `set_default_model` 落 provider.json，重启经 `__PI_CONFIG.providerConfig`
+  生效。子 agent 取 `agent.state.model` 运行时快照，跟随热切换。
+- **Rust**：`has_creds` / `get_default_model` / `set_default_model` 命令；
+  `creds_set` hostcall（CredentialStore.modify 写路径）。
+- **测试**：pi-bundle/provider-test.js 两阶段（兜底模型 + 目录断言 /
+  providerConfig boot 解析），15 断言；全量 9/9 bundle 测试、12 Rust、
+  tsc、Android 交叉编译全绿。
+
+### 下一步
+- [ ] 真机验证：四家 provider 各配 key 拉列表、切换后对话、重启恢复
+- [ ] M4 余项：前台服务 keep-alive、通知（审批/长任务）、pi-goal autoContinue、MCP 按服务器审批粒度
+- [ ] M5：libpi-bun iOS 静态链路（WebKit JSC 源码构建）
+
+---
+
 ## 2026-09-06 17:25 — iOS 真机跑通：签名闭环 + 首启目录修复 ✅
 
 ### 真机端到端（Honor 替换为 iPhone：Sterne 的 iPhone se）

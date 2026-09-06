@@ -405,6 +405,16 @@ fn creds_get(provider: &str) -> Result<String, String> {
     Ok(crate::creds::get(data_dir, provider).unwrap_or_default())
 }
 
+/// 凭证写入：pi-ai CredentialStore.modify 的宿主后端（空串即删除该 provider）。
+fn creds_set(provider: &str, api_key: &str) -> Result<(), String> {
+    let data_dir = DATA_DIR.get().ok_or("data dir not configured")?;
+    if api_key.is_empty() {
+        // 无独立删除 API：写空串等价于未配置（get 返回 None）
+        return crate::creds::set(data_dir, provider, "");
+    }
+    crate::creds::set(data_dir, provider, api_key)
+}
+
 // ── 会话 JSONL 的 fs hostcall（pi 原生 JsonlSessionRepo 的 FileSystem 后端）──
 //
 // JS 侧路径在 /pi-sessions 虚拟命名空间内；此处剥离前缀并 jail 到
@@ -753,6 +763,14 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             match creds_get(provider) {
                 Ok(k) if !k.is_empty() => serde_json::json!({ "apiKey": k }),
                 _ => serde_json::json!({ "error": format!("no credential for provider '{provider}' — set it in the app") }),
+            }
+        }
+        "creds_set" => {
+            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let api_key = payload.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
+            match creds_set(provider, api_key) {
+                Ok(()) => serde_json::json!({ "ok": true }),
+                Err(e) => serde_json::json!({ "error": e }),
             }
         }
         "fs" => fs_op(payload),

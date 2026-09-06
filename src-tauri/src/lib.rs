@@ -89,6 +89,50 @@ fn set_creds(app: tauri::AppHandle, provider: String, api_key: String) -> Result
     creds::set(&dir, &provider, &api_key)
 }
 
+/// D4：探测某 provider 是否已配置 API key（UI 决定是否显示 key 输入）。
+#[tauri::command]
+fn has_creds(app: tauri::AppHandle, provider: String) -> Result<bool, String> {
+    let dir = app_data_dir(&app)?;
+    Ok(creds::get(&dir, &provider).is_some())
+}
+
+/// provider.json —— 用户选择的默认模型（provider + modelId）。
+/// bundle 侧用 pi-ai 目录把 (provider, modelId) 解析成完整模型对象。
+fn default_model_path(dir: &str) -> std::path::PathBuf {
+    std::path::Path::new(dir).join("provider.json")
+}
+
+/// 读取默认模型选择；未配置返回 "null"。
+#[tauri::command]
+fn get_default_model(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app_data_dir(&app)?;
+    match std::fs::read_to_string(default_model_path(&dir)) {
+        Ok(raw) => {
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            Ok(v.to_string())
+        }
+        Err(_) => Ok("null".into()),
+    }
+}
+
+/// 保存默认模型选择（agent_init 注入 __PI_CONFIG.providerConfig，boot 时生效；
+/// 运行中经 __pi_model_select 热切换）。provider 为空串即清除选择。
+#[tauri::command]
+fn set_default_model(
+    app: tauri::AppHandle,
+    provider: String,
+    model_id: String,
+) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    let path = default_model_path(&dir);
+    if provider.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    let v = serde_json::json!({ "provider": provider, "modelId": model_id });
+    std::fs::write(&path, v.to_string()).map_err(|e| format!("write provider.json: {e}"))
+}
+
 /// M3：回填审批决策（allow / deny / always），唤醒阻塞中的 approval_request。
 #[tauri::command]
 fn approval_respond(request_id: String, decision: String) -> Result<(), String> {
@@ -280,6 +324,9 @@ pub fn run() {
             agent_stop,
             agent_history,
             set_creds,
+            has_creds,
+            get_default_model,
+            set_default_model,
             approval_respond,
             ask_user_respond,
             workspace_revert,

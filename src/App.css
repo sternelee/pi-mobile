@@ -526,6 +526,18 @@ button {
   background: hsl(var(--accent));
 }
 
+/* ── provider/model 选择卡片（首启 + 抽屉共用 providerSection） ── */
+
+.keyform {
+  margin: 0 1rem 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
 /* ── todo 面板（rpiv-todo 移动原生化） ─────────────────── */
 
 .todo-panel {

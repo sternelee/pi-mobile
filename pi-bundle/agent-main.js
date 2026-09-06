@@ -14,9 +14,12 @@
 import * as __piNodeStdlib from "node-stdlib-browser";
 globalThis.__PI_NODE_STDLIB = __piNodeStdlib;
 import { Agent, JsonlSessionRepo, FileError } from "@earendil-works/pi-agent-core";
-import * as anthropic from "@earendil-works/pi-ai/api/anthropic-messages";
-import * as openaiCompletions from "@earendil-works/pi-ai/api/openai-completions";
-import * as openaiResponses from "@earendil-works/pi-ai/api/openai-responses";
+import { createModels, createProvider } from "@earendil-works/pi-ai";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
+import { googleProvider } from "@earendil-works/pi-ai/providers/google";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 // bisect: google-generative-ai temporarily disabled (brings @google/genai node-builtin
 // imports that crash skal JSC on device). re-enable once gemini path is fixed.
 // import * as google from "@earendil-works/pi-ai/api/google-generative-ai";
@@ -283,7 +286,8 @@ const subagentTool = {
 			emit({ type: "subagent_start", name: def.name, task: params.task });
 			const sub = new Agent({
 				initialState: {
-					model: DEFAULT_MODEL,
+					// 运行时快照主 agent 当前模型：热切换后子 agent 跟随
+					model: agent.state.model,
 					thinkingLevel: def.thinking ?? "minimal",
 					systemPrompt:
 						def.systemPromptMode === "append"
@@ -292,7 +296,6 @@ const subagentTool = {
 					tools: resolveSubTools(def),
 				},
 				streamFn: sharedStreamFn,
-				getApiKey: (provider) => getApiKey(provider),
 			});
 			// 主 agent 停止时级联中止子代理（listener 第二参数 = 当前运行 signal）
 			let cascade = undefined;
@@ -751,6 +754,69 @@ globalThis.__pi_mcp_reconnect = () => {
 	return "started";
 };
 
+// ---- AI provider / model 选择流程（UI 经 pi_call_global 驱动）----
+// 列出可选 provider 及其当前已知模型（静态目录即时返回；OpenRouter 等动态
+// provider 列表来自最近一次 refresh，未刷新时为空，由 __pi_models_refresh 拉取）。
+globalThis.__pi_providers_list = () => {
+	(async () => {
+		try {
+			const providers = UI_PROVIDERS.map((id) => {
+				const p = models.getProvider(id);
+				return {
+					id,
+					name: p?.name ?? id,
+					models: (p?.getModels() ?? []).map((m) => ({ id: m.id, name: m.name ?? m.id })),
+				};
+			});
+			emit({ type: "providers_listed", providers });
+		} catch (e) {
+			emit({ type: "providers_error", error: String(e?.message ?? e) });
+		}
+	})();
+	return "started";
+};
+
+// 用已配置的 API key 拉取 provider 的模型列表（动态 provider 走网络刷新，
+// 静态 provider 为 no-op 后回读目录），完成后回投 models_listed / models_error。
+globalThis.__pi_models_refresh = (providerId) => {
+	(async () => {
+		try {
+			await models.refresh({ providers: [providerId], force: true });
+			const p = models.getProvider(providerId);
+			emit({
+				type: "models_listed",
+				provider: providerId,
+				models: (p?.getModels() ?? []).map((m) => ({ id: m.id, name: m.name ?? m.id })),
+			});
+		} catch (e) {
+			emit({ type: "models_error", provider: providerId, error: String(e?.message ?? e) });
+		}
+	})();
+	return "started";
+};
+
+// 选中模型：pi-ai 目录解析完整模型对象后热切换主 agent（子 agent 取运行时
+// 快照自动跟随）。持久化由 UI 侧 set_default_model 落 provider.json，
+// 下次 boot 经 __PI_CONFIG.providerConfig 生效。
+globalThis.__pi_model_select = (json) => {
+	try {
+		const { provider, modelId } = JSON.parse(json);
+		const m = models.getModel(provider, modelId);
+		if (!m) return `unknown model: ${provider}/${modelId}`;
+		agent.state.model = m;
+		emit({ type: "model_applied", provider, modelId, name: m.name ?? m.id });
+		return "started";
+	} catch (e) {
+		return String(e?.message ?? e);
+	}
+};
+
+// 当前生效模型（UI 状态条 / 测试断言）
+globalThis.__pi_model_current = () => {
+	const m = agent.state.model ?? {};
+	return JSON.stringify({ provider: m.provider, id: m.id, name: m.name ?? m.id });
+};
+
 // ask_user 的 kick+事件注入：Rust 在用户作答后经 skal_evaluate 调
 // __pi_ask_resolve(id, answerJson) 反向解析 pending promise。返回两拍后才
 // settle 的 promise，让 waitForPromise 把工具 continuation 泵完。
@@ -791,18 +857,66 @@ globalThis.__pi_stop = () => {
 	}
 };
 
-// ---- streamFn: dispatch on model.api via per-api simple stream functions ----
-let apiKeyCache;
-async function getApiKey(provider) {
-	if (!apiKeyCache) {
-		const r = await hostcall("creds_get", { provider });
-		apiKeyCache = r.apiKey;
-	}
-	return apiKeyCache;
-}
+// ---- providers & models: pi-ai owns the registry ----
+// 上游即真源：provider 注册、模型目录（compat/contextWindow/thinkingLevel）、
+// 动态模型列表刷新（OpenRouter）与凭证解析全部走 @earendil-works/pi-ai 的
+// createModels/builtin providers，不再手写目录或 compat 块。
 
-// Default model for M2 device verification: DeepSeek V4 Flash (OpenAI-completions
-// compatible, reasoning). Catalog entry from @earendil-works/pi-ai providers.
+// pi-ai 的 CredentialStore 实现：宿主端 keyring/沙箱文件（D4），经 hostcall。
+// stored credential 优先于 env（pi-ai envApiKeyAuth 语义），与桌面 pi 一致。
+const hostCredsStore = {
+	async read(providerId) {
+		const r = await hostcall("creds_get", { provider: providerId });
+		return r.apiKey ? { type: "api_key", key: r.apiKey } : undefined;
+	},
+	async list() {
+		return [];
+	},
+	async modify(providerId, fn) {
+		const next = await fn(await hostCredsStore.read(providerId));
+		if (next?.type === "api_key") {
+			await hostcall("creds_set", { provider: providerId, apiKey: next.key ?? "" });
+		}
+		return next;
+	},
+	async delete(providerId) {
+		await hostcall("creds_set", { provider: providerId, apiKey: "" });
+	},
+};
+
+// Google Gemini：pi 内置 google provider 内部驱动 @google/genai，其
+// node-builtin 导入在嵌入 JSC 上崩（设备实测 SIGSEGV）。在修复前改走
+// Gemini 官方 OpenAI 兼容端点：模型目录数据仍取自 pi-ai 生成的 google
+// catalog（仅重映射 api/baseUrl），流式实现用 pi-ai 自己的 openai-completions。
+const GEMINI_COMPAT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai";
+const geminiCompatProvider = createProvider({
+	id: "google-gemini",
+	name: "Google Gemini",
+	baseUrl: GEMINI_COMPAT_BASE,
+	auth: {
+		apiKey: {
+			name: "Gemini API key",
+			resolve: async ({ credential }) =>
+				credential?.key
+					? { auth: { apiKey: credential.key }, source: "stored credential" }
+					: undefined,
+		},
+	},
+	models: googleProvider()
+		.getModels()
+		.map((m) => ({ ...m, api: "openai-completions", provider: "google-gemini", baseUrl: GEMINI_COMPAT_BASE })),
+	api: openAICompletionsApi(),
+});
+
+const models = createModels({ credentials: hostCredsStore });
+for (const p of [openaiProvider(), openrouterProvider(), deepseekProvider(), geminiCompatProvider]) {
+	models.setProvider(p);
+}
+// UI 侧 provider 选择面（对齐产品需求：OpenAI / OpenRouter / DeepSeek / Gemini）
+const UI_PROVIDERS = ["openai", "openrouter", "deepseek", "google-gemini"];
+
+// 未配置选择时的兜底模型（本地测试用 __PI_CONFIG.baseUrl 指假 LLM 端点）。
+// 配置了 providerConfig 时一律用 pi-ai 目录解析出的完整模型对象。
 const DEFAULT_MODEL = {
 	id: "deepseek-v4-flash",
 	name: "DeepSeek V4 Flash",
@@ -825,26 +939,21 @@ const DEFAULT_MODEL = {
 	thinkingLevelMap: { minimal: null, low: "low", medium: null, high: "high", max: "max" },
 };
 
-const STREAM_SIMPLE = {
-	"anthropic-messages": anthropic.streamSimple,
-	"openai-completions": openaiCompletions.streamSimple,
-	"openai-responses": openaiResponses.streamSimple,
-	// "google-generative-ai": google.streamSimple,
-};
+const __pcfg = globalThis.__PI_CONFIG?.providerConfig;
+const bootModel =
+	(__pcfg?.provider && __pcfg?.modelId ? models.getModel(__pcfg.provider, __pcfg.modelId) : undefined) ??
+	DEFAULT_MODEL;
 
-// streamFn 主/子 agent 共用（按 model.api 分发 + 凭证注入 + 诊断日志）
+// streamFn 主/子 agent 共用：模型流与凭证解析都交给 Models 集合
+//（按 model.provider 路由到 owning provider，auth 走 hostCredsStore）。
 async function sharedStreamFn(model, context, options) {
-	const fn = STREAM_SIMPLE[model.api];
-	if (!fn) throw new Error(`unsupported api: ${model.api}`);
-	const apiKey = await getApiKey(model.provider);
 	hostcall("log", { msg: `streamFn: model=${model.id} api=${model.api} tools=${context.tools?.length ?? 0}` }).catch(() => {});
-	return fn(model, context, { ...options, apiKey });
+	return models.streamSimple(model, context, options);
 }
 
 const agent = new Agent({
-	initialState: { model: DEFAULT_MODEL, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), edit (replace an exact text snippet in a file), grep (search files). write and edit require user approval. When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To change a file, prefer edit with an exact oldText snippet; use write only to create files or rewrite them entirely. The workspace is a sandboxed directory on the device.", tools },
+	initialState: { model: bootModel, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), edit (replace an exact text snippet in a file), grep (search files). write and edit require user approval. When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To change a file, prefer edit with an exact oldText snippet; use write only to create files or rewrite them entirely. The workspace is a sandboxed directory on the device.", tools },
 	streamFn: sharedStreamFn,
-	getApiKey: (provider) => getApiKey(provider),
 });
 
 agent.subscribe((event) => {
@@ -1099,13 +1208,13 @@ refreshSkills().catch(() => {});
 async function runNestedCollect(prompt, tools, systemPrompt, thinking) {
 	const sub = new Agent({
 		initialState: {
-			model: DEFAULT_MODEL,
+			// 运行时快照主 agent 当前模型：热切换后子 agent 跟随
+			model: agent.state.model,
 			thinkingLevel: thinking ?? "minimal",
 			systemPrompt,
 			tools: resolveSubTools({ tools }),
 		},
 		streamFn: sharedStreamFn,
-		getApiKey: (provider) => getApiKey(provider),
 	});
 	await sub.prompt(prompt);
 	const msgs = sub.state.messages ?? [];

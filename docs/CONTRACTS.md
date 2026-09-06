@@ -17,6 +17,9 @@
 | `agent_stop` | `{}` | `{}` | M3：中止当前运行（bundle `agent.abort()`） |
 | `agent_history` | `{}` | `{sessionId,messages[]}` | boot 时从最新 JSONL 会话回放的历史 |
 | `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（creds.rs） |
+| `has_creds` | `{ provider }` | `bool` | provider 选择流程：探测是否已配置 key（决定 UI 显示 key 输入还是直接拉模型列表） |
+| `get_default_model` | `{}` | `{provider,modelId}` / `null`（JSON 串） | 默认模型选择回读（`{data_dir}/provider.json`） |
+| `set_default_model` | `{ provider, modelId }` | `{}` | 默认模型选择持久化（provider.json；agent_init 注入 `__PI_CONFIG.providerConfig`，boot 时 bundle 用 pi-ai 目录解析完整模型对象；provider 为空串清除） |
 | `approval_respond` | `{ requestId, decision }` | `{}` | M3 审批：decision ∈ allow/deny/always；唤醒阻塞中的 approval_request |
 | `ask_user_respond` | `{ requestId, answer }` | `{}` | 扩展 ask_user：answer = `{response:{kind:"selection",selections[],comment?} \| {kind:"freeform",text,comment?}}` 或 `{response:null,cancelled:true}` |
 | `workspace_revert` | `{ path }` | `u64`（字节数） | M3 回滚：恢复该文件最近一次覆盖写入前的内容（消费备份） |
@@ -56,6 +59,7 @@
 | `log` | `{ msg }` | `{ok}` | logcat（tag `pibun`） |
 | `tool` | `{ name, args }` | `{ text }` / `{ error }` | read/write/ls/grep，jail 到 `{dataDir}/workspace`，D6 无 exec |
 | `creds_get` | `{ provider }` | `{ apiKey }` / `{ error }` | 凭证不出宿主内存，JS 仅注入运行时内存 |
+| `creds_set` | `{ provider, apiKey }` | `{ ok }` / `{ error }` | pi-ai CredentialStore.modify 的宿主后端（OAuth 刷新等写路径；空串即清除） |
 | `fs` | `{ op, path, … }` | `{ ok, value }` / `{ ok, error: { code, message } }` | pi `JsonlSessionRepo` 的 FileSystem 后端；jail 到 `{dataDir}/sessions`；JS 侧虚拟根 `/pi-sessions`（agent-main.js 与 loopback.rs 同款常量）；op ∈ readTextFile/readTextLines/writeFile/appendFile/renameFile/fileInfo/listDir/exists/createDir/remove |
 | `agent_event` | agent 事件 JSON | `{ok}` | Rust sink → `emit("pi-agent-event")` |
 | `approval_request` | `{ tool, args }` | `{ decision: allow/deny, reason? }`（阻塞至 UI 决策/超时 120s） | M3：mutating 工具（write/edit/bash）执行前调用；Rust policy 状态机（`{data_dir}/policy.json`，write: ask→auto 经 "always" 持久化）；ask 时 emit `approval_required`（含 unified diff，上限 16KB） |
@@ -64,6 +68,8 @@
 | `mcp_config` | `{}` | `{ servers: [{name, url}] }` | M4：MCP 服务器配置（存 `{data_dir}/mcp.json`）；bundle boot 时逐个 streamable-http 连接，工具注册为 `mcp__<server>__<tool>`（默认 ask 审批） |
 | `goal_get` | `{}` | `{ objective: string \| null }` | 扩展能力层 #3（pi-goal 移动原生化）：boot 注入 systemPrompt "Current goal" 节；持久化 `{data_dir}/goal.json` |
 | `skills_config` | `{}` | `{ skills: [{id,name,description,content}] }` | D12：启用中的技能全集（禁用已由宿主过滤）；bundle 注入 systemPrompt "# Skills" 节；总预算 64KB |
+
+**Provider/model 目录（AI provider 选择流程）**：provider 注册、模型目录（compat/contextWindow/thinkingLevel）、动态列表刷新（OpenRouter）与凭证解析全部由 bundle 内 `@earendil-works/pi-ai` 的 `createModels` + 内置 provider 工厂承担。UI 可见 4 家：`openai`（openai-responses）/`openrouter`（openai-completions，动态目录）/`deepseek`（openai-completions）/`google-gemini`（openai-completions 兼容层——内置 google provider 驱动 @google/genai，其 node-builtin 导入在嵌入 JSC 上 SIGSEGV，故用 `createProvider` + pi-ai 自带 openai-completions 实现 + Gemini 官方 OpenAI 兼容端点，模型目录数据仍取自 pi-ai 生成的 google catalog）。bundle 全局：`__pi_providers_list`（→ `providers_listed` 事件）/ `__pi_models_refresh(providerId)`（动态 provider 走网络刷新 → `models_listed`/`models_error`）/ `__pi_model_select({provider,modelId})`（热切换主 agent，子 agent 取运行时快照跟随 → `model_applied`）/ `__pi_model_current()`（当前模型 JSON）。
 
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 
@@ -88,7 +94,7 @@
 | `settings.version` | `int` | `1` | 迁移版本字段 |
 | `settings.theme` | `"system"\|"light"\|"dark"` | `"system"` | |
 | `settings.language` | `string` | `"zh-CN"` | |
-| `settings.defaultProvider` / `settings.defaultModel` | `string` | — | |
+| `settings.defaultProvider` / `settings.defaultModel` | `string` | — | 已由 `{data_dir}/provider.json`（`get_default_model`/`set_default_model`）承接，store 键留作迁移兼容 |
 | `policy.default.write` | `"ask"` | `"ask"` | 审批基线（read=auto 固定） |
 | `policy.default.bash` | `"deny"` | `"deny"` | Android 起步为 ask（M4） |
 | `onboarding.completed` | `bool` | `false` | |
