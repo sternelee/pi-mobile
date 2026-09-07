@@ -184,6 +184,14 @@ function App() {
   const [loadingModels, setLoadingModels] = createSignal(false);
   const [currentModel, setCurrentModel] = createSignal<CurrentModel | null>(null);
 
+  // 模型快选：优先当前生效模型的 provider，未选择时用抽屉里选中的 provider
+  const pickerProvider = () => currentModel()?.provider || selProvider() || "openai";
+  const pickerModels = () => providers().find((p) => p.id === pickerProvider())?.models ?? [];
+  const openModelPicker = () => {
+    setModelPickerOpen(true);
+    if (pickerModels().length === 0) void loadModels(pickerProvider());
+  };
+
   let chatEl: HTMLDivElement | undefined;
   // 滚动位置响应式跟踪（@solid-primitives/scroll）——滚离底部 >240px 时浮出跳底按钮
   const chatScroll = createScrollPosition(() => chatEl);
@@ -206,6 +214,8 @@ function App() {
   const [sessionSearch, setSessionSearch] = createSignal("");
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsView, setSettingsView] = createSignal<"root" | "model" | "mcp" | "skills">("root");
+  // 模型快选面板（composer 上方快捷条拉起）：当前 provider 的模型列表
+  const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
   const updateItem = (toolCallId: string, patch: Partial<ChatItem>) =>
@@ -616,6 +626,7 @@ function App() {
       if (r !== "started") throw new Error(r);
       await invoke("set_default_model", { provider: p, modelId: m.id });
       setCurrentModel({ provider: p, id: m.id, name: m.name });
+      setModelPickerOpen(false);
       push({ role: "status", text: `model set: ${m.name}` });
     } catch (err) {
       push({ role: "status", text: `model select failed: ${err}` });
@@ -1064,13 +1075,13 @@ function App() {
           <Button variant="secondary" size="icon" class="h-8 w-8" onClick={openDrawer} aria-label="sessions">
             ☰
           </Button>
-          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={openFiles} aria-label="files">
-            📁
-          </Button>
         </div>
         <h1 class="topbar-title">pi-mobile</h1>
         <div class="topbar-meta">
           <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
+          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={() => setSettingsOpen(true)} aria-label="settings">
+            ⚙️
+          </Button>
         </div>
       </header>
 
@@ -1230,6 +1241,22 @@ function App() {
         <button class="jump-btn" onClick={jumpToLatest} aria-label="jump to latest">
           ↓
         </button>
+      </Show>
+
+      {/* 会话底部快捷条（ChatGPT 式）：文件 / 模型快选 / Todos */}
+      <Show when={ready()}>
+        <div class="quick-bar">
+          <button class="quick-chip" onClick={openFiles}>
+            📁 <span>Files</span>
+          </button>
+          <button class="quick-chip" onClick={openModelPicker}>
+            🤖 <span>{currentModel()?.name ?? "Model"}</span>
+            <span class="quick-caret">▾</span>
+          </button>
+          <button class="quick-chip" onClick={() => setTodoOpen(!todoOpen())}>
+            ☑ <span>Todos</span>
+          </button>
+        </div>
       </Show>
 
       <Show when={approval()}>
@@ -1450,7 +1477,7 @@ function App() {
 
       <Sheet open={drawerOpen()} onOpenChange={setDrawerOpen}>
         <SheetContent
-          side="right"
+          side="left"
           class="sheet-safe w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
         >
           <SheetHeader>
@@ -1489,23 +1516,23 @@ function App() {
             <Show when={!sessionGroups().length}>
               <div class="empty-note">no sessions match</div>
             </Show>
+          </div>
 
-            <div class="mt-4">
-              <div
-                class="settings-row"
-                onClick={() => {
-                  setSettingsView("root");
-                  setDrawerOpen(false);
-                  setSettingsOpen(true);
-                }}
-              >
-                <span class="settings-row-icon">⚙️</span>
-                <div class="settings-row-body">
-                  <div class="settings-row-title">Settings</div>
-                  <div class="settings-row-sub">AI model · MCP servers · Skills</div>
-                </div>
-                <span class="settings-chevron">›</span>
+          <div class="mt-auto">
+            <div
+              class="settings-row"
+              onClick={() => {
+                setSettingsView("root");
+                setDrawerOpen(false);
+                setSettingsOpen(true);
+              }}
+            >
+              <span class="settings-icon-chip">⚙️</span>
+              <div class="settings-row-body">
+                <div class="settings-row-title">Settings</div>
+                <div class="settings-row-sub">AI model · MCP servers · Skills</div>
               </div>
+              <span class="settings-chevron">›</span>
             </div>
           </div>
         </SheetContent>
@@ -1730,6 +1757,52 @@ function App() {
               </div>
             </div>
           </Show>
+        </SheetContent>
+      </Sheet>
+
+      <Sheet open={modelPickerOpen()} onOpenChange={setModelPickerOpen}>
+        <SheetContent
+          side="bottom"
+          class="sheet-safe max-h-[70vh] gap-2 rounded-t-2xl p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+        >
+          <SheetHeader>
+            <SheetTitle class="text-base">Model — {providerLabel(pickerProvider())}</SheetTitle>
+          </SheetHeader>
+          <div
+            class="settings-row"
+            onClick={() => {
+              setModelPickerOpen(false);
+              setSettingsView("model");
+              setSettingsOpen(true);
+            }}
+          >
+            <span class="settings-icon-chip">🤖</span>
+            <div class="settings-row-body">
+              <div class="settings-row-title">Change provider</div>
+              <div class="settings-row-sub">OpenAI · OpenRouter · DeepSeek · Gemini</div>
+            </div>
+            <span class="settings-chevron">›</span>
+          </div>
+          <div class="-mx-1 flex-1 overflow-y-auto px-1">
+            <Show when={pickerModels().length > 0} fallback={<div class="empty-note">loading models…</div>}>
+              <For each={pickerModels()}>
+                {(m) => (
+                  <div
+                    class={`item-card ${currentModel()?.id === m.id ? "active" : ""}`}
+                    onClick={() => selectModel(pickerProvider(), m)}
+                  >
+                    <div class="item-title">
+                      <Show when={currentModel()?.id === m.id}>
+                        <span class="model-check">✓</span>
+                      </Show>
+                      {m.name}
+                    </div>
+                    <div class="item-sub mcp-url">{m.id}</div>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </div>
         </SheetContent>
       </Sheet>
 

@@ -1092,3 +1092,48 @@ button {
   color: hsl(var(--muted-foreground));
   padding: 1.2rem 0 0.4rem;
 }
+
+/* 会话底部快捷条（ChatGPT 式 chips） */
+.quick-bar {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.15rem 0.6rem 0.35rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.quick-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--surface-2);
+  border: 1px solid hsl(var(--border));
+  border-radius: 999px;
+  padding: 0.38rem 0.8rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  white-space: nowrap;
+  max-width: 46vw;
+  transition: transform 100ms ease-out, background 150ms ease-out;
+}
+
+.quick-chip:active {
+  transform: scale(0.95);
+  background: var(--surface-3);
+}
+
+.quick-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-caret {
+  font-size: 0.6rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.model-check {
+  color: hsl(var(--primary));
+  font-weight: 700;
+  margin-right: 0.3rem;
+}
