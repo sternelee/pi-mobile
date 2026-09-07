@@ -934,6 +934,14 @@ fn handle_conn(mut stream: TcpStream) {
             content_length = v;
         }
     }
+    // 防畸形 Content-Length 声明导致 OOM/capacity-overflow panic（仅本进程可达，
+    // 但 JS 侧可被模型影响——纵深防御）
+    const MAX_BODY: usize = 8 * 1024 * 1024;
+    if content_length > MAX_BODY {
+        let resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        stream.write_all(resp.as_bytes()).ok();
+        return;
+    }
 
     // 读 body
     let mut body = vec![0u8; content_length];

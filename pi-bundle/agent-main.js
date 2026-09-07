@@ -1356,11 +1356,60 @@ agent.subscribe((event) => {
 	// agent_end 带全量消息，不重复落。toolResult 不走 message_end 以免双写。
 	if (event.type === "message_end" && event.message?.role === "assistant") {
 		persistMessage(event.message);
+		// 上下文水位跟踪（自动压缩阈值）：assistant usage 的 totalTokens 反映
+		// 本轮请求的上下文规模
+		const u = event.message?.usage;
+		if (u) {
+			lastContextTokens = u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0);
+		}
 	}
 	if (event.type === "turn_end") {
 		for (const tr of event.toolResults ?? []) persistMessage(tr);
 	}
 });
+
+// ---- auto-compaction（会话 token 自动压缩）----
+// 上下文用量超过模型窗口的 COMPACT_RATIO 时，把较早消息压缩成一段摘要
+// （经只读嵌套 Agent 生成），保留最近若干条。JSONL 仍保留完整历史。
+const COMPACT_RATIO = 0.6;
+const COMPACT_KEEP = 8;
+let lastContextTokens = 0;
+
+async function autoCompactIfNeeded() {
+	const windowSize = agent.state.model?.contextWindow ?? 128_000;
+	if (!lastContextTokens || lastContextTokens < windowSize * COMPACT_RATIO) return;
+	const msgs = agent.state.messages ?? [];
+	if (msgs.length <= COMPACT_KEEP + 2) return;
+	emit({ type: "compaction_start", tokens: lastContextTokens, messages: msgs.length });
+	const older = msgs.slice(0, -COMPACT_KEEP);
+	const keep = msgs.slice(-COMPACT_KEEP);
+	const transcript = older
+		.map((m) => {
+			const t = (m.content ?? [])
+				.filter((c) => c.type === "text")
+				.map((c) => c.text)
+				.join(" ");
+			return `${m.role}: ${t.slice(0, 600)}`;
+		})
+		.filter((l) => !l.endsWith(": "))
+		.join("\n");
+	const summary = await runNestedCollect(
+		`Summarize this conversation segment for continuation. Keep: user goals and decisions, file paths touched, key outcomes, open tasks. Be dense.\n\n${transcript.slice(0, 60_000)}`,
+		[],
+		"You compress conversation segments into dense continuation summaries.",
+		"minimal",
+	);
+	agent.state.messages = [
+		{
+			role: "user",
+			content: `[auto-compacted] Summary of the earlier conversation:\n${summary}`,
+			timestamp: Date.now(),
+		},
+		...keep,
+	];
+	lastContextTokens = Math.round(lastContextTokens * 0.3); // 摘要后的粗略水位
+	emit({ type: "compaction_done", summarized: older.length, kept: keep.length });
+}
 
 // ---- session persistence: pi-native JSONL (D3) over host-backed fs ----
 // JsonlSessionRepo + Session are pi's own classes (format-compatible with
@@ -1758,7 +1807,15 @@ const expandSkillCommand = (text) => {
 
 globalThis.__pi_prompt = (text) => {
 	try {
-		let t = typeof text === "string" && text.trim().startsWith("{") ? JSON.parse(text) : String(text);
+		let t = String(text);
+		if (typeof text === "string" && text.trim().startsWith("{")) {
+			try {
+				const parsed = JSON.parse(text);
+				// 仅当确实是带 role 的消息对象才走结构化路径；用户粘贴的普通 JSON
+				// 文本（配置片段等）按字面处理——否则会被 convertToLlm 静默丢弃
+				if (parsed && typeof parsed === "object" && typeof parsed.role === "string") t = parsed;
+			} catch {}
+		}
 		if (typeof t === "string") t = expandSkillCommand(t);
 		busy = true;
 		lastError = null;
@@ -1772,14 +1829,19 @@ globalThis.__pi_prompt = (text) => {
 		ensureSession()
 			.then((s) => s.appendMessage(userMsg))
 			.catch(sessionPersistError);
-		agent
-			.prompt(t)
-			.catch((e) => {
-				lastError = String(e?.message ?? e);
-				emit({ type: "agent_error", error: lastError });
-			})
+		// 上下文水位超阈值 → 先压缩再提交（压缩经只读嵌套 Agent，挂真实 I/O）
+		autoCompactIfNeeded()
+			.catch((e) => hostcall("log", { msg: `compact error: ${e?.message ?? e}` }).catch(() => {}))
 			.finally(() => {
-				busy = false;
+				agent
+					.prompt(t)
+					.catch((e) => {
+						lastError = String(e?.message ?? e);
+						emit({ type: "agent_error", error: lastError });
+					})
+					.finally(() => {
+						busy = false;
+					});
 			});
 		return "started";
 	} catch (e) {

@@ -195,6 +195,12 @@ const refreshSkillCmds = () => {
     .catch(() => setSkillCmds([]));
 };
 
+function fmtTok(n: number): string {
+  if (n < 1000) return `${n} tok`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k tok`;
+  return `${(n / 1_000_000).toFixed(2)}M tok`;
+}
+
 function fmtRel(ms: number): string {
   const mins = Math.floor((Date.now() - ms) / 60000);
   if (mins < 1) return "just now";
@@ -222,6 +228,8 @@ function App() {
   const [mcpUrl, setMcpUrl] = createSignal("");
   const [mcpTimeout, setMcpTimeout] = createSignal("");
   const [mcpHeaders, setMcpHeaders] = createSignal("");
+  const [mcpPasteOpen, setMcpPasteOpen] = createSignal(false);
+  const [mcpPaste, setMcpPaste] = createSignal("");
   const [skills, setSkills] = createSignal<SkillMeta[]>([]);
   const [skillUrl, setSkillUrl] = createSignal("");
   const [installingSkill, setInstallingSkill] = createSignal(false);
@@ -232,6 +240,7 @@ function App() {
     null,
   );
   const [stick, setStick] = createSignal(true);
+  const [sessionTokens, setSessionTokens] = createSignal(0);
   const [plan, setPlan] = createSignal<{ objective: string; content: string } | null>(
     null,
   );
@@ -399,6 +408,11 @@ function App() {
       return;
     }
     setItems(msgs.map(mapHistoryMessage));
+    const total = msgs.reduce((acc: number, m: any) => {
+      const u = m.usage;
+      return acc + (u ? (u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0)) : 0);
+    }, 0);
+    setSessionTokens(total);
     push({ role: "status", text: `history loaded — ${msgs.length} messages` });
   }
 
@@ -533,6 +547,12 @@ function App() {
           });
           push({ role: "status", text: `mcp ${ev.server}: ${ev.error}` });
           break;
+        case "compaction_start":
+          push({ role: "status", text: `compacting context (${ev.tokens} tokens, ${ev.messages} messages)…` });
+          break;
+        case "compaction_done":
+          push({ role: "status", text: `context compacted — ${ev.summarized} messages summarized` });
+          break;
         case "mcp_tools_registered":
           push({ role: "status", text: `mcp tools registered (${ev.count})` });
           break;
@@ -624,6 +644,10 @@ function App() {
             .filter((c: any) => c.type === "text")
             .map((c: any) => c.text)
             .join("");
+          if (ev.type === "message_end" && msg.role === "assistant" && msg.usage) {
+            const u = msg.usage;
+            setSessionTokens((prev) => prev + (u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0)));
+          }
           const thinking = blocks.some((c: any) => c.type === "thinking");
           if (ev.type === "message_update" && !text) {
             if (thinking) updateThinking();
@@ -811,7 +835,7 @@ function App() {
           <form class="flex flex-col gap-1.5" onSubmit={saveProviderKey}>
             <input
               class="ask-input"
-              type="password"
+              type="text"
               placeholder={`${providerLabel(selProvider())} API key…`}
               value={providerKey()}
               onInput={(e) => setProviderKey(e.currentTarget.value)}
@@ -1122,6 +1146,51 @@ function App() {
     }
   }
 
+  // 粘贴 JSON 批量导入：支持单服务器对象、数组、以及 {"mcpServers": {...}} 形态
+  async function importMcpJson() {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(mcpPaste());
+    } catch (e) {
+      push({ role: "status", text: "paste JSON parse failed" });
+      return;
+    }
+    let entries: any[] = [];
+    if (Array.isArray(parsed)) entries = parsed;
+    else if (parsed?.mcpServers && typeof parsed.mcpServers === "object") {
+      entries = Object.entries(parsed.mcpServers).map(([name, v]: [string, any]) => ({
+        name,
+        ...(typeof v === "string" ? { url: v } : v),
+      }));
+    } else if (parsed?.name && parsed?.url) entries = [parsed];
+    if (!entries.length) {
+      push({ role: "status", text: "no servers found in pasted JSON" });
+      return;
+    }
+    let added = 0;
+    for (const e of entries) {
+      if (!e?.name || !e?.url) continue;
+      try {
+        await invoke("mcp_add", {
+          name: String(e.name),
+          url: String(e.url),
+          timeoutMs: e.timeoutMs ?? undefined,
+          headers: e.headers ?? undefined,
+        });
+        added++;
+      } catch (err) {
+        push({ role: "status", text: `${e.name}: ${err}` });
+      }
+    }
+    setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
+    setMcpPaste("");
+    setMcpPasteOpen(false);
+    if (added) {
+      push({ role: "status", text: `imported ${added} server(s) — reconnecting…` });
+      await invoke("mcp_reconnect");
+    }
+  }
+
   async function addMcpServer(e: Event) {
     e.preventDefault();
     if (!mcpName().trim() || !mcpUrl().trim()) return;
@@ -1192,6 +1261,7 @@ function App() {
     try {
       await invoke("session_new");
       setCurrentSession(null);
+      setSessionTokens(0);
       setItems([{ role: "status", text: "new session started" }]);
     } catch (e) {
       push({ role: "status", text: `session_new failed: ${e}` });
@@ -1260,6 +1330,9 @@ function App() {
         </div>
         <h1 class="topbar-title">pi-mobile</h1>
         <div class="topbar-meta">
+          <Show when={sessionTokens() > 0}>
+            <span class="tok-badge">{fmtTok(sessionTokens())}</span>
+          </Show>
           <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
           <Button variant="secondary" size="icon" class="h-8 w-8" onClick={() => { void refreshConfigured(); setSettingsOpen(true); }} aria-label="settings">
             <FiSettings size="1.05em" />
@@ -1883,7 +1956,7 @@ function App() {
                 <form class="mb-2 flex flex-col gap-1.5" onSubmit={saveProviderKey}>
                   <input
                     class="ask-input"
-                    type="password"
+                    type="text"
                     placeholder={`${providerLabel(selProvider())} API key…`}
                     value={providerKey()}
                     onInput={(e) => setProviderKey(e.currentTarget.value)}
@@ -2006,6 +2079,26 @@ function App() {
                 <Button variant="outline" size="sm" type="submit">
                   Add server
                 </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-7 text-xs"
+                  onClick={() => setMcpPasteOpen(!mcpPasteOpen())}
+                >
+                  {"{ }"} Paste JSON
+                </Button>
+                <Show when={mcpPasteOpen()}>
+                  <textarea
+                    class="ask-input"
+                    rows="4"
+                    placeholder={'{"name":"docs","url":"https://…/mcp","timeoutMs":30000,"headers":{}} 或 {"mcpServers":{…}}'}
+                    value={mcpPaste()}
+                    onInput={(e) => setMcpPaste(e.currentTarget.value)}
+                  />
+                  <Button variant="secondary" size="sm" onClick={importMcpJson}>
+                    Import JSON
+                  </Button>
+                </Show>
               </form>
               <div class="item-sub mt-1">calls require approval · Reconnect applies config changes</div>
             </div>

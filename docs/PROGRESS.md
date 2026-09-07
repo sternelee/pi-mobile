@@ -2,6 +2,39 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-07 13:10 — 双代理代码审查 + 配置/用量/压缩五项 ✅
+
+### 双代理审查（bundle + Rust 全量并行审查）
+- **[高] MCP 工具绕过审批**：ASK_TOOLS 白名单不含 `mcp__` 前缀，bundle 发的
+  审批请求被直接 allow → 已加 `starts_with("mcp__")` 纳入 ask（D11 语义恢复）。
+- **[中高] diff 截断 UTF-8 panic**：中文内容必然踩多字节边界 → char_boundary
+  安全截断。
+- **[中] Content-Length 无上限**：畸形声明一行打崩（vec![0u8; usize::MAX]）→
+  8MB 上限 + 413。
+- **[中] __pi_prompt JSON 嗅探**：用户粘贴的普通 JSON 被当消息对象（无 role
+  被 convertToLlm 静默丢弃 + 写入畸形 JSONL）→ 校验 role 字段。
+- **[中] read_workspace_rel 漏反斜杠检查**（approval diff 可越狱读文件）→ 补齐。
+- **[低] mcp.json 原子写（tmp+rename）+ 损坏取证**；**session_list 改
+  spawn_blocking**（原同步命令在主线程逐行扫全量会话）。
+- `pi_call_global` 注册 / open_session kick 模式 / provider 选择 / skills /
+  oauth 已由并行开发完成，审查确认无同类问题。
+- 已知未修（记录在案）：备份名 `a/b` vs `a__b` 理论碰撞；approval "always"
+  无 UI 恢复入口；`__pi_tool_call` 异步缝仅测试用。
+
+### 五项体验功能
+- **MCP 粘贴 JSON**：抽屉 MCP 区 "{ } Paste JSON"——支持单服务器对象、数组、
+  `{"mcpServers":{...}}`（Claude Desktop 同款）批量导入 + 自动重连。
+- **API key 输入框改 `type="text"`**（首启表单 + 设置抽屉两处）。
+- **Token 用量显示**：顶栏徽标（`12.3k tok`）——实时累计 assistant
+  usage.totalTokens；boot/切会话从恢复历史重算；新建会话清零。
+- **自动压缩**：上下文水位（最近 assistant usage.totalTokens）超过模型窗口
+  60% 时，下次 prompt 前把较早消息经只读嵌套 Agent 压成摘要（保留最近 8 条），
+  JSONL 保留完整历史；UI compaction 状态行。
+- **Provider 自定义**：验证并行开发已落地的抽屉 provider/key/model catalog +
+  `__pi_model_select` 热切换 + oauth 接入无遗漏。
+
+---
+
 ## 2026-09-07 12:40 — OAuth 订阅登录（Anthropic/OpenAI/Kimi/xAI + pimobile://）✅
 
 ### provider 登录从"仅 API key"到"订阅 OAuth"

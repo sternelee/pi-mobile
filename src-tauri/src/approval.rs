@@ -104,7 +104,12 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
         .to_string();
 
     if out.len() > MAX_DIFF_BYTES {
-        out.truncate(MAX_DIFF_BYTES);
+        // UTF-8 边界安全截断（中文内容几乎必然落在多字节字符中间）
+        let mut cut = MAX_DIFF_BYTES;
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
         out.push_str("\n… (diff truncated)");
     }
     out
