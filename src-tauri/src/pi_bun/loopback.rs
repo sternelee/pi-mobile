@@ -267,6 +267,14 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read_to_string(ws.join("dup.txt")).unwrap(), "bb");
 
+        // mkdir：嵌套目录创建；已存在幂等；目标是文件则拒绝；越狱拒绝
+        run_tool("mkdir", &json!({ "path": "src/views" })).unwrap();
+        assert!(ws.join("src/views").is_dir());
+        run_tool("mkdir", &json!({ "path": "src/views" })).unwrap();
+        run_tool("write", &json!({ "path": "f.txt", "content": "x" })).unwrap();
+        assert!(run_tool("mkdir", &json!({ "path": "f.txt" })).is_err());
+        assert!(run_tool("mkdir", &json!({ "path": "../escape" })).is_err());
+
         // 文件树
         let tree = workspace_tree().unwrap();
         let v: serde_json::Value = serde_json::from_str(&tree).unwrap();
@@ -351,6 +359,14 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 ));
             }
             Ok(if out.is_empty() { "(empty)".to_string() } else { out.join("\n") })
+        }
+        "mkdir" => {
+            let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
+            if path.is_file() {
+                return Err(format!("not a directory: {}", display_rel(&path)));
+            }
+            std::fs::create_dir_all(&path).map_err(|e| format!("mkdir: {e}"))?;
+            Ok(format!("created directory {}", display_rel(&path)))
         }
         "grep" => {
             let pattern = args.get("pattern").and_then(|v| v.as_str()).ok_or("pattern?")?;

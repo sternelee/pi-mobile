@@ -88,6 +88,7 @@ const coreTools = [
 	hostTool("write", "Write", "Write text to a file in the workspace (creates or overwrites). Requires user approval — if the user denies, do not retry the same write. Args: {path, content}", obj({ path: { type: "string" }, content: { type: "string" } }), { mutating: true }),
 	hostTool("edit", "Edit", "Replace an exact text snippet inside a workspace file. oldText must match the file content exactly (including whitespace) and be unique unless replaceAll=true. Requires user approval. Args: {path, oldText, newText, replaceAll?}", obj({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, replaceAll: { type: "boolean" } }, ["path", "oldText", "newText"]), { mutating: true }),
 	hostTool("ls", "List", "List directory entries in the workspace. Args: {path?} (default '.')", obj({ path: { type: "string" } }, [])),
+	hostTool("mkdir", "Mkdir", "Create a directory in the workspace (parent directories are created as needed; existing directories are left untouched). Requires user approval. Args: {path}", obj({ path: { type: "string" } }, ["path"]), { mutating: true }),
 	hostTool("grep", "Grep", "Regex search across workspace text files. Args: {pattern, path?}", obj({ pattern: { type: "string" }, path: { type: "string" } }, ["pattern"])),
 ];
 
@@ -976,7 +977,7 @@ async function sharedStreamFn(model, context, options) {
 }
 
 const agent = new Agent({
-	initialState: { model: bootModel, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), edit (replace an exact text snippet in a file), grep (search files). write and edit require user approval. When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To change a file, prefer edit with an exact oldText snippet; use write only to create files or rewrite them entirely. The workspace is a sandboxed directory on the device.", tools },
+	initialState: { model: bootModel, thinkingLevel: "minimal", systemPrompt: "You are pi, a coding agent running on a mobile device. You have tools to access the user's workspace: ls (list files), read (read a file), write (write a file), edit (replace an exact text snippet in a file), grep (search files), mkdir (create a directory), fetch (fetch an http/https URL from the web). write, edit and mkdir require user approval. When the user asks you to do something with files, ALWAYS use the appropriate tool rather than saying you cannot. For example, to list files, call the ls tool with path '.'. To change a file, prefer edit with an exact oldText snippet; use write only to create files or rewrite them entirely. The workspace is a sandboxed directory on the device.", tools },
 	streamFn: sharedStreamFn,
 });
 
