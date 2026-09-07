@@ -30,6 +30,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "~/components/ui/sheet";
+import { ToggleSwitch } from "~/components/ui/switch";
 import "./App.css";
 
 type ChatItem = {
@@ -192,6 +193,15 @@ function App() {
   const [currentModel, setCurrentModel] = createSignal<CurrentModel | null>(null);
 
   // 模型快选：优先当前生效模型的 provider，未选择时用抽屉里选中的 provider
+  const refreshConfigured = async () => {
+    const results = await Promise.all(
+      UI_PROVIDERS.map((p) =>
+        invoke<boolean>("has_creds", { provider: p.id }).catch(() => false),
+      ),
+    );
+    setConfigured(new Set(UI_PROVIDERS.filter((_, i) => results[i]).map((p) => p.id)));
+  };
+
   const pickerProvider = () => currentModel()?.provider || selProvider() || "openai";
   const pickerModels = () => providers().find((p) => p.id === pickerProvider())?.models ?? [];
   const openModelPicker = () => {
@@ -220,9 +230,15 @@ function App() {
   const reducedMotion = createMediaQuery("(prefers-reduced-motion: reduce)");
   const [sessionSearch, setSessionSearch] = createSignal("");
   const [settingsOpen, setSettingsOpen] = createSignal(false);
-  const [settingsView, setSettingsView] = createSignal<"root" | "model" | "mcp" | "skills">("root");
+  const [settingsView, setSettingsView] = createSignal<
+    "providers" | "provider" | "mcp" | "skills"
+  >("providers");
   // 模型快选面板（composer 上方快捷条拉起）：当前 provider 的模型列表
   const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
+  // 已配置 key 的 provider 集合（LobeHub 式 provider 卡片状态标识）
+  const [configured, setConfigured] = createSignal<Set<string>>(new Set());
+  // MCP 服务器连接状态（mcp_ready / mcp_error 事件驱动）
+  const [mcpReady, setMcpReady] = createSignal<Set<string>>(new Set());
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
   const updateItem = (toolCallId: string, patch: Partial<ChatItem>) =>
@@ -393,9 +409,15 @@ function App() {
           });
           break;
         case "mcp_ready":
+          setMcpReady((prev) => new Set(prev).add(ev.server));
           push({ role: "status", text: `mcp ${ev.server} ready — ${(ev.tools ?? []).length} tools` });
           break;
         case "mcp_error":
+          setMcpReady((prev) => {
+            const next = new Set(prev);
+            next.delete(ev.server);
+            return next;
+          });
           push({ role: "status", text: `mcp ${ev.server}: ${ev.error}` });
           break;
         case "mcp_tools_registered":
@@ -592,7 +614,9 @@ function App() {
   async function chooseProvider(id: string) {
     setSelProvider(id);
     try {
-      setKeySaved(await invoke<boolean>("has_creds", { provider: id }));
+      const has = await invoke<boolean>("has_creds", { provider: id });
+      setKeySaved(has);
+      if (has) setConfigured((prev) => new Set(prev).add(id));
     } catch {
       setKeySaved(false);
     }
@@ -607,6 +631,7 @@ function App() {
       await invoke("set_creds", { provider: p, apiKey: providerKey().trim() });
       setProviderKey("");
       setKeySaved(true);
+      setConfigured((prev) => new Set(prev).add(p));
       push({ role: "status", text: `API key saved (${p})` });
       await loadModels(p);
     } catch (err) {
@@ -1013,6 +1038,11 @@ function App() {
   async function removeMcpServer(name: string) {
     try {
       await invoke("mcp_remove", { name });
+      setMcpReady((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
       setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
     } catch (e) {
       push({ role: "status", text: `mcp_remove failed: ${e}` });
@@ -1086,7 +1116,7 @@ function App() {
         <h1 class="topbar-title">pi-mobile</h1>
         <div class="topbar-meta">
           <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
-          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={() => setSettingsOpen(true)} aria-label="settings">
+          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={() => { void refreshConfigured(); setSettingsOpen(true); }} aria-label="settings">
             ⚙️
           </Button>
         </div>
@@ -1529,7 +1559,8 @@ function App() {
             <div
               class="settings-row"
               onClick={() => {
-                setSettingsView("root");
+                setSettingsView("providers");
+                void refreshConfigured();
                 setDrawerOpen(false);
                 setSettingsOpen(true);
               }}
@@ -1550,86 +1581,145 @@ function App() {
           side="right"
           class="sheet-safe w-full max-w-md gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
         >
-          <Show
-            when={settingsView() !== "root"}
-            fallback={
-              <>
-                <SheetHeader>
-                  <SheetTitle class="text-base">Settings</SheetTitle>
-                </SheetHeader>
-                <div class="-mx-1 flex-1 overflow-y-auto px-1">
-                  <div class="settings-group-label">Agent</div>
-                  <div class="flex flex-col gap-2">
-                    <div class="settings-row" onClick={() => setSettingsView("model")}>
-                      <span class="settings-icon-chip">🤖</span>
-                      <div class="settings-row-body">
-                        <div class="settings-row-title">AI Model</div>
-                        <div class="settings-row-sub">
-                          {currentModel()
-                            ? `${currentModel()!.name} · ${currentModel()!.provider}`
-                            : "not selected — tap to configure"}
-                        </div>
-                      </div>
-                      <span class="settings-chevron">›</span>
-                    </div>
-                  </div>
-                  <div class="settings-group-label">Extensions</div>
-                  <div class="flex flex-col gap-2">
-                    <div class="settings-row" onClick={() => setSettingsView("mcp")}>
-                      <span class="settings-icon-chip">🔌</span>
-                      <div class="settings-row-body">
-                        <div class="settings-row-title">MCP Servers</div>
-                        <div class="settings-row-sub">
-                          {mcpServers().length
-                            ? `${mcpServers().length} configured · calls require approval`
-                            : "none configured — connect tools over HTTP"}
-                        </div>
-                      </div>
-                      <span class="settings-chevron">›</span>
-                    </div>
-                    <div class="settings-row" onClick={() => setSettingsView("skills")}>
-                      <span class="settings-icon-chip">🧩</span>
-                      <div class="settings-row-body">
-                        <div class="settings-row-title">Skills</div>
-                        <div class="settings-row-sub">
-                          {skills().length
-                            ? `${skills().filter((s) => s.enabled).length} of ${skills().length} enabled · injected into prompts`
-                            : "none installed — add SKILL.md packages"}
-                        </div>
-                      </div>
-                      <span class="settings-chevron">›</span>
-                    </div>
-                  </div>
-                  <div class="settings-footer">pi-mobile · sessions stay on this device</div>
-                </div>
-              </>
-            }
-          >
-            <button class="settings-back" onClick={() => setSettingsView("root")}>
-              ‹ Settings
+          <SheetHeader>
+            <SheetTitle class="text-base">Settings</SheetTitle>
+          </SheetHeader>
+          <div class="settings-tabs">
+            <button
+              class={`settings-tab ${settingsView() === "providers" || settingsView() === "provider" ? "active" : ""}`}
+              onClick={() => setSettingsView("providers")}
+            >
+              Providers
             </button>
+            <button
+              class={`settings-tab ${settingsView() === "mcp" ? "active" : ""}`}
+              onClick={() => setSettingsView("mcp")}
+            >
+              MCP
+            </button>
+            <button
+              class={`settings-tab ${settingsView() === "skills" ? "active" : ""}`}
+              onClick={() => setSettingsView("skills")}
+            >
+              Skills
+            </button>
+          </div>
+
+          <Show when={settingsView() === "providers"}>
+            <div class="-mx-1 flex-1 overflow-y-auto px-1">
+              <div class="settings-subtitle">
+                Provider catalogs come from the pi-ai models registry. Tap a
+                provider to set its API key and pick a model.
+              </div>
+              <div class="flex flex-col gap-2">
+                <For each={providers()}>
+                  {(p) => (
+                    <div
+                      class="settings-row"
+                      onClick={() => {
+                        void chooseProvider(p.id);
+                        setSettingsView("provider");
+                      }}
+                    >
+                      <span class="settings-icon-chip">
+                        {p.id === "google-gemini" ? "✨" : p.id === "openrouter" ? "🌐" : p.id === "deepseek" ? "🐋" : "⬡"}
+                      </span>
+                      <div class="settings-row-body">
+                        <div class="settings-row-title">
+                          {p.name}
+                          <Show when={currentModel()?.provider === p.id}>
+                            <span class="provider-badge">active</span>
+                          </Show>
+                        </div>
+                        <div class="settings-row-sub">
+                          {p.models.length} models ·{" "}
+                          {configured().has(p.id) ? "API key set" : "no key"}
+                        </div>
+                      </div>
+                      <span class="settings-chevron">›</span>
+                    </div>
+                  )}
+                </For>
+              </div>
+              <div class="settings-footer">pi-mobile · sessions stay on this device</div>
+            </div>
           </Show>
 
-          <Show when={settingsView() === "model"}>
-            <div class="settings-section-title">AI Model</div>
+          <Show when={settingsView() === "provider"}>
+            <div class="settings-section-title">{providerLabel(selProvider())}</div>
             <div class="settings-subtitle">
-              Providers and catalogs come from the pi-ai models registry — the
-              list loads automatically after your key is saved.
+              Tap a model to make it the active model — applies immediately and
+              persists across restarts.
             </div>
             <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <Show
-                when={currentModel()}
-                fallback={<div class="item-sub">no model selected — pick a provider below</div>}
+                when={!keySaved()}
+                fallback={
+                  <div class="item-card">
+                    <div class="item-title">🔑 API key configured</div>
+                    <div class="item-sub">
+                      tap <span class="underline">replace</span> below to change it
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="mt-1 h-7 text-xs text-muted-foreground"
+                      onClick={() => setKeySaved(false)}
+                    >
+                      Replace key
+                    </Button>
+                  </div>
+                }
               >
-                <div class="item-card active">
-                  <div class="item-title">{currentModel()!.name}</div>
-                  <div class="item-sub">{currentModel()!.provider}</div>
-                </div>
+                <form class="mb-2 flex flex-col gap-1.5" onSubmit={saveProviderKey}>
+                  <input
+                    class="ask-input"
+                    type="password"
+                    placeholder={`${providerLabel(selProvider())} API key…`}
+                    value={providerKey()}
+                    onInput={(e) => setProviderKey(e.currentTarget.value)}
+                  />
+                  <Button variant="outline" size="sm" type="submit">
+                    Save key & load models
+                  </Button>
+                </form>
               </Show>
-              {providerSection()}
-              <div class="item-sub mt-1">
-                selection persists across restarts · subagents follow the active model
+              <div class="flex items-center justify-between">
+                <span class="item-sub">{providerModels().length} models</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-7 text-xs"
+                  onClick={() => loadModels(selProvider())}
+                >
+                  ⟳ Refresh
+                </Button>
               </div>
+              <Show when={loadingModels()}>
+                <div class="empty-note">loading models…</div>
+              </Show>
+              <For each={providerModels()}>
+                {(m) => (
+                  <div
+                    class={`item-card ${
+                      currentModel()?.provider === selProvider() && currentModel()?.id === m.id
+                        ? "active"
+                        : ""
+                    }`}
+                    onClick={() => selectModel(selProvider(), m)}
+                  >
+                    <div class="item-title">
+                      <Show
+                        when={currentModel()?.provider === selProvider() && currentModel()?.id === m.id}
+                      >
+                        <span class="model-check">✓</span>
+                      </Show>
+                      {m.name}
+                    </div>
+                    <div class="item-sub mcp-url">{m.id}</div>
+                  </div>
+                )}
+              </For>
             </div>
           </Show>
 
@@ -1649,7 +1739,13 @@ function App() {
               <For each={mcpServers()}>
                 {(s) => (
                   <div class="item-card">
-                    <div class="item-title">{s.name}</div>
+                    <div class="item-title">
+                      <span
+                        class={`status-dot ${mcpReady().has(s.name) ? "ok" : "off"}`}
+                        title={mcpReady().has(s.name) ? "connected" : "not connected"}
+                      />
+                      {s.name}
+                    </div>
                     <div class="item-sub mcp-url">{s.url}</div>
                     <div class="item-sub">
                       timeout {s.timeoutMs ?? 30000}ms
@@ -1713,26 +1809,15 @@ function App() {
             <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <For each={skills()}>
                 {(s) => (
-                  <div class="item-card">
-                    <div class="item-title">
-                      {s.name}{" "}
-                      <span class="item-sub">
-                        {s.enabled ? "· on" : "· off"} · {s.version}
-                      </span>
-                    </div>
-                    <Show when={s.description}>
-                      <div class="item-sub">{s.description}</div>
-                    </Show>
-                    <div class="item-sub mcp-url">{s.checksum}</div>
-                    <div class="mt-1 flex gap-1.5">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-7 text-xs"
-                        onClick={() => toggleSkill(s.id, !s.enabled)}
-                      >
-                        {s.enabled ? "Disable" : "Enable"}
-                      </Button>
+                  <div class="item-card skill-row">
+                    <div class="skill-row-body">
+                      <div class="item-title">{s.name}</div>
+                      <Show when={s.description}>
+                        <div class="item-sub">{s.description}</div>
+                      </Show>
+                      <div class="item-sub mcp-url">
+                        v{s.version} · {s.enabled ? "injected" : "not injected"}
+                      </div>
                       <Button
                         variant="ghost"
                         size="sm"
@@ -1742,6 +1827,7 @@ function App() {
                         Remove
                       </Button>
                     </div>
+                    <ToggleSwitch on={s.enabled} onChange={() => toggleSkill(s.id, !s.enabled)} />
                   </div>
                 )}
               </For>
@@ -1779,7 +1865,8 @@ function App() {
             class="settings-row"
             onClick={() => {
               setModelPickerOpen(false);
-              setSettingsView("model");
+              setSettingsView("providers");
+              void refreshConfigured();
               setSettingsOpen(true);
             }}
           >
