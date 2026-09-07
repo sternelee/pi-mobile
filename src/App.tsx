@@ -112,11 +112,34 @@ type ProviderModel = { id: string; name: string };
 type ProviderInfo = { id: string; name: string; models: ProviderModel[] };
 type CurrentModel = { provider: string; id: string; name: string };
 
+// OAuth 订阅型 provider（bundle 侧 __pi_oauth_login 支持登录）
+const OAUTH_PROVIDERS = new Set(["anthropic", "openai-codex", "kimi-coding", "xai", "openrouter"]);
+const providerIcon = (id: string) =>
+  id === "google-gemini"
+    ? "✨"
+    : id === "openrouter"
+      ? "🌐"
+      : id === "deepseek"
+        ? "🐋"
+        : id === "anthropic"
+          ? "🅐"
+          : id === "openai-codex"
+            ? "⌬"
+            : id === "kimi-coding"
+              ? "🌙"
+              : id === "xai"
+                ? "𝕏"
+                : "⬡";
+
 const UI_PROVIDERS: ProviderInfo[] = [
   { id: "openai", name: "OpenAI", models: [] },
   { id: "openrouter", name: "OpenRouter", models: [] },
   { id: "deepseek", name: "DeepSeek", models: [] },
   { id: "google-gemini", name: "Google Gemini", models: [] },
+  { id: "anthropic", name: "Anthropic (Claude Pro/Max)", models: [] },
+  { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", models: [] },
+  { id: "kimi-coding", name: "Kimi For Coding", models: [] },
+  { id: "xai", name: "xAI (SuperGrok/X Premium)", models: [] },
 ];
 
 const SUGGESTIONS = [
@@ -445,6 +468,27 @@ function App() {
         case "skills_applied":
           // 技能增删/启停后命令面板跟随（__pi_commands 回读）
           refreshSkillCmds();
+          break;
+        case "oauth_open_url":
+          push({ role: "status", text: `browser opened — complete ${ev.provider ?? "provider"} sign-in` });
+          break;
+        case "oauth_device_code":
+          push({
+            role: "status",
+            text: `enter code ${ev.userCode ?? ""} at ${ev.verificationUri ?? "the verification page"}`,
+          });
+          break;
+        case "oauth_progress":
+          push({ role: "status", text: `oauth: ${ev.message ?? "working…"}` });
+          break;
+        case "oauth_done":
+          if (ev.error) {
+            push({ role: "status", text: `oauth FAILED: ${ev.error}` });
+          } else {
+            push({ role: "status", text: `oauth: signed in to ${ev.provider ?? "provider"} — pick a model` });
+            void refreshConfigured();
+            invoke<string>("pi_call_global", { fnName: "__pi_providers_list", arg: "" }).catch(() => {});
+          }
           break;
         case "mcp_ready":
           setMcpReady((prev) => new Set(prev).add(ev.server));
@@ -1680,7 +1724,7 @@ function App() {
                       }}
                     >
                       <span class="settings-icon-chip">
-                        {p.id === "google-gemini" ? "✨" : p.id === "openrouter" ? "🌐" : p.id === "deepseek" ? "🐋" : "⬡"}
+                        {providerIcon(p.id)}
                       </span>
                       <div class="settings-row-body">
                         <div class="settings-row-title">
@@ -1709,6 +1753,31 @@ function App() {
               Tap a model to make it the active model — applies immediately and
               persists across restarts.
             </div>
+            <Show when={OAUTH_PROVIDERS.has(selProvider())}>
+              <div class="item-card">
+                <div class="item-title">🔐 Subscription sign-in</div>
+                <div class="item-sub">
+                  Opens the provider's login page in your browser and returns
+                  via the pimobile:// deep link or a local callback — no API
+                  key needed.
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="mt-1"
+                  disabled={busy()}
+                  onClick={() => {
+                    void invoke("pi_call_global", {
+                      fnName: "__pi_oauth_login",
+                      arg: selProvider(),
+                    }).catch((e) => push({ role: "status", text: `oauth login failed: ${e}` }));
+                    push({ role: "status", text: `signing in with ${providerLabel(selProvider())}…` });
+                  }}
+                >
+                  Sign in with {providerLabel(selProvider())}
+                </Button>
+              </div>
+            </Show>
             <div class="-mx-1 flex-1 overflow-y-auto px-1">
               <Show
                 when={!keySaved()}

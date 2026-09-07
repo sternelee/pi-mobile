@@ -431,6 +431,23 @@ fn creds_set(provider: &str, api_key: &str) -> Result<(), String> {
     crate::creds::set(data_dir, provider, api_key)
 }
 
+/// OAuth 凭证（JSON）存取——`{provider}#oauth` 条目，与 api key 隔离。
+fn creds_json_get(provider: &str) -> serde_json::Value {
+    let data_dir = match DATA_DIR.get() {
+        Some(d) => d,
+        None => return serde_json::json!({ "json": null }),
+    };
+    serde_json::json!({ "json": crate::creds::get_json(data_dir, provider) })
+}
+
+fn creds_json_set(provider: &str, json: &str) -> Result<(), String> {
+    let data_dir = DATA_DIR.get().ok_or("data dir not configured")?;
+    if json.is_empty() {
+        return crate::creds::delete_json(data_dir, provider);
+    }
+    crate::creds::set_json(data_dir, provider, json)
+}
+
 // ── 会话 JSONL 的 fs hostcall（pi 原生 JsonlSessionRepo 的 FileSystem 后端）──
 //
 // JS 侧路径在 /pi-sessions 虚拟命名空间内；此处剥离前缀并 jail 到
@@ -792,6 +809,51 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
         "fs" => fs_op(payload),
         "approval_request" => crate::approval::request(payload),
         "ask_user_register" => crate::ask_user::register(payload),
+        // ── OAuth 登录辅助（provider 授权回调捕获在宿主，见 oauth.rs）──
+        "oauth_pkce" => match crate::oauth::pkce() {
+            Ok((verifier, challenge)) => {
+                serde_json::json!({ "verifier": verifier, "challenge": challenge })
+            }
+            Err(e) => serde_json::json!({ "error": e }),
+        },
+        "oauth_listen" => {
+            // 同步 bind（bundle 需要真实端口构建授权 URL，OS 分配 port=0 场景），
+            // 等待循环 spawn 到独立线程；回调 URL 经 evaluate_blocking 注入
+            // `__pi_oauth_callback`。hostcall 立即返回。
+            let port = payload.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let path = payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("/callback")
+                .to_string();
+            match crate::oauth::bind(port) {
+                Ok((listener, bound)) => {
+                    let _ = std::thread::Builder::new()
+                        .name("oauth-listen".into())
+                        .spawn(move || {
+                            let _ = crate::oauth::wait(listener, &path, |url| {
+                                let url_j =
+                                    serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into());
+                                let _ = crate::pi_bun::call_string_global("__pi_oauth_callback", &url_j);
+                            });
+                        });
+                    serde_json::json!({ "ok": true, "port": bound })
+                }
+                Err(e) => serde_json::json!({ "error": e }),
+            }
+        }
+        "creds_json_get" => {
+            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            creds_json_get(provider)
+        }
+        "creds_json_set" => {
+            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let json = payload.get("json").and_then(|v| v.as_str()).unwrap_or("");
+            match creds_json_set(provider, json) {
+                Ok(()) => serde_json::json!({ "ok": true }),
+                Err(e) => serde_json::json!({ "error": e }),
+            }
+        }
         "mcp_config" => match DATA_DIR.get() {
             Some(dir) => {
                 let v = crate::mcp::list(dir).unwrap_or_else(|_| "[]".into());

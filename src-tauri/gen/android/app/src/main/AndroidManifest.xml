@@ -27,6 +27,14 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- OAuth 辅助回调通道：pimobile://oauth/callback?... （deep-link 插件
+                 转发进 bundle 的 __pi_oauth_callback，见 src-tauri/src/oauth.rs） -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="pimobile" android:host="oauth" android:pathPrefix="/callback" />
+            </intent-filter>
         </activity>
 
         <!-- M4 保活：agent 运行期前台服务（Rust 经 JNI start/notify/stop） -->

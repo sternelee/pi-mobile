@@ -97,3 +97,18 @@ pub fn get(data_dir: &str, provider: &str) -> Option<String> {
 pub fn set(data_dir: &str, provider: &str, api_key: &str) -> Result<(), String> {
     imp::set(data_dir, provider, api_key)
 }
+
+/// OAuth 凭证（pi-ai Credential JSON，含 refresh/access token）——与 api key
+/// 同库隔离存储（条目名 `{provider}#oauth`），值是 JSON 字符串。
+pub fn get_json(data_dir: &str, provider: &str) -> Option<String> {
+    imp::get(data_dir, &format!("{provider}#oauth"))
+}
+
+pub fn set_json(data_dir: &str, provider: &str, json: &str) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(json).map_err(|e| format!("invalid credential json: {e}"))?;
+    imp::set(data_dir, &format!("{provider}#oauth"), json)
+}
+
+pub fn delete_json(data_dir: &str, provider: &str) -> Result<(), String> {
+    imp::set(data_dir, &format!("{provider}#oauth"), "")
+}

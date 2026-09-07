@@ -2,6 +2,33 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-07 12:40 — OAuth 订阅登录（Anthropic/OpenAI/Kimi/xAI + pimobile://）✅
+
+### provider 登录从"仅 API key"到"订阅 OAuth"
+- **8 家 provider**：原 4 家（OpenAI/OpenRouter/DeepSeek/Gemini）+ 4 家 OAuth
+  订阅型——Anthropic (Claude Pro/Max)、OpenAI Codex (ChatGPT)、
+  Kimi For Coding、xAI (SuperGrok/X Premium)。pi-ai provider 自带
+  lazyOAuth：refresh/toAuth 纯 fetch，`registerBunOAuthFlows()` 静态内嵌
+  流程模块后自动续期。
+- **回调捕获双通道**（pi-ai login() 硬绑 node:http，嵌入运行时没有）：
+  1. **本地回调（主）**：宿主一次性 HTTP server（`oauth_listen`，同步
+     bind 支持端口 0=OS 分配）——provider client_id 只注册了
+     `http://localhost:<port>` 回调，redirect_uri 原样保留；捕获后经
+     evaluate_blocking 注入 `__pi_oauth_callback(url)`，浏览器回成功页。
+  2. **`pimobile://` deep link（辅）**：AndroidManifest intent-filter +
+     tauri-plugin-deep-link，`pimobile://oauth/callback?...` → 同一注入
+     通道（给未来允许自定义 scheme 的 provider）。
+- **PKCE 宿主生成**（`oauth_pkce`）——嵌入 JSC 的 crypto.subtle 可用性
+  不赌。device 流（kimi/xai/codex 设备码）无回调，直接复用 pi-ai
+  `oauth.login(interaction)`，notify(device_code) → 宿主自动开验证页。
+- **凭证**：OAuth JSON 走独立 `creds_json` hostcall（`{provider}#oauth`
+  隔离条目）；`has_creds` 兼容双形态。UI provider 卡片新增
+  "Sign in with …" 按钮；oauth_open_url 事件宿主自动唤起浏览器。
+- **测试**：Rust 18/18（PKCE 形状/回调捕获含关停验证）；bundle 11/11
+  （oauth-test：mock 宿主全流程——授权 URL/PKCE/交换/落库）。
+
+---
+
 ## 2026-09-07 10:30 — 技能自定义指令（pi TUI /commit-it 语义）✅
 
 ### Skills → 斜杠命令

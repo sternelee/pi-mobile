@@ -85,15 +85,24 @@ if (PHASE === "BASE") {
 	const cur = JSON.parse(call("__pi_model_current"));
 	assert(cur.provider === "deepseek" && cur.id === "deepseek-v4-flash", "BASE: fallback model is catalog deepseek");
 
-	// ---- provider 目录：4 家，含 Gemini 兼容层重映射 ----
+	// ---- provider 目录：8 家（4 家 api-key + 4 家 OAuth 订阅），含 Gemini 兼容层重映射 ----
 	call("__pi_providers_list");
 	await sleep(200);
 	const listed = events.find((e) => e.type === "providers_listed");
 	assert(listed, "BASE: providers_listed emitted");
 	assert(
 		JSON.stringify(listed.providers.map((p) => p.id)) ===
-			JSON.stringify(["openai", "openrouter", "deepseek", "google-gemini"]),
-		"BASE: four providers in UI order",
+			JSON.stringify([
+				"openai",
+				"openrouter",
+				"deepseek",
+				"google-gemini",
+				"anthropic",
+				"openai-codex",
+				"kimi-coding",
+				"xai",
+			]),
+		"BASE: eight providers in UI order",
 	);
 	const deepseek = listed.providers.find((p) => p.id === "deepseek");
 	assert(deepseek.models.length > 0, "BASE: deepseek static catalog non-empty");

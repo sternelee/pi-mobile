@@ -19,6 +19,14 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { googleProvider } from "@earendil-works/pi-ai/providers/google";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { kimiCodingProvider } from "@earendil-works/pi-ai/providers/kimi-coding";
+import { xaiProvider } from "@earendil-works/pi-ai/providers/xai";
+// 嵌入式运行时静态内嵌 OAuth 流程模块（refresh/toAuth 需要；login 不经此路
+// —— pi-ai 的 login() 硬绑 node:http 回调 server，见下方 oauth 登录协调器）
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+registerBunOAuthFlows();
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 // bisect: google-generative-ai temporarily disabled (brings @google/genai node-builtin
 // imports that crash skal JSC on device). re-enable once gemini path is fixed.
@@ -917,10 +925,21 @@ globalThis.__pi_stop = () => {
 
 // pi-ai 的 CredentialStore 实现：宿主端 keyring/沙箱文件（D4），经 hostcall。
 // stored credential 优先于 env（pi-ai envApiKeyAuth 语义），与桌面 pi 一致。
+// OAuth 凭证（{type:"oauth",refresh,access,expires}）走独立的 creds_json
+// hostcall（`{provider}#oauth` 隔离条目）；Models.getAuth 在凭证过期时经
+// pi-ai 的 oauth.refresh 自动续期（refresh 走 pi-ai 流程模块，纯 fetch）。
 const hostCredsStore = {
 	async read(providerId) {
 		const r = await hostcall("creds_get", { provider: providerId });
-		return r.apiKey ? { type: "api_key", key: r.apiKey } : undefined;
+		if (r.apiKey) return { type: "api_key", key: r.apiKey };
+		const j = await hostcall("creds_json_get", { provider: providerId });
+		if (j.json) {
+			try {
+				const cred = JSON.parse(j.json);
+				if (cred?.type === "oauth") return cred;
+			} catch {}
+		}
+		return undefined;
 	},
 	async list() {
 		return [];
@@ -929,11 +948,14 @@ const hostCredsStore = {
 		const next = await fn(await hostCredsStore.read(providerId));
 		if (next?.type === "api_key") {
 			await hostcall("creds_set", { provider: providerId, apiKey: next.key ?? "" });
+		} else if (next?.type === "oauth") {
+			await hostcall("creds_json_set", { provider: providerId, json: JSON.stringify(next) });
 		}
 		return next;
 	},
 	async delete(providerId) {
 		await hostcall("creds_set", { provider: providerId, apiKey: "" });
+		await hostcall("creds_json_set", { provider: providerId, json: "" });
 	},
 };
 
@@ -962,11 +984,273 @@ const geminiCompatProvider = createProvider({
 });
 
 const models = createModels({ credentials: hostCredsStore });
-for (const p of [openaiProvider(), openrouterProvider(), deepseekProvider(), geminiCompatProvider]) {
+for (const p of [
+	openaiProvider(),
+	openrouterProvider(),
+	deepseekProvider(),
+	geminiCompatProvider,
+	// OAuth 订阅型 provider（anthropic/xai/kimi 走订阅登录；openai-codex 走
+	// ChatGPT 登录）。auth.oauth 均为 lazyOAuth——refresh/toAuth 纯 fetch，
+	// login() 的 node:http 回调 server 不经此路（见下方协调器）。
+	anthropicProvider(),
+	openaiCodexProvider(),
+	kimiCodingProvider(),
+	xaiProvider(),
+]) {
 	models.setProvider(p);
 }
-// UI 侧 provider 选择面（对齐产品需求：OpenAI / OpenRouter / DeepSeek / Gemini）
-const UI_PROVIDERS = ["openai", "openrouter", "deepseek", "google-gemini"];
+// UI 侧 provider 选择面（OpenAI / OpenRouter / DeepSeek / Gemini + OAuth 订阅四家）
+const UI_PROVIDERS = ["openai", "openrouter", "deepseek", "google-gemini", "anthropic", "openai-codex", "kimi-coding", "xai"];
+
+// ---- OAuth 订阅登录（pi TUI 同款，回调捕获双通道）----
+//
+// pi-ai 的 login() 硬绑 node:http 回调 server（CLI 专用），嵌入运行时没有；
+// 这里按 provider 分两类重实现：
+//   · code 流（anthropic / openai-codex / openrouter）：PKCE 由宿主生成
+//     （oauth_pkce，JSC crypto.subtle 可用性不赌），本地回调捕获用宿主的
+//     一次性 HTTP server（oauth_listen，监听 127.0.0.1:port）——provider
+//     client_id 只注册了 localhost 回调，redirect_uri 原样保留；浏览器授权
+//     落在本机 → 宿主捕获 → `__pi_oauth_callback` 注入本运行时。
+//     `pimobile://` deep link 是第二通道（Android manifest 已注册）。
+//   · device 流（kimi-coding / xai / codex 设备码）：无回调，直接复用
+//     pi-ai 的 oauth.login(interaction)——notify(device_code) 事件转 UI，
+//     纯 fetch 轮询。
+// 凭证统一经 hostCredsStore.modify 落库（oauth JSON）；续期由 Models 在
+// 请求时自动完成（registerBunOAuthFlows 已内嵌流程模块）。
+
+const OAUTH_CODE_PROFILES = {
+	anthropic: {
+		clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+		authorizeUrl: "https://claude.ai/oauth/authorize",
+		tokenUrl: "https://platform.claude.com/v1/oauth/token",
+		scope:
+			"org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+		port: 53692,
+		path: "/callback",
+		stateFromVerifier: true, // pi-ai 语义：anthropic 用 verifier 兼作 state
+		extraAuthorize: { code: "true" },
+		exchange: (url, body, _redirect) =>
+			fetchJsonOAuth(url, "application/json", {
+				grant_type: "authorization_code",
+				client_id: body.clientId,
+				code: body.code,
+				state: body.state,
+				redirect_uri: body.redirectUri,
+				code_verifier: body.verifier,
+			}),
+		toCredential: (t) => ({
+			type: "oauth",
+			refresh: t.refresh_token,
+			access: t.access_token,
+			expires: Date.now() + t.expires_in * 1000 - 5 * 60 * 1000,
+		}),
+	},
+	"openai-codex": {
+		clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
+		authorizeUrl: "https://auth.openai.com/oauth/authorize",
+		tokenUrl: "https://auth.openai.com/oauth/token",
+		scope: "openid profile email offline_access",
+		port: 1455,
+		path: "/auth/callback",
+		stateFromVerifier: false,
+		extraAuthorize: {
+			id_token_add_organizations: "true",
+			codex_cli_simplified_flow: "true",
+			originator: "pi",
+		},
+		exchange: (url, body, _redirect) =>
+			fetchFormOAuth(url, {
+				grant_type: "authorization_code",
+				client_id: body.clientId,
+				code: body.code,
+				code_verifier: body.verifier,
+				redirect_uri: body.redirectUri,
+			}),
+		toCredential: (t) => {
+			const accountId = jwtAccountId(t.access_token);
+			if (!accountId) throw new Error("Failed to extract accountId from token");
+			return {
+				type: "oauth",
+				access: t.access_token,
+				refresh: t.refresh_token,
+				expires: Date.now() + t.expires_in * 1000,
+				account_id: accountId,
+			};
+		},
+	},
+	openrouter: {
+		clientId: "",
+		authorizeUrl: "https://openrouter.ai/auth",
+		tokenUrl: "https://openrouter.ai/api/v1/auth/keys",
+		port: 0, // OS 分配
+		path: "", // /oauth/callback/<verifier 前缀>，登录时生成
+		stateFromVerifier: false,
+		noState: true,
+		callbackUrlParam: "callback_url", // openrouter 用 callback_url 而非 redirect_uri
+		exchange: (url, body, _redirect) =>
+			fetchJsonOAuth(url, "application/json", {
+				code: body.code,
+				code_verifier: body.verifier,
+				code_challenge_method: "S256",
+			}),
+		toCredential: (t) => {
+			if (typeof t.key !== "string" || !t.key) throw new Error('OpenRouter OAuth response carries no "key"');
+			return { type: "oauth", access: t.key, refresh: "", expires: Number.MAX_SAFE_INTEGER };
+		},
+	},
+};
+
+const OAUTH_LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+const pendingOauthCallbacks = new Map();
+
+function jwtAccountId(accessToken) {
+	try {
+		const payload = JSON.parse(atob(accessToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+		const auth = payload?.["https://api.openai.com/auth"] ?? payload?.auth;
+		const id = auth?.chatgpt_account_id;
+		return typeof id === "string" && id ? id : null;
+	} catch {
+		return null;
+	}
+}
+
+async function fetchJsonOAuth(url, contentType, bodyObj) {
+	const res = await fetch(url, {
+		method: "POST",
+		headers: { "Content-Type": contentType, Accept: "application/json" },
+		body: JSON.stringify(bodyObj),
+		signal: AbortSignal.timeout(30_000),
+	});
+	const text = await res.text();
+	if (!res.ok) throw new Error(`OAuth exchange failed (${res.status}): ${text.slice(0, 300)}`);
+	return JSON.parse(text);
+}
+
+const fetchFormOAuth = (url, form) =>
+	fetchJsonOAuth(url, "application/x-www-form-urlencoded", form);
+
+// 登录入口（kick+事件回投）：__pi_oauth_login(providerId)
+globalThis.__pi_oauth_login = (providerId) => {
+	(async () => {
+		const done = (error) => emit({ type: "oauth_done", provider: providerId, error: error ?? null });
+		try {
+			const provider = models.getProvider(providerId);
+			const credential = await oauthLogin(providerId, provider);
+			await hostCredsStore.modify(providerId, async () => credential);
+			emit({ type: "oauth_progress", provider: providerId, message: "signed in" });
+			done(null);
+		} catch (e) {
+			done(String(e?.message ?? e));
+		}
+	})();
+	return "started";
+};
+
+// 回调注入：宿主捕获（oauth_listen / deep link）→ 此处解析等待中的登录
+globalThis.__pi_oauth_callback = (url) => {
+	const entry = pendingOauthCallbacks.values().next().value;
+	if (!entry) return "no pending oauth login";
+	entry.resolve(String(url ?? ""));
+	return "ok";
+};
+
+const waitCallback = (providerId) =>
+	new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			pendingOauthCallbacks.delete(providerId);
+			reject(new Error("OAuth login timed out — no callback within 10 minutes"));
+		}, OAUTH_LOGIN_TIMEOUT_MS);
+		pendingOauthCallbacks.set(providerId, {
+			resolve: (url) => {
+				clearTimeout(timer);
+				resolve(url);
+			},
+		});
+	});
+
+const randomHex = (n) => {
+	const bytes = new Uint8Array(n);
+	globalThis.crypto?.getRandomValues?.(bytes);
+	return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+};
+
+async function oauthLogin(providerId, provider) {
+	// oauthOverrides：测试注入假 token 端点；也可自托管网关复用
+	const overrides = globalThis.__PI_CONFIG?.oauthOverrides?.[providerId] ?? {};
+	const profile = { ...OAUTH_CODE_PROFILES[providerId], ...overrides };
+	// device 流：kimi / xai / codex 设备码——直接复用 pi-ai 的 login()
+	if (!profile) {
+		const oauth = provider?.auth?.oauth;
+		if (!oauth?.login) throw new Error(`provider '${providerId}' has no OAuth login`);
+		const credential = await oauth.login({
+			signal: AbortSignal.timeout(OAUTH_LOGIN_TIMEOUT_MS),
+			notify: (event) => {
+				if (event.type === "device_code") {
+					emit({
+						type: "oauth_device_code",
+						provider: providerId,
+						userCode: event.userCode,
+						verificationUri: event.verificationUri,
+					});
+					// 验证页直接唤起浏览器（verificationUriComplete 已带预填 code）
+					if (event.verificationUri) {
+						emit({
+							type: "oauth_open_url",
+							provider: providerId,
+							url: event.verificationUri,
+						});
+					}
+				} else if (event.type === "auth_url") {
+					emit({ type: "oauth_open_url", provider: providerId, url: event.url });
+				} else if (event.type === "progress") {
+					emit({ type: "oauth_progress", provider: providerId, message: event.message });
+				}
+			},
+			prompt: async () => {
+				throw new Error("interactive prompt is not available for this login flow");
+			},
+		});
+		return credential;
+	}
+
+	// code 流：PKCE（宿主）→ 授权 URL（宿主开浏览器）→ 回调捕获 → 交换
+	const { verifier, challenge } = await hostcall("oauth_pkce");
+	if (!verifier) throw new Error("oauth_pkce hostcall failed");
+	const state = profile.stateFromVerifier ? verifier : randomHex(16);
+	const cbPath = profile.path || `/oauth/callback/${verifier.slice(0, 12)}`;
+	const listenResp = await hostcall("oauth_listen", { port: profile.port ?? 0, path: cbPath });
+	if (listenResp.error) throw new Error(listenResp.error);
+	const redirectUri = `http://localhost:${listenResp.port}${cbPath}`;
+	const authorizeParams = new URLSearchParams({
+		client_id: profile.clientId,
+		response_type: "code",
+		redirect_uri: redirectUri,
+		scope: profile.scope ?? "",
+		code_challenge: challenge,
+		code_challenge_method: "S256",
+		state,
+		...(profile.extraAuthorize ?? {}),
+	});
+	const authorizeUrl = `${profile.authorizeUrl}?${authorizeParams.toString()}`;
+	emit({ type: "oauth_open_url", provider: providerId, url: authorizeUrl });
+
+	const callbackUrl = await waitCallback(providerId);
+	const parsed = new URL(callbackUrl);
+	const code = parsed.searchParams.get("code");
+	const cbState = parsed.searchParams.get("state");
+	const cbError = parsed.searchParams.get("error");
+	if (cbError) throw new Error(`Provider returned error: ${cbError}`);
+	if (!code) throw new Error("Callback URL carries no authorization code");
+	if (!profile.noState && cbState && cbState !== state) throw new Error("OAuth state mismatch");
+
+	emit({ type: "oauth_progress", provider: providerId, message: "exchanging authorization code" });
+	const token = await profile.exchange(
+		profile.tokenUrl,
+		{ clientId: profile.clientId, code, state, redirectUri, verifier },
+		redirectUri,
+	);
+	return profile.toCredential(token);
+}
 
 // 未配置选择时的兜底模型（本地测试用 __PI_CONFIG.baseUrl 指假 LLM 端点）。
 // 配置了 providerConfig 时一律用 pi-ai 目录解析出的完整模型对象。

@@ -5,6 +5,7 @@ mod creds;
 mod goal;
 mod http_tool;
 mod keepalive;
+mod oauth;
 mod mcp;
 mod pi_bun;
 mod sessions;
@@ -95,7 +96,8 @@ fn set_creds(app: tauri::AppHandle, provider: String, api_key: String) -> Result
 #[tauri::command]
 fn has_creds(app: tauri::AppHandle, provider: String) -> Result<bool, String> {
     let dir = app_data_dir(&app)?;
-    Ok(creds::get(&dir, &provider).is_some())
+    Ok(creds::get(&dir, &provider).is_some()
+        || creds::get_json(&dir, &provider).is_some())
 }
 
 /// provider.json —— 用户选择的默认模型（provider + modelId）。
@@ -319,16 +321,44 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
-            // agent_event / approval_required / ask_user → WebView 事件桥
+            // agent_event / approval_required / ask_user → WebView 事件桥。
+            // oauth_open_url 同时唤起系统浏览器（provider 授权页）。
             let handle = app.handle().clone();
             let emit = move |json: &str| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+                    if v["type"] == "oauth_open_url" {
+                        if let Some(url) = v["url"].as_str() {
+                            let app2 = handle.clone();
+                            let url = url.to_string();
+                            tauri::async_runtime::spawn(async move {
+                                use tauri_plugin_opener::OpenerExt;
+                                let _ = app2.opener().open_url(url, None::<&str>);
+                            });
+                        }
+                    }
+                }
                 use tauri::Emitter;
                 let _ = handle.emit("pi-agent-event", json);
             };
             pi_bun::loopback::set_event_sink(emit.clone());
             approval::set_event_sink(emit.clone());
             ask_user::set_event_sink(emit);
+
+            // pimobile:// deep link → bundle 的 __pi_oauth_callback（oauth.rs
+            // 注释：辅助回调通道；本工程 manifest 已注册 pimobile scheme）。
+            use tauri_plugin_deep_link::DeepLinkExt;
+            let dl = app.handle().clone();
+            let _ = dl;
+            app.deep_link().on_open_url(move |event| {
+                for u in event.urls() {
+                    let s = u.to_string();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let _ = pi_bun::call_string_global("__pi_oauth_callback", &s);
+                    });
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
