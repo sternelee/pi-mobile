@@ -1,28 +1,32 @@
 //! approval —— 工具审批（M3 主线）：policy 状态机 + pending 请求表 + diff。
 //!
-//! 流程（PLAN D2 policy-hook 设计）：bundle 内 mutating 工具（write/edit/bash）
-//! 执行前发 `approval_request` hostcall（阻塞等决策）→ 本模块查 policy：
-//! `auto` 直接放行；`ask` 则 emit `approval_required` 事件给 UI（带统一 diff），
-//! 挂在 channel 上等 `approval_respond` 命令回填决策，超时自动 deny。
-//! loopback 每连接一线程，阻塞一个 hostcall 不影响其他通道。
+//! 流程（kick+事件注入模式，与 ask_user 同款——真机实测：长挂起 fetch +
+//! AbortSignal 会触发嵌入 bun 的 HeapHelper 线程 SIGSEGV/断连，禁止长阻塞
+//! hostcall）：
+//! 1. bundle 内 mutating 工具执行前发 `approval_request` hostcall →
+//!    本模块查 policy：`auto` 直接放行；`ask` 则 emit `approval_required`
+//!    事件给 UI（带统一 diff），**立即返回 pending**
+//! 2. bundle 工具在 pending promise 上等（120s 超时自动 deny）
+//! 3. 用户决策 → `approval_respond` 命令 → resolver（pi_bun 注入的
+//!    skal_evaluate 调 `__pi_approval_resolve(id, decision)`）反向解析
 //!
 //! policy 持久化在 `{data_dir}/policy.json`（M3 基线只有 write 一档；
 //! 后续按会话/工具粒度扩展，键空间见 CONTRACTS §3）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const TIMEOUT: Duration = Duration::from_secs(120);
 /// 走审批的工具集（D6：Android bash 暂未注册，保持集合完整以便后续）。
-const ASK_TOOLS: &[&str] = &["write", "edit", "bash"];
+const ASK_TOOLS: &[&str] = &["write", "edit", "mkdir", "bash"];
 /// diff 回传 UI 的长度上限（移动端卡片展示，防超大文件拖垮事件流）。
 const MAX_DIFF_BYTES: usize = 16 * 1024;
 
 static EVENT_SINK: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
-static PENDING: OnceLock<Mutex<HashMap<String, Sender<String>>>> = OnceLock::new();
+static RESOLVER: OnceLock<Box<dyn Fn(&str, &str) + Send + Sync>> = OnceLock::new();
+/// requestId → 触发审批的工具名（respond 时判定 always 是否降 write 基线）。
+static PENDING: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 static POLICY: OnceLock<Mutex<Policy>> = OnceLock::new();
 static DATA_DIR: OnceLock<String> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -30,6 +34,11 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 /// 注册 UI 事件转发（与 loopback 事件同一 `pi-agent-event` 通道）。
 pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     EVENT_SINK.set(Box::new(f)).ok();
+}
+
+/// pi_bun 在 agent_init 时注入：把决策经 skal_evaluate 打回运行时。
+pub fn set_resolver(f: impl Fn(&str, &str) + Send + Sync + 'static) {
+    RESOLVER.set(Box::new(f)).ok();
 }
 
 /// 启动时配置 data_dir 并加载 policy.json。
@@ -80,12 +89,13 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
     out
 }
 
-/// 审批请求入口（loopback dispatch 调用）。返回 hostcall 应答。
+/// 审批请求入口（loopback dispatch 调用）。非阻塞：ask 时 emit 事件并立即
+/// 返回 pending，决策经 `__pi_approval_resolve` 注入（kick+resolve 模式）。
 pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     let tool = payload.get("tool").and_then(|v| v.as_str()).unwrap_or("");
     // D11：MCP 工具（mcp__<server>__<tool>）默认全部 ask，不受 write 基线
     // 影响（per-server 降 auto 见 D11 完整版）；ASK_TOOLS 里的宿主工具
-    // （write/edit/bash）仍走 policy 状态机。
+    // （write/edit/mkdir/bash）仍走 policy 状态机。
     let is_mcp = tool.starts_with("mcp__");
     let needs_ask = is_mcp
         || (ASK_TOOLS.contains(&tool)
@@ -139,161 +149,146 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
             .unwrap_or(0),
         SEQ.fetch_add(1, Ordering::Relaxed),
     );
-    let (tx, rx) = channel::<String>();
-    let pending = PENDING.get_or_init(|| Mutex::new(HashMap::new()));
-    pending.lock().unwrap().insert(id.clone(), tx);
-
-    if EVENT_SINK.get().is_none() {
-        // 无 UI（单测/无头）：立即拒绝并清表，避免 stale entry
-        pending.lock().unwrap().remove(&id);
+    let Some(sink) = EVENT_SINK.get() else {
+        // 无 UI（单测/无头）：立即拒绝
         return serde_json::json!({ "decision": "deny", "reason": "no ui attached" });
-    }
-    if let Some(sink) = EVENT_SINK.get() {
-        sink(
-            &serde_json::json!({
-                "type": "approval_required",
-                "requestId": id,
-                "tool": tool,
-                "path": path,
-                "diff": diff,
-            })
-            .to_string(),
-        );
-    }
+    };
+    PENDING
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(id.clone(), tool.to_string());
+
+    sink(
+        &serde_json::json!({
+            "type": "approval_required",
+            "requestId": id,
+            "tool": tool,
+            "path": path,
+            "diff": diff,
+        })
+        .to_string(),
+    );
     // M4 保活：常驻通知切高优先级（审批在 agent 运行期内，前台服务已升）
     crate::keepalive::on_approval_pending(tool);
 
-    match rx.recv_timeout(TIMEOUT) {
-        Ok(d) => {
-            crate::keepalive::on_approval_resolved();
-            if d == "always" {
-                if !is_mcp {
-                    // “总是允许” = write 基线降为 auto 并持久化（M3 基线粒度）
-                    if let Some(p) = POLICY.get() {
-                        let mut g = p.lock().unwrap();
-                        g.write = "auto".into();
-                        save_policy(&g);
-                    }
-                    return serde_json::json!({ "decision": "allow", "policy": "always" });
-                }
-                // MCP 工具：放行本次，但不降 write 基线（per-server 粒度见 D11 完整版）
-                return serde_json::json!({ "decision": "allow" });
-            }
-            serde_json::json!({ "decision": d })
-        }
-        Err(_) => {
-            pending.lock().unwrap().remove(&id); // 超时：rx 即将析构，清表防 stale
-            crate::keepalive::on_approval_resolved();
-            serde_json::json!({ "decision": "deny", "reason": "timeout" })
-        }
-    }
+    serde_json::json!({ "requestId": id, "pending": true })
 }
 
 /// UI 决策回填（Tauri 命令调用）。decision: allow / deny / always。
+/// "always" 在宿主侧降 write 基线（MCP 工具除外），注入运行时的统一为
+/// allow/deny —— bundle 侧只认这两个值。
 pub fn respond(request_id: &str, decision: &str) -> Result<(), String> {
     if !matches!(decision, "allow" | "deny" | "always") {
         return Err(format!("invalid decision: {decision}"));
     }
-    let sender = PENDING
+    let tool = PENDING
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap()
         .remove(request_id)
         .ok_or_else(|| format!("unknown or resolved request: {request_id}"))?;
-    sender
-        .send(decision.to_string())
-        .map_err(|e| format!("send decision: {e}"))
+
+    let mut effective = decision.to_string();
+    if decision == "always" {
+        if tool.starts_with("mcp__") {
+            // MCP 工具：放行本次，但不降 write 基线（per-server 粒度见 D11 完整版）
+            effective = "allow".into();
+        } else {
+            // “总是允许” = write 基线降为 auto 并持久化（M3 基线粒度）
+            if let Some(p) = POLICY.get() {
+                let mut g = p.lock().unwrap();
+                g.write = "auto".into();
+                save_policy(&g);
+            }
+            effective = "allow".into();
+        }
+    }
+    crate::keepalive::on_approval_resolved();
+
+    let resolver = RESOLVER
+        .get()
+        .ok_or_else(|| "resolver not configured (agent not initialized)".to_string())?;
+    resolver(request_id, &effective);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
-    fn approval_ask_deny_then_always_persists_auto() {
+    fn approval_kick_resolve_flow_and_always_demotes_write() {
         let dir = std::env::temp_dir().join(format!("pi-appr-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("workspace")).unwrap();
         configure(dir.to_str().unwrap());
 
-        // 无 UI attach：ask 策略下立即 deny（不带 UI 的兜底路径）
+        // 无 UI attach：ask 策略下立即 deny
         let r = request(&json!({ "tool": "write", "args": { "path": "a.txt", "content": "x" } }));
         assert_eq!(r["decision"], "deny");
 
-        // MCP 工具默认 ask（D11）：进 pending，不受 write 基线影响。
-        // 此处基线仍为 ask，点 always —— 验证 MCP 上的 always 不降 write 基线。
-        set_event_sink(|_| {});
-        let h = std::thread::spawn(|| {
-            request(&json!({ "tool": "mcp__srv__echo", "args": { "q": "y" } }))
+        // 有 UI：request 立即返回 pending（无阻塞 hostcall —— 真机断连修复）
+        let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let seen_sink = Arc::clone(&seen);
+        set_event_sink(move |s| seen_sink.lock().unwrap().push(s.to_string()));
+        let injected: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let injected_resolver = Arc::clone(&injected);
+        set_resolver(move |id, decision| {
+            injected_resolver
+                .lock()
+                .unwrap()
+                .push((id.to_string(), decision.to_string()));
         });
-        std::thread::sleep(Duration::from_millis(100));
-        let pending = PENDING
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap();
-        respond(&pending, "always").unwrap();
-        let r = h.join().unwrap();
-        assert_eq!(r["decision"], "allow");
-        let saved = std::fs::read_to_string(dir.join("policy.json")).ok();
-        assert!(
-            !saved.as_deref().unwrap_or_default().contains("\"auto\""),
-            "MCP always must not demote write baseline, policy.json: {saved:?}"
-        );
 
-        // 挂上 UI sink → ask 策略走 pending/respond 全流程
-        let h = std::thread::spawn(|| {
-            request(&json!({ "tool": "write", "args": { "path": "b.txt", "content": "y" } }))
-        });
-        std::thread::sleep(Duration::from_millis(100));
-        // 从 sink 收不到（吞掉了），但 pending 表里有请求 —— 用 respond 测 always
-        let pending = PENDING
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap();
-        respond(&pending, "always").unwrap();
-        let r = h.join().unwrap();
-        assert_eq!(r["decision"], "allow");
-        assert_eq!(r["policy"], "always");
+        let r = request(&json!({ "tool": "write", "args": { "path": "b.txt", "content": "y" } }));
+        assert_eq!(r["pending"], true);
+        let id = r["requestId"].as_str().unwrap().to_string();
+        {
+            let events = seen.lock().unwrap();
+            let ev: serde_json::Value = serde_json::from_str(events.last().unwrap()).unwrap();
+            assert_eq!(ev["type"], "approval_required");
+            assert_eq!(ev["requestId"], id.as_str());
+        }
 
-        // always 后 write 基线已降为 auto：直接放行，不再进 pending
+        // respond → resolver 注入 allow；always 降 write 基线并持久化
+        respond(&id, "always").unwrap();
+        {
+            let injected = injected.lock().unwrap();
+            assert_eq!(injected.len(), 1);
+            assert_eq!(injected[0], (id.clone(), "allow".to_string()));
+        }
+        assert_eq!(POLICY.get().unwrap().lock().unwrap().write, "auto");
+        assert!(std::fs::read_to_string(dir.join("policy.json"))
+            .unwrap()
+            .contains("\"auto\""));
+
+        // 基线 auto 后 write 直接放行；mkdir（ASK_TOOLS）在 auto 下也放行
         let r = request(&json!({ "tool": "write", "args": { "path": "c.txt", "content": "z" } }));
         assert_eq!(r["decision"], "allow");
-        assert_eq!(r["policy"], "auto");
-
-        // policy.json 已持久化 auto
-        let saved =
-            std::fs::read_to_string(dir.join("policy.json")).unwrap();
-        assert!(saved.contains("\"auto\""));
+        let r = request(&json!({ "tool": "mkdir", "args": { "path": "d" } }));
+        assert_eq!(r["decision"], "allow");
 
         // 只读工具永不审批
         let r = request(&json!({ "tool": "read", "args": { "path": "a.txt" } }));
         assert_eq!(r["decision"], "allow");
 
-        // write 基线已降为 auto 后，MCP 工具依旧 ask（不受基线影响）
-        let h = std::thread::spawn(|| {
-            request(&json!({ "tool": "mcp__srv__echo", "args": { "q": "z" } }))
-        });
-        std::thread::sleep(Duration::from_millis(100));
-        let pending = PENDING
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap();
-        respond(&pending, "allow").unwrap();
-        let r = h.join().unwrap();
-        assert_eq!(r["decision"], "allow");
+        // MCP 工具默认 ask：pending 后 respond always —— 放行但不降基线
+        let r = request(&json!({ "tool": "mcp__srv__echo", "args": { "q": "z" } }));
+        assert_eq!(r["pending"], true);
+        let id = r["requestId"].as_str().unwrap().to_string();
+        respond(&id, "always").unwrap();
+        {
+            let injected = injected.lock().unwrap();
+            assert_eq!(injected.last().unwrap().1, "allow");
+        }
+        assert_eq!(POLICY.get().unwrap().lock().unwrap().write, "auto");
+
+        // 重复 respond 同一 id → 已消费，报错
+        assert!(respond(&id, "allow").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

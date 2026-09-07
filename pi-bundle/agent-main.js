@@ -47,6 +47,32 @@ function emit(event) {
 // Rust policy gates ask/auto, the UI gets the diff, denial returns as tool error.
 const errContent = (text) => ({ content: [{ type: "text", text }], details: {} });
 
+// 审批等待（kick+resolve 模式，与 ask_user 同款）：approval_request hostcall
+// 立即返回 pending，决策由 Rust 经 __pi_approval_resolve 反向注入。禁止长挂起
+// fetch —— 真机实测长 pending fetch + AbortSignal 会触发嵌入 bun 崩溃/断连。
+// 120s 无决策自动 deny（原 Rust 侧超时语义移到 JS 侧）。
+const APPROVAL_TIMEOUT_MS = 120_000;
+const pendingApprovals = new Map();
+globalThis.__pi_approval_resolve = (id, decisionJson) => {
+	const entry = pendingApprovals.get(id);
+	if (!entry) return "no such approval";
+	pendingApprovals.delete(id);
+	clearTimeout(entry.timer);
+	entry.resolve(String(decisionJson ?? "deny"));
+	return "ok";
+};
+const waitForApproval = (id) =>
+	new Promise((resolve) => {
+		const entry = {
+			resolve,
+			timer: setTimeout(() => {
+				pendingApprovals.delete(id);
+				resolve("deny");
+			}, APPROVAL_TIMEOUT_MS),
+		};
+		pendingApprovals.set(id, entry);
+	});
+
 function hostTool(name, label, description, parameters, opts = {}) {
 	return {
 		name,
@@ -61,9 +87,11 @@ function hostTool(name, label, description, parameters, opts = {}) {
 				if (opts.mutating) {
 					const apr = await hostcall("approval_request", { tool: name, args: params });
 					if (apr.error) return errContent(`approval failed: ${apr.error}`);
-					if (apr.decision !== "allow")
+					let decision = apr.decision;
+					if (apr.pending) decision = await waitForApproval(apr.requestId);
+					if (decision !== "allow")
 						return errContent(
-							`User did not approve the ${name} of "${params?.path}" (${apr.reason ?? apr.decision}). Nothing was written — choose another approach or ask the user.`,
+							`User did not approve the ${name} of "${params?.path}" (${decision === "deny" ? "denied" : decision}). Nothing was written — choose another approach or ask the user.`,
 						);
 				}
 				const r = await hostcall("tool", { name, args: params });

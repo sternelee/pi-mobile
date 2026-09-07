@@ -135,10 +135,13 @@ fn set_default_model(
     std::fs::write(&path, v.to_string()).map_err(|e| format!("write provider.json: {e}"))
 }
 
-/// M3：回填审批决策（allow / deny / always），唤醒阻塞中的 approval_request。
+/// M3：回填审批决策（allow / deny / always），经 resolver 反向 skal_evaluate
+/// 注入运行时（kick+resolve 模式）—— 必须 off main thread。
 #[tauri::command]
-fn approval_respond(request_id: String, decision: String) -> Result<(), String> {
-    approval::respond(&request_id, &decision)
+async fn approval_respond(request_id: String, decision: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || approval::respond(&request_id, &decision))
+        .await
+        .map_err(|e| format!("join: {e}"))?
 }
 
 /// M4：MCP 服务器配置增删查（存 mcp.json，重启/重连后生效）。

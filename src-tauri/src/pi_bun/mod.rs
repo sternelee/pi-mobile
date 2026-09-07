@@ -203,6 +203,14 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
             "pi:ask-resolve",
         );
     });
+    crate::approval::set_resolver(|id, decision| {
+        let id_j = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".into());
+        let dec_j = serde_json::to_string(decision).unwrap_or_else(|_| "\"deny\"".into());
+        let _ = evaluate_blocking(
+            &format!("globalThis.__pi_approval_resolve({id_j}, {dec_j})"),
+            "pi:approval-resolve",
+        );
+    });
 
     // 异步引导（dynamic import 等）需要 VM tick 数拍——轮询 __pi_ready。
     // null result 视为瞬时失败可重试（实测出现过）。
