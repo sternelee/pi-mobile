@@ -135,8 +135,14 @@ fn respond(stream: &mut std::net::TcpStream, status: u16, text: &str) {
     let body = format!(
         "<html><body style='font-family:sans-serif;text-align:center;padding-top:3em'>{text}</body></html>"
     );
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        _ => "Error",
+    };
     let resp = format!(
-        "HTTP/1.1 {status} OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );

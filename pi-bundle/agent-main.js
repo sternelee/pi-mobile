@@ -1074,7 +1074,8 @@ const OAUTH_CODE_PROFILES = {
 				access: t.access_token,
 				refresh: t.refresh_token,
 				expires: Date.now() + t.expires_in * 1000,
-				account_id: accountId,
+				// 键名对齐 pi-ai（refresh 后 pi-ai 返回同形凭证，避免键漂移）
+				accountId,
 			};
 		},
 	},
@@ -1105,7 +1106,10 @@ const pendingOauthCallbacks = new Map();
 
 function jwtAccountId(accessToken) {
 	try {
-		const payload = JSON.parse(atob(accessToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+		// base64url → base64（补 padding）→ payload
+		let b = accessToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+		b += "=".repeat((4 - (b.length % 4)) % 4);
+		const payload = JSON.parse(atob(b));
 		const auth = payload?.["https://api.openai.com/auth"] ?? payload?.auth;
 		const id = auth?.chatgpt_account_id;
 		return typeof id === "string" && id ? id : null;
@@ -1132,7 +1136,12 @@ const fetchFormOAuth = (url, form) =>
 // 登录入口（kick+事件回投）：__pi_oauth_login(providerId)
 globalThis.__pi_oauth_login = (providerId) => {
 	(async () => {
-		const done = (error) => emit({ type: "oauth_done", provider: providerId, error: error ?? null });
+		const done = (error) => {
+			// 兜底清 pending（交换失败/超时路径下 entry 不残留——残留会吞掉
+			// 下一次登录的回调注入）
+			pendingOauthCallbacks.delete(providerId);
+			emit({ type: "oauth_done", provider: providerId, error: error ?? null });
+		};
 		try {
 			const provider = models.getProvider(providerId);
 			const credential = await oauthLogin(providerId, provider);
@@ -1163,6 +1172,7 @@ const waitCallback = (providerId) =>
 		pendingOauthCallbacks.set(providerId, {
 			resolve: (url) => {
 				clearTimeout(timer);
+				pendingOauthCallbacks.delete(providerId); // 即时清理防残留吞回调
 				resolve(url);
 			},
 		});
@@ -1175,15 +1185,15 @@ const randomHex = (n) => {
 };
 
 async function oauthLogin(providerId, provider) {
-	// oauthOverrides：测试注入假 token 端点；也可自托管网关复用
-	const overrides = globalThis.__PI_CONFIG?.oauthOverrides?.[providerId] ?? {};
-	const profile = { ...OAUTH_CODE_PROFILES[providerId], ...overrides };
-	// device 流：kimi / xai / codex 设备码——直接复用 pi-ai 的 login()
-	if (!profile) {
+	// device 流：kimi / xai / codex 设备码——直接复用 pi-ai 的 login()。
+	// 注意判空必须在 spread overrides 之前（空对象恒 truthy）。
+	const base = OAUTH_CODE_PROFILES[providerId];
+	if (!base) {
 		const oauth = provider?.auth?.oauth;
 		if (!oauth?.login) throw new Error(`provider '${providerId}' has no OAuth login`);
+		// 设备码有效期普遍 15min（RFC 8628 / pi-ai kimi 常量）——超时对齐
 		const credential = await oauth.login({
-			signal: AbortSignal.timeout(OAUTH_LOGIN_TIMEOUT_MS),
+			signal: AbortSignal.timeout(15 * 60 * 1000),
 			notify: (event) => {
 				if (event.type === "device_code") {
 					emit({
@@ -1214,6 +1224,8 @@ async function oauthLogin(providerId, provider) {
 	}
 
 	// code 流：PKCE（宿主）→ 授权 URL（宿主开浏览器）→ 回调捕获 → 交换
+	// oauthOverrides：测试注入假 token 端点；也可自托管网关复用
+	const profile = { ...base, ...(globalThis.__PI_CONFIG?.oauthOverrides?.[providerId] ?? {}) };
 	const { verifier, challenge } = await hostcall("oauth_pkce");
 	if (!verifier) throw new Error("oauth_pkce hostcall failed");
 	const state = profile.stateFromVerifier ? verifier : randomHex(16);
@@ -1221,16 +1233,24 @@ async function oauthLogin(providerId, provider) {
 	const listenResp = await hostcall("oauth_listen", { port: profile.port ?? 0, path: cbPath });
 	if (listenResp.error) throw new Error(listenResp.error);
 	const redirectUri = `http://localhost:${listenResp.port}${cbPath}`;
-	const authorizeParams = new URLSearchParams({
-		client_id: profile.clientId,
-		response_type: "code",
-		redirect_uri: redirectUri,
-		scope: profile.scope ?? "",
-		code_challenge: challenge,
-		code_challenge_method: "S256",
-		state,
-		...(profile.extraAuthorize ?? {}),
-	});
+	// 授权参数构造分两型：标准 authorization-code（client_id/redirect_uri/state）
+	// 与 openrouter 特例（callback_url + PKCE，无 client_id/state——对齐 pi-ai）
+	const authorizeParams = profile.callbackUrlParam
+		? new URLSearchParams({
+				[profile.callbackUrlParam]: redirectUri,
+				code_challenge: challenge,
+				code_challenge_method: "S256",
+			})
+		: new URLSearchParams({
+				client_id: profile.clientId,
+				response_type: "code",
+				redirect_uri: redirectUri,
+				scope: profile.scope ?? "",
+				code_challenge: challenge,
+				code_challenge_method: "S256",
+				state,
+				...(profile.extraAuthorize ?? {}),
+			});
 	const authorizeUrl = `${profile.authorizeUrl}?${authorizeParams.toString()}`;
 	emit({ type: "oauth_open_url", provider: providerId, url: authorizeUrl });
 
