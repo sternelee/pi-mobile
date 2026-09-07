@@ -58,6 +58,7 @@
 | `ping` | 任意 | `{pong, echo, ts}` | 连通性 |
 | `log` | `{ msg }` | `{ok}` | logcat（tag `pibun`） |
 | `tool` | `{ name, args }` | `{ text }` / `{ error }` | read/write/ls/grep，jail 到 `{dataDir}/workspace`，D6 无 exec |
+| `http` | `{ url, method?, headers?, body? }` | `{ status, contentType, body, truncated }` / `{ error }` | agent `fetch` 工具宿主侧（`http_tool.rs`）：reqwest blocking + rustls，30s 超时、响应体 256KB 上限、HTML 转纯文本；SSRF 防护——仅 http/https，拒 loopback/私网/链路本地/`*.local`（已知边界：无 DNS 解析级校验，白名单/审计留策略层） |
 | `creds_get` | `{ provider }` | `{ apiKey }` / `{ error }` | 凭证不出宿主内存，JS 仅注入运行时内存 |
 | `creds_set` | `{ provider, apiKey }` | `{ ok }` / `{ error }` | pi-ai CredentialStore.modify 的宿主后端（OAuth 刷新等写路径；空串即清除） |
 | `fs` | `{ op, path, … }` | `{ ok, value }` / `{ ok, error: { code, message } }` | pi `JsonlSessionRepo` 的 FileSystem 后端；jail 到 `{dataDir}/sessions`；JS 侧虚拟根 `/pi-sessions`（agent-main.js 与 loopback.rs 同款常量）；op ∈ readTextFile/readTextLines/writeFile/appendFile/renameFile/fileInfo/listDir/exists/createDir/remove |

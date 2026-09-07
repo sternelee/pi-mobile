@@ -2,6 +2,25 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-07 09:40 — agent `fetch` 工具（方案 B：宿主 reqwest）✅
+
+### 网络能力收敛到宿主
+- **agent 新增第 6 个内置工具 `fetch`**：`{url, method?, headers?, body?}` →
+  `{status, contentType, body, truncated}`。hostcall `http` →
+  `http_tool.rs` reqwest blocking + rustls（与 skills 安装器同栈）：30s 超时、
+  响应体 256KB 上限（take+truncate）、UA `pi-mobile-agent/0.1`。
+- **SSRF 防护**：只允许 http/https；拒绝 localhost/*.local/0.0.0.0/私网/
+  环回/链路本地/IPv6 ULA——否则模型可经 fetch 打进本机 loopback hostcall
+  （creds_get 端口）。已知边界：无 DNS 解析级校验（rebinding 理论绕过），
+  白名单/审计留策略层。
+- **HTML → 纯文本**：regex 剥 script/style/noscript/svg/注释/标签、常见
+  实体解码、空白折叠——LLM 读正文不读原始标记。
+- **审批面**：只读类，不走 approval（未来域名白名单在宿主策略层做）。
+- **测试**：Rust 15/15（SSRF 黑名单 / HTML 转文本 / 截断）；bundle 11/11
+  （新增 fetch-test：注册 / hostcall 透传 / SSRF 拒绝面）。
+
+---
+
 ## 2026-09-07 00:20 — UI/UX 2.0：ChatGPT 移动端参考重设计（对话/会话列表/设置页）✅
 
 ### 设计原则（apple-design 技能落地）

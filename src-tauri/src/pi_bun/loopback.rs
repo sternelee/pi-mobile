@@ -793,6 +793,7 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             Some(dir) => crate::skills::enabled_for_injection(dir),
             None => serde_json::json!({ "skills": [] }),
         },
+        "http" => crate::http_tool::run(payload),
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());

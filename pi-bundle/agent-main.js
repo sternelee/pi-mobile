@@ -91,6 +91,29 @@ const coreTools = [
 	hostTool("grep", "Grep", "Regex search across workspace text files. Args: {pattern, path?}", obj({ pattern: { type: "string" }, path: { type: "string" } }, ["pattern"])),
 ];
 
+// fetch：宿主侧 HTTP 工具（方案 B）。不走 hostcall("tool") 通道——
+// 直接调 "http" hostcall，由 Rust (http_tool.rs) 执行 reqwest：
+// 30s 超时、256KB 上限、SSRF 防护（拒 loopback/私网）、HTML 转纯文本。
+// 只读类，不走审批；错误应答（{error}）转 errContent。
+const fetchTool = {
+	name: "fetch",
+	label: "Fetch",
+	description:
+		"Fetch an http/https URL from the open web and return its body as text (HTML pages are converted to readable text, 30s timeout, large bodies truncated). Read-only — no approval needed. Args: {url, method?, headers?, body?}",
+	parameters: obj({ url: { type: "string" }, method: { type: "string" }, headers: { type: "object" }, body: { type: "string" } }, ["url"]),
+	async execute(toolCallId, params) {
+		try {
+			const r = await hostcall("http", params);
+			if (r.error) return errContent(`Fetch failed: ${r.error}`);
+			const meta = [`status ${r.status}`, r.contentType || "no content-type"];
+			if (r.truncated) meta.push("truncated at 256KB");
+			return { content: [{ type: "text", text: `[${meta.join(" · ")}]\n\n${r.body ?? ""}` }], details: {} };
+		} catch (e) {
+			return errContent(`Error: ${e?.message ?? e}`);
+		}
+	},
+};
+
 // ---- extension capability layer（npm:pi-* 插件的移动原生化）----
 // 原 npm 插件是 pi-coding-agent 扩展，交互层绑死 pi-tui 终端 UI，无法在嵌入
 // 式 WebView 环境运行。这里保持工具名与 schema 对齐上游（模型视角一致），
@@ -175,7 +198,7 @@ const askUserTool = {
 
 const extensionTools = [askUserTool];
 
-const tools = [...coreTools, ...extensionTools];
+const tools = [...coreTools, fetchTool, ...extensionTools];
 
 // ---- subagents（pi-subagents 移动原生化：agent 委托）----
 // 上游的 fleet/workflow/mission 机制基于 pi-server 运行时，移动端取其核心
