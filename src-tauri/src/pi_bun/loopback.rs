@@ -883,7 +883,12 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
                 "agent_end" | "agent_error" => crate::keepalive::on_agent_end(),
                 _ => {}
             }
-            logcat(&format!("agent_event: {ev_type}"));
+            // oauth 事件带全量 payload 进日志（真机诊断授权链路）
+            if ev_type.starts_with("oauth_") {
+                logcat(&format!("agent_event: {payload}"));
+            } else {
+                logcat(&format!("agent_event: {ev_type}"));
+            }
             serde_json::json!({ "ok": true })
         }
         other => serde_json::json!({ "error": format!("unknown method: {other}") }),

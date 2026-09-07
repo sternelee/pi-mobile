@@ -1134,9 +1134,17 @@ const fetchFormOAuth = (url, form) =>
 	fetchJsonOAuth(url, "application/x-www-form-urlencoded", form);
 
 // 登录入口（kick+事件回投）：__pi_oauth_login(providerId)
+// 单飞守卫：同一时刻只允许一个登录（双击/并发会互相吞回调）
+let oauthLoginInFlight = false;
 globalThis.__pi_oauth_login = (providerId) => {
+	if (oauthLoginInFlight) {
+		emit({ type: "oauth_done", provider: providerId, error: "another sign-in is already in progress" });
+		return "busy";
+	}
+	oauthLoginInFlight = true;
 	(async () => {
 		const done = (error) => {
+			oauthLoginInFlight = false;
 			// 兜底清 pending（交换失败/超时路径下 entry 不残留——残留会吞掉
 			// 下一次登录的回调注入）
 			pendingOauthCallbacks.delete(providerId);
@@ -1191,10 +1199,28 @@ async function oauthLogin(providerId, provider) {
 	if (!base) {
 		const oauth = provider?.auth?.oauth;
 		if (!oauth?.login) throw new Error(`provider '${providerId}' has no OAuth login`);
-		// 设备码有效期普遍 15min（RFC 8628 / pi-ai kimi 常量）——超时对齐
+	// 设备码有效期普遍 15min（RFC 8628 / pi-ai kimi 常量）——超时对齐。
+	// 可达性窗口：60s 内无任何 notify（设备码/授权 URL）即快速失败——
+	// 实测 auth.x.ai 在部分网络不可达，请求被静默黑洞，否则挂满 15 分钟。
+	const controller = new AbortController();
+	let endpointReached = false;
+	const reachTimer = setTimeout(
+		() => {
+			if (!endpointReached) controller.abort();
+		},
+		60 * 1000,
+	);
+	try {
 		const credential = await oauth.login({
-			signal: AbortSignal.timeout(15 * 60 * 1000),
+			signal: controller.signal,
 			notify: (event) => {
+				if (
+					!endpointReached &&
+					(event.type === "device_code" || event.type === "auth_url")
+				) {
+					endpointReached = true;
+					clearTimeout(reachTimer);
+				}
 				if (event.type === "device_code") {
 					emit({
 						type: "oauth_device_code",
@@ -1221,7 +1247,18 @@ async function oauthLogin(providerId, provider) {
 			},
 		});
 		return credential;
+	} catch (e) {
+		if (!endpointReached) {
+			const msg = String(e?.message ?? e);
+			throw new Error(
+				`cannot reach the ${providerId} auth endpoint within 60s — check network/VPN access (${msg})`,
+			);
+		}
+		throw e;
+	} finally {
+		clearTimeout(reachTimer);
 	}
+}
 
 	// code 流：PKCE（宿主）→ 授权 URL（宿主开浏览器）→ 回调捕获 → 交换
 	// oauthOverrides：测试注入假 token 端点；也可自托管网关复用
