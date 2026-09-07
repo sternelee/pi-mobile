@@ -313,6 +313,14 @@ async fn session_new() -> Result<(), String> {
         .map_err(|e| format!("join: {e}"))?
 }
 
+/// 会话删除：删 JSONL（当前会话被删时 UI 先 session_new 再删，避免
+/// 运行中的 repo append 在无 header 的孤儿文件上重建）。
+#[tauri::command]
+fn session_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let dir = app_data_dir(&app)?;
+    sessions::delete(&format!("{dir}/sessions"), &id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -384,6 +392,7 @@ pub fn run() {
             session_list,
             session_open,
             session_new,
+            session_delete,
             mcp_list,
             mcp_add,
             mcp_remove,

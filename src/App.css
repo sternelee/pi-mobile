@@ -952,6 +952,65 @@ button {
   padding: 0.7rem 0.2rem 0.25rem;
 }
 
+/* 会话行：标题用最后一条消息（单行省略），右侧删除按钮 */
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--surface-2);
+  border: 1px solid hsl(var(--border));
+  border-radius: 14px;
+  padding: 0.55rem 0.5rem 0.55rem 0.75rem;
+  cursor: pointer;
+}
+
+.session-item.active {
+  border-color: hsl(var(--primary) / 0.6);
+  background: color-mix(in srgb, var(--surface-2) 92%, hsl(var(--primary)));
+}
+
+/* min-width:0 是 flex 子项 ellipsis 生效的前提 */
+.session-item .item-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-item .item-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text, hsl(var(--foreground)));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-item .item-sub {
+  font-size: 0.7rem;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-delete-btn {
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.session-delete-btn:active {
+  background: hsl(var(--destructive) / 0.15);
+  color: hsl(var(--destructive));
+}
+
 .new-chat-btn {
   width: 100%;
   display: flex;

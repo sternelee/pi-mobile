@@ -55,6 +55,7 @@ type SessionMeta = {
   cwd: string;
   entries: number;
   size: number;
+  lastMessage?: string | null;
 };
 
 type Approval = {
@@ -307,10 +308,15 @@ function App() {
   const hasConversation = () =>
     items().some((i) => i.role === "user" || i.role === "assistant" || i.role === "tool");
 
-  // 会话分组（Today / Yesterday / Earlier）+ 搜索过滤（id 前缀匹配）
+  // 会话分组（Today / Yesterday / Earlier）+ 搜索过滤（id / 最后消息文本）
   const sessionGroups = createMemo(() => {
     const q = sessionSearch().trim().toLowerCase();
-    const list = sessions().filter((s) => !q || s.id.toLowerCase().includes(q));
+    const list = sessions().filter(
+      (s) =>
+        !q ||
+        s.id.toLowerCase().includes(q) ||
+        (s.lastMessage ?? "").toLowerCase().includes(q),
+    );
     const dayStart = new Date();
     dayStart.setHours(0, 0, 0, 0);
     const yesterday = dayStart.getTime() - 86_400_000;
@@ -1161,6 +1167,23 @@ function App() {
     }
   }
 
+  async function deleteSession(id: string) {
+    try {
+      // 当前会话先切空白：避免运行中 repo 的追加写把已删文件重建为无 header 孤儿
+      if (id === currentSession()) {
+        await invoke("session_new");
+        setCurrentSession(null);
+        setItems([{ role: "status", text: "session deleted — new session started" }]);
+      } else {
+        push({ role: "status", text: "session deleted" });
+      }
+      await invoke("session_delete", { id });
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+    } catch (e) {
+      push({ role: "status", text: `session delete failed: ${e}` });
+    }
+  }
+
   async function openFiles() {
     setDrawerOpen(false);
     setFilesOpen(true);
@@ -1628,13 +1651,26 @@ function App() {
                   <For each={grp.items}>
                     {(s) => (
                       <div
-                        class={`item-card ${s.id === currentSession() ? "active" : ""}`}
+                        class={`item-card session-item ${s.id === currentSession() ? "active" : ""}`}
                         onClick={() => switchSession(s.id)}
                       >
-                        <div class="item-title">{s.id.slice(0, 8)}</div>
-                        <div class="item-sub">
-                          {fmtRel(s.modifiedAt)} · {s.entries} messages
+                        <div class="item-body">
+                          <div class="item-title">{s.lastMessage || s.id.slice(0, 8)}</div>
+                          <div class="item-sub">
+                            {fmtRel(s.modifiedAt)} · {s.entries} messages
+                          </div>
                         </div>
+                        <button
+                          type="button"
+                          class="session-delete-btn"
+                          aria-label="delete session"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void deleteSession(s.id);
+                          }}
+                        >
+                          🗑
+                        </button>
                       </div>
                     )}
                   </For>
