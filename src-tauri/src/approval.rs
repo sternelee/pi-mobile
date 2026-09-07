@@ -73,6 +73,27 @@ fn save_policy(policy: &Policy) {
     }
 }
 
+/// 当前 write 基线（UI 设置页展示）。未配置时默认 "ask"。
+pub fn policy_get() -> String {
+    POLICY
+        .get()
+        .map(|p| p.lock().unwrap().write.clone())
+        .unwrap_or_else(|| "ask".into())
+}
+
+/// 设置 write 基线（"ask" | "auto"）并持久化——UI 的审批策略开关。
+/// 等价于把某个工具上点 "always"/重置的总开关。
+pub fn policy_set(policy: &str) -> Result<(), String> {
+    if !matches!(policy, "ask" | "auto") {
+        return Err(format!("invalid policy: {policy}"));
+    }
+    let p = POLICY.get().ok_or_else(|| "approval not configured".to_string())?;
+    let mut g = p.lock().unwrap();
+    g.write = policy.to_string();
+    save_policy(&g);
+    Ok(())
+}
+
 /// 统一 diff（unified，context=2）。新文件 old 为空串。
 fn unified_diff(path: &str, old: &str, new: &str) -> String {
     let diff = similar::TextDiff::from_lines(old, new);

@@ -144,6 +144,17 @@ async fn approval_respond(request_id: String, decision: String) -> Result<(), St
         .map_err(|e| format!("join: {e}"))?
 }
 
+/// 审批策略读写（write 基线 ask/auto）——设置页的审批开关。
+#[tauri::command]
+fn approval_policy_get() -> String {
+    approval::policy_get()
+}
+
+#[tauri::command]
+fn approval_policy_set(policy: String) -> Result<(), String> {
+    approval::policy_set(&policy)
+}
+
 /// M4：MCP 服务器配置增删查（存 mcp.json，重启/重连后生效）。
 #[tauri::command]
 fn mcp_list(app: tauri::AppHandle) -> Result<String, String> {
@@ -333,6 +344,8 @@ pub fn run() {
             get_default_model,
             set_default_model,
             approval_respond,
+            approval_policy_get,
+            approval_policy_set,
             ask_user_respond,
             workspace_revert,
             workspace_backup_info,

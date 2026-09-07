@@ -245,8 +245,27 @@ function App() {
   const [sessionSearch, setSessionSearch] = createSignal("");
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [settingsView, setSettingsView] = createSignal<
-    "providers" | "provider" | "mcp" | "skills"
+    "providers" | "provider" | "mcp" | "skills" | "agent"
   >("providers");
+  // 审批策略（write 基线 ask/auto）——Agent 设置页的开关
+  const [approvalPolicy, setApprovalPolicy] = createSignal<"ask" | "auto">("ask");
+  const setApprovalPolicyPersist = async (next: "ask" | "auto") => {
+    const prev = approvalPolicy();
+    setApprovalPolicy(next);
+    try {
+      await invoke("approval_policy_set", { policy: next });
+      push({
+        role: "status",
+        text:
+          next === "ask"
+            ? "approval required for file changes (write/edit/mkdir)"
+            : "file changes run without approval",
+      });
+    } catch (e) {
+      setApprovalPolicy(prev);
+      push({ role: "status", text: `approval_policy_set failed: ${e}` });
+    }
+  };
   // 模型快选面板（composer 上方快捷条拉起）：当前 provider 的模型列表
   const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
   // 已配置 key 的 provider 集合（LobeHub 式 provider 卡片状态标识）
@@ -1631,6 +1650,17 @@ function App() {
             >
               Skills
             </button>
+            <button
+              class={`settings-tab ${settingsView() === "agent" ? "active" : ""}`}
+              onClick={() => {
+                setSettingsView("agent");
+                invoke<string>("approval_policy_get")
+                  .then((p) => setApprovalPolicy(p === "auto" ? "auto" : "ask"))
+                  .catch(() => {});
+              }}
+            >
+              Agent
+            </button>
           </div>
 
           <Show when={settingsView() === "providers"}>
@@ -1877,6 +1907,36 @@ function App() {
                 SKILL.md instructions inject into the system prompt · disabled = not injected · no code runs
               </div>
             </div>
+          </Show>
+
+          <Show when={settingsView() === "agent"}>
+            <div class="settings-section-title">Agent behavior</div>
+            <div class="settings-subtitle">
+              Approval gates protect the on-device workspace. MCP tools always
+              ask regardless of this setting.
+            </div>
+            <div class="item-card flex items-center justify-between gap-3">
+              <div>
+                <div class="item-title">Approve file changes</div>
+                <div class="item-sub">
+                  {approvalPolicy() === "ask"
+                    ? "write / edit / mkdir ask before running"
+                    : "write / edit / mkdir run without asking"}
+                </div>
+              </div>
+              <ToggleSwitch
+                on={approvalPolicy() === "ask"}
+                onChange={(next) => void setApprovalPolicyPersist(next ? "ask" : "auto")}
+              />
+            </div>
+            <div class="item-card">
+              <div class="item-title">Never approved without asking</div>
+              <div class="item-sub">
+                bash-style command execution does not exist in this build — the
+                agent can only touch the sandboxed workspace.
+              </div>
+            </div>
+            <div class="settings-footer">pi-mobile · sessions stay on this device</div>
           </Show>
         </SheetContent>
       </Sheet>
