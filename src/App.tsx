@@ -14,6 +14,7 @@ import { createScrollPosition } from "@solid-primitives/scroll";
 import { makePersisted } from "@solid-primitives/storage";
 import { createMediaQuery } from "@solid-primitives/media";
 import { Markdown } from "./ui/Markdown";
+import { WorkspaceTree, type TreeEntry } from "./ui/WorkspaceTree";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import {
@@ -39,6 +40,7 @@ import {
   FiChevronDown,
   FiChevronRight,
   FiCircle,
+  FiCopy,
   FiCpu,
   FiFolder,
   FiKey,
@@ -109,13 +111,6 @@ type AskRequest = {
   selected: string[];
   freeform: string;
   comment: string;
-};
-
-type TreeEntry = {
-  path: string;
-  kind: "file" | "directory";
-  size: number;
-  mtimeMs: number;
 };
 
 type TodoTask = {
@@ -2163,41 +2158,51 @@ function App() {
           <Button variant="outline" size="sm" onClick={openFiles}>
             <FiRotateCw size="0.9em" /> Refresh
           </Button>
-          <div class="-mx-1 flex-1 overflow-y-auto px-1">
-            <For each={tree()}>
-              {(t) => (
-                <div
-                  class={`file-item ${t.kind === "directory" ? "dir" : ""}`}
-                  style={{
-                    "margin-left": `${(t.path.split("/").length - 1) * 0.8}rem`,
-                  }}
-                  onClick={() => t.kind === "file" && previewFile(t.path)}
-                >
-                  {t.kind === "directory" ? "▸ " : ""}
-                  {t.path.split("/").pop()}
-                  {t.kind === "file" ? `  (${t.size}B)` : "/"}
-                </div>
-              )}
-            </For>
-            <Show when={!tree().length}>
-              <div class="empty-note">workspace is empty</div>
-            </Show>
-          </div>
+          <Show
+            when={tree().length}
+            fallback={<div class="empty-note">workspace is empty</div>}
+          >
+            {/* @pierre/trees：虚拟滚动树（自带搜索/文件类型图标），点文件开预览 */}
+            <WorkspaceTree entries={tree()} onOpenFile={previewFile} />
+          </Show>
         </SheetContent>
       </Sheet>
 
       <Show when={preview()}>
-        {(p) => (
-          <Dialog open={true} onOpenChange={(o) => !o && setPreview(null)}>
-            <DialogContent class="w-[95vw] max-w-2xl gap-2 p-4">
-              <DialogHeader>
-                <DialogTitle class="truncate font-mono text-sm">{p().path}</DialogTitle>
-                <DialogDescription>workspace file preview (read-only)</DialogDescription>
-              </DialogHeader>
-              <pre class="preview-body max-h-[65vh] overflow-auto">{p().content}</pre>
-            </DialogContent>
-          </Dialog>
-        )}
+        {(p) => {
+          const meta = tree().find((t) => t.path === p().path);
+          const lines = p().content.length ? p().content.split("\n").length : 0;
+          const fmtSize = (n?: number) =>
+            n == null
+              ? ""
+              : n < 1024
+                ? `${n} B`
+                : n < 1024 * 1024
+                  ? `${(n / 1024).toFixed(1)} KB`
+                  : `${(n / 1024 / 1024).toFixed(1)} MB`;
+          return (
+            <Dialog open={true} onOpenChange={(o) => !o && setPreview(null)}>
+              <DialogContent class="w-[95vw] max-w-2xl gap-2 p-4">
+                <DialogHeader>
+                  <DialogTitle class="truncate font-mono text-sm">{p().path}</DialogTitle>
+                  <DialogDescription>
+                    read-only · {lines} lines{meta ? ` · ${fmtSize(meta.size)}` : ""}
+                  </DialogDescription>
+                </DialogHeader>
+                <pre class="preview-body max-h-[65vh] overflow-auto">{p().content}</pre>
+                <div class="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => copyText(p().content)}
+                  >
+                    <FiCopy size="0.9em" /> Copy
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          );
+        }}
       </Show>
     </main>
   );
