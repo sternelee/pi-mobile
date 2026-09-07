@@ -31,6 +31,37 @@ import {
   SheetTitle,
 } from "~/components/ui/sheet";
 import { ToggleSwitch } from "~/components/ui/switch";
+import {
+  FiAlertTriangle,
+  FiArrowDown,
+  FiCheck,
+  FiCheckSquare,
+  FiChevronDown,
+  FiChevronRight,
+  FiCircle,
+  FiCpu,
+  FiFolder,
+  FiKey,
+  FiLoader,
+  FiLock,
+  FiMenu,
+  FiPlay,
+  FiPlus,
+  FiRotateCw,
+  FiSend,
+  FiSettings,
+  FiSquare,
+  FiTarget,
+  FiTrash2,
+  FiX,
+} from "solid-icons/fi";
+import { BsOpenai } from "solid-icons/bs";
+import {
+  SiAnthropic,
+  SiGooglegemini,
+  SiOpenrouter,
+  SiX,
+} from "solid-icons/si";
 import "./App.css";
 
 type ChatItem = {
@@ -115,22 +146,21 @@ type CurrentModel = { provider: string; id: string; name: string };
 
 // OAuth 订阅型 provider（bundle 侧 __pi_oauth_login 支持登录）
 const OAUTH_PROVIDERS = new Set(["anthropic", "openai-codex", "kimi-coding", "xai", "openrouter"]);
+// 图标随文字色/字号（solid-icons 默认 1em + currentColor）
 const providerIcon = (id: string) =>
-  id === "google-gemini"
-    ? "✨"
-    : id === "openrouter"
-      ? "🌐"
-      : id === "deepseek"
-        ? "🐋"
-        : id === "anthropic"
-          ? "🅐"
-          : id === "openai-codex"
-            ? "⌬"
-            : id === "kimi-coding"
-              ? "🌙"
-              : id === "xai"
-                ? "𝕏"
-                : "⬡";
+  id === "openai" || id === "openai-codex" ? (
+    <BsOpenai size="1.1em" />
+  ) : id === "openrouter" ? (
+    <SiOpenrouter size="1.1em" />
+  ) : id === "anthropic" ? (
+    <SiAnthropic size="1.1em" />
+  ) : id === "xai" ? (
+    <SiX size="1.1em" />
+  ) : id === "google-gemini" ? (
+    <SiGooglegemini size="1.1em" />
+  ) : (
+    <FiCpu size="1.1em" />
+  );
 
 const UI_PROVIDERS: ProviderInfo[] = [
   { id: "openai", name: "OpenAI", models: [] },
@@ -933,7 +963,13 @@ function App() {
     return `Todos (${done}/${all.length})`;
   };
   const todoGlyph = (t: TodoTask) =>
-    t.status === "completed" ? "✓" : t.status === "in_progress" ? "◐" : "○";
+    t.status === "completed" ? (
+      <FiCheck size="0.85em" />
+    ) : t.status === "in_progress" ? (
+      <FiLoader size="0.85em" />
+    ) : (
+      <FiCircle size="0.85em" />
+    );
 
   const onSubmit = (e: Event) => {
     e.preventDefault();
@@ -1224,14 +1260,14 @@ function App() {
       <header class="topbar">
         <div class="topbar-actions">
           <Button variant="secondary" size="icon" class="h-8 w-8" onClick={openDrawer} aria-label="sessions">
-            ☰
+            <FiMenu size="1.05em" />
           </Button>
         </div>
         <h1 class="topbar-title">pi-mobile</h1>
         <div class="topbar-meta">
           <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
           <Button variant="secondary" size="icon" class="h-8 w-8" onClick={() => { void refreshConfigured(); setSettingsOpen(true); }} aria-label="settings">
-            ⚙️
+            <FiSettings size="1.05em" />
           </Button>
         </div>
       </header>
@@ -1240,7 +1276,7 @@ function App() {
         {(g) => (
           <div class="goal-banner">
             <span class="goal-text">
-              🎯 {g()}
+              <FiTarget size="0.95em" style={{ "vertical-align": "-0.1em" }} /> {g()}
               <Show when={goalAuto()}>
                 <span class="goal-auto"> · auto {goalAuto()!.count}/{goalAuto()!.cap}</span>
               </Show>
@@ -1248,11 +1284,11 @@ function App() {
             <div class="goal-actions">
               <Show when={!busy()}>
                 <button class="goal-btn" onClick={continueGoal}>
-                  ▶ Continue
+                  <FiPlay size="0.85em" /> Continue
                 </button>
               </Show>
-              <button class="goal-btn" onClick={clearGoal}>
-                ✕
+              <button class="goal-btn" onClick={clearGoal} aria-label="clear goal">
+                <FiX size="0.9em" />
               </button>
             </div>
           </div>
@@ -1347,13 +1383,15 @@ function App() {
                         }
                         class="px-1.5 text-[0.6rem]"
                       >
-                        {it.pending ? "…" : it.isError ? "!" : "✓"}
+                        {it.pending ? "…" : it.isError ? "!" : <FiCheck size="0.9em" />}
                       </Badge>
                       <span class="tool-summary">
                         {it.toolName}({(it.argsText ?? "").slice(0, 90)})
                         {it.pending ? " …" : ""}
                       </span>
-                      <span class="tool-caret">{it.expanded ? "▼" : "▶"}</span>
+                      <span class="tool-caret">
+                        {it.expanded ? <FiChevronDown /> : <FiChevronRight />}
+                      </span>
                     </CollapsibleTrigger>
                     <CollapsibleContent>
                       <div class="tool-body">
@@ -1390,7 +1428,7 @@ function App() {
 
       <Show when={awayFromBottom() > 240}>
         <button class="jump-btn" onClick={jumpToLatest} aria-label="jump to latest">
-          ↓
+          <FiArrowDown size="1em" />
         </button>
       </Show>
 
@@ -1398,14 +1436,16 @@ function App() {
       <Show when={ready()}>
         <div class="quick-bar">
           <button class="quick-chip" onClick={openFiles}>
-            📁 <span>Files</span>
+            <FiFolder size="0.95em" /> <span>Files</span>
           </button>
           <button class="quick-chip" onClick={openModelPicker}>
-            🤖 <span>{currentModel()?.name ?? "Model"}</span>
-            <span class="quick-caret">▾</span>
+            <FiCpu size="0.95em" /> <span>{currentModel()?.name ?? "Model"}</span>
+            <span class="quick-caret">
+              <FiChevronDown size="0.8em" />
+            </span>
           </button>
           <button class="quick-chip" onClick={() => setTodoOpen(!todoOpen())}>
-            ☑ <span>Todos</span>
+            <FiCheckSquare size="0.95em" /> <span>Todos</span>
           </button>
         </div>
       </Show>
@@ -1414,7 +1454,8 @@ function App() {
         {(a) => (
           <div class="approval">
             <div class="approval-title">
-              ⚠ {a().tool} «{a().path}» — approve?
+              <FiAlertTriangle size="0.95em" style={{ "vertical-align": "-0.12em" }} />{" "}
+              {a().tool} «{a().path}» — approve?
             </div>
             <Show when={a().diff}>
               <div class="diff">
@@ -1549,7 +1590,7 @@ function App() {
                   if (planData) sendText(`✅ Plan approved — execute it now:\n\n${planData.content}`);
                 }}
               >
-                ▶ Approve & run
+                <FiPlay size="0.85em" /> Approve &amp; run
               </Button>
             </div>
           </div>
@@ -1565,7 +1606,7 @@ function App() {
           <div class="todo-head">
             <span class="todo-title">{todoHeading()}</span>
             <button class="goal-btn" onClick={() => setTodoOpen(false)} aria-label="hide todos">
-              ✕
+              <FiX size="0.9em" />
             </button>
           </div>
           <Show
@@ -1614,13 +1655,13 @@ function App() {
                 disabled={!ready() || !input().trim()}
                 aria-label="send"
               >
-                ➤
+                <FiSend size="1em" />
               </button>
             }
           >
             {/* 仅在「空内容 + 响应中」显示停止；有内容时始终显示发送（消息入队） */}
             <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
-              ■
+              <FiSquare size="0.95em" />
             </button>
           </Show>
         </div>
@@ -1635,7 +1676,7 @@ function App() {
             <SheetTitle class="text-base">Sessions</SheetTitle>
           </SheetHeader>
           <button class="new-chat-btn" onClick={newSession}>
-            ＋ New chat
+            <FiPlus size="1em" /> New chat
           </button>
           <input
             class="session-search"
@@ -1669,7 +1710,7 @@ function App() {
                             void deleteSession(s.id);
                           }}
                         >
-                          🗑
+                          <FiTrash2 size="0.95em" />
                         </button>
                       </div>
                     )}
@@ -1692,12 +1733,16 @@ function App() {
                 setSettingsOpen(true);
               }}
             >
-              <span class="settings-icon-chip">⚙️</span>
+              <span class="settings-icon-chip">
+                <FiSettings size="1.05em" />
+              </span>
               <div class="settings-row-body">
                 <div class="settings-row-title">Settings</div>
                 <div class="settings-row-sub">AI model · MCP servers · Skills</div>
               </div>
-              <span class="settings-chevron">›</span>
+              <span class="settings-chevron">
+                <FiChevronRight size="1em" />
+              </span>
             </div>
           </div>
         </SheetContent>
@@ -1759,9 +1804,7 @@ function App() {
                         setSettingsView("provider");
                       }}
                     >
-                      <span class="settings-icon-chip">
-                        {providerIcon(p.id)}
-                      </span>
+                      <span class="settings-icon-chip">{providerIcon(p.id)}</span>
                       <div class="settings-row-body">
                         <div class="settings-row-title">
                           {p.name}
@@ -1774,7 +1817,9 @@ function App() {
                           {configured().has(p.id) ? "API key set" : "no key"}
                         </div>
                       </div>
-                      <span class="settings-chevron">›</span>
+                      <span class="settings-chevron">
+                        <FiChevronRight size="1em" />
+                      </span>
                     </div>
                   )}
                 </For>
@@ -1791,7 +1836,10 @@ function App() {
             </div>
             <Show when={OAUTH_PROVIDERS.has(selProvider())}>
               <div class="item-card">
-                <div class="item-title">🔐 Subscription sign-in</div>
+                <div class="item-title">
+                  <FiLock size="0.95em" style={{ "vertical-align": "-0.12em" }} /> Subscription
+                  sign-in
+                </div>
                 <div class="item-sub">
                   Opens the provider's login page in your browser and returns
                   via the pimobile:// deep link or a local callback — no API
@@ -1819,7 +1867,10 @@ function App() {
                 when={!keySaved()}
                 fallback={
                   <div class="item-card">
-                    <div class="item-title">🔑 API key configured</div>
+                    <div class="item-title">
+                      <FiKey size="0.95em" style={{ "vertical-align": "-0.12em" }} /> API key
+                      configured
+                    </div>
                     <div class="item-sub">
                       tap <span class="underline">replace</span> below to change it
                     </div>
@@ -1855,7 +1906,7 @@ function App() {
                   class="h-7 text-xs"
                   onClick={() => loadModels(selProvider())}
                 >
-                  ⟳ Refresh
+                  <FiRotateCw size="0.9em" /> Refresh
                 </Button>
               </div>
               <Show when={loadingModels()}>
@@ -1875,7 +1926,9 @@ function App() {
                       <Show
                         when={currentModel()?.provider === selProvider() && currentModel()?.id === m.id}
                       >
-                        <span class="model-check">✓</span>
+                        <span class="model-check">
+                          <FiCheck size="0.9em" />
+                        </span>
                       </Show>
                       {m.name}
                     </div>
@@ -1896,7 +1949,7 @@ function App() {
               <div class="flex items-center justify-between">
                 <span />
                 <Button variant="ghost" size="sm" class="h-7 text-xs" onClick={reconnectMcp}>
-                  ⟳ Reconnect
+                  <FiRotateCw size="0.9em" /> Reconnect
                 </Button>
               </div>
               <For each={mcpServers()}>
@@ -1959,7 +2012,7 @@ function App() {
                   Add server
                 </Button>
               </form>
-              <div class="item-sub mt-1">calls require approval · ⟳ Reconnect applies config changes</div>
+              <div class="item-sub mt-1">calls require approval · Reconnect applies config changes</div>
             </div>
           </Show>
 
@@ -2063,12 +2116,16 @@ function App() {
               setSettingsOpen(true);
             }}
           >
-            <span class="settings-icon-chip">🤖</span>
+            <span class="settings-icon-chip">
+              <FiCpu size="1.05em" />
+            </span>
             <div class="settings-row-body">
               <div class="settings-row-title">Change provider</div>
               <div class="settings-row-sub">OpenAI · OpenRouter · DeepSeek · Gemini</div>
             </div>
-            <span class="settings-chevron">›</span>
+            <span class="settings-chevron">
+              <FiChevronRight size="1em" />
+            </span>
           </div>
           <div class="-mx-1 flex-1 overflow-y-auto px-1">
             <Show when={pickerModels().length > 0} fallback={<div class="empty-note">loading models…</div>}>
@@ -2080,7 +2137,9 @@ function App() {
                   >
                     <div class="item-title">
                       <Show when={currentModel()?.id === m.id}>
-                        <span class="model-check">✓</span>
+                        <span class="model-check">
+                          <FiCheck size="0.9em" />
+                        </span>
                       </Show>
                       {m.name}
                     </div>
@@ -2102,7 +2161,7 @@ function App() {
             <SheetTitle class="text-base">Workspace</SheetTitle>
           </SheetHeader>
           <Button variant="outline" size="sm" onClick={openFiles}>
-            ⟳ Refresh
+            <FiRotateCw size="0.9em" /> Refresh
           </Button>
           <div class="-mx-1 flex-1 overflow-y-auto px-1">
             <For each={tree()}>
