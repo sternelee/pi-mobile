@@ -163,6 +163,7 @@ button {
 .chat {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden; /* 任何漏网长 token 都不允许撑出整屏横滚 */
   padding: 0.7rem 0.6rem 0.4rem;
   scrollbar-width: thin;
 }
@@ -246,6 +247,7 @@ button {
   color: var(--text-faint);
   white-space: pre-wrap;
   word-break: break-all;
+  overflow-wrap: anywhere;
   margin: 0.2rem 0 0.2rem 0.6rem;
 }
 
@@ -792,6 +794,15 @@ button {
 
 .md {
   font-size: 0.86rem;
+  /* 历史回放里的 ⚒ tool JSON / 长 token 必须折行，否则撑出横向滚动 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* 消息行在 flex 列里允许收缩，杜绝子内容撑破容器 */
+.msg {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .md p {
