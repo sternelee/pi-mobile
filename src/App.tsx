@@ -16,6 +16,13 @@ import { createMediaQuery } from "@solid-primitives/media";
 import { Markdown } from "./ui/Markdown";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "~/components/ui/dialog";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "~/components/ui/collapsible";
 import {
   Sheet,
@@ -1842,17 +1849,15 @@ function App() {
 
       <Show when={preview()}>
         {(p) => (
-          <div class="preview-overlay" onClick={() => setPreview(null)}>
-            <div class="preview-panel" onClick={(e) => e.stopPropagation()}>
-              <div class="preview-head">
-                <strong>{p().path}</strong>
-                <button class="icon-btn" onClick={() => setPreview(null)}>
-                  ✕
-                </button>
-              </div>
-              <pre class="preview-body">{p().content}</pre>
-            </div>
-          </div>
+          <Dialog open={true} onOpenChange={(o) => !o && setPreview(null)}>
+            <DialogContent class="w-[95vw] max-w-2xl gap-2 p-4">
+              <DialogHeader>
+                <DialogTitle class="truncate font-mono text-sm">{p().path}</DialogTitle>
+                <DialogDescription>workspace file preview (read-only)</DialogDescription>
+              </DialogHeader>
+              <pre class="preview-body max-h-[65vh] overflow-auto">{p().content}</pre>
+            </DialogContent>
+          </Dialog>
         )}
       </Show>
     </main>
