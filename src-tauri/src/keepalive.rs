@@ -1,33 +1,36 @@
-//! keepalive —— Android 前台服务保活 + 通知（Kotlin ForegroundService 的 JNI 桥）。
+//! keepalive —— Android 前台服务保活 + 通知（目前为 no-op，见下）。
 //!
-//! agent 运行期（agent_start → agent_end/agent_error）保持前台服务：锁屏/
-//! 切后台不再冻结多步任务（进程被 LMC 冻结是 loopback/VM 全链路停摆）。
-//! 审批待决时把常驻通知切到高优先级通道，决策后回落工作态。
+//! 设计意图：agent 运行期（agent_start → agent_end/agent_error）经 JNI 桥
+//! 保持 Kotlin ForegroundService 前台通知，锁屏/切后台不冻结多步任务；审批
+//! 待决时通知切高优先级通道，决策后回落。
 //!
-//! 调用点：loopback 的 agent_event sink（agent_start/agent_end/agent_error）
-//! 与 approval.rs（request/respond）。非 Android 平台全部 no-op。
+//! ⚠️ 现状（两次真机事故后回退为 no-op）：
+//! 1. ndk_context 版：tauri v2 依赖树无人调用 initialize_android_context，
+//!    android_context() 必 panic 并杀死宿主线程——approval_request 的
+//!    loopback 连接线程被杀（"socket closed unexpectedly"）、approval_respond
+//!    task 被杀（决策丢失）。保活本身也从未真正生效。
+//! 2. wry dispatch 版：把 JNI 闭包派发进 wry main pipe 线程，闭包内任何
+//!    panic 都会带崩事件循环（应用闪退）。
+//!
+//! 教训：保活是旁路增强，绝不能让它影响主链路。恢复实现时的硬性要求：
+//! JNI 调用与宿主线程隔离（独立 JNI 线程或 tauri 插件通知通道）、闭包内
+//! catch_unwind、失败只记日志。
 
 #[cfg(target_os = "android")]
 pub fn on_agent_start() {
-    imp::start("agent working");
+    crate::pi_bun::logcat("keepalive: no-op (disabled after JNI crashes)");
 }
 
 #[cfg(target_os = "android")]
-pub fn on_agent_end() {
-    imp::stop();
-}
+pub fn on_agent_end() {}
 
-/// 审批待决：通知升高优先级（服务已在前台，仅换内容与通道）。
+/// 审批待决：通知升高优先级（no-op）。
 #[cfg(target_os = "android")]
-pub fn on_approval_pending(tool: &str) {
-    imp::notify(imp::CHANNEL_APPROVAL, "Approval required", tool);
-}
+pub fn on_approval_pending(_tool: &str) {}
 
-/// 决策已回填：回落工作态通知（agent 仍在运行）。
+/// 决策已回填：回落工作态通知（no-op）。
 #[cfg(target_os = "android")]
-pub fn on_approval_resolved() {
-    imp::notify(imp::CHANNEL_WORK, "pi mobile", "agent working");
-}
+pub fn on_approval_resolved() {}
 
 // ── 非 Android 平台 no-op ──
 
@@ -39,91 +42,3 @@ pub fn on_agent_end() {}
 pub fn on_approval_pending(_tool: &str) {}
 #[cfg(not(target_os = "android"))]
 pub fn on_approval_resolved() {}
-
-#[cfg(target_os = "android")]
-mod imp {
-    use jni::objects::{JObject, JValue};
-    use jni::{JNIEnv, JavaVM};
-
-    // 与 ForegroundService.kt 常量保持一致
-    pub const CHANNEL_WORK: &str = "pi_agent_work";
-    pub const CHANNEL_APPROVAL: &str = "pi_agent_approval";
-
-    /// 拿 VM + 当前 activity（tauri 的 WryActivity，即 Context），attach 本线程。
-    fn with_activity(f: impl FnOnce(&mut JNIEnv, &JObject) -> Result<(), String>) -> Result<(), String> {
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
-            .map_err(|e| format!("keepalive: jvm: {e}"))?;
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("keepalive: attach: {e}"))?;
-        let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
-        let r = f(&mut env, &activity);
-        // 不 detach（AttachGuard drop 已处理）；错误只记日志不反传——保活是 best-effort
-        if let Err(e) = r {
-            crate::pi_bun::logcat(&format!("keepalive: {e}"));
-        }
-        Ok(())
-    }
-
-    fn jstr<'a>(env: &mut JNIEnv<'a>, s: &str) -> Result<jni::objects::JString<'a>, String> {
-        env.new_string(s).map_err(|e| format!("new_string: {e}"))
-    }
-
-    pub fn start(label: &str) {
-        let _ = with_activity(|env, activity| {
-            let label = jstr(env, label)?;
-            let cls = env
-                .find_class("com/sternelee/pi_mobile/ForegroundService")
-                .map_err(|e| format!("find class: {e}"))?;
-            env.call_static_method(
-                cls,
-                "start",
-                "(Landroid/content/Context;Ljava/lang/String;)V",
-                &[JValue::Object(activity), JValue::Object(&label)],
-            )
-            .map_err(|e| format!("call start: {e}"))?;
-            Ok(())
-        });
-    }
-
-    pub fn notify(channel: &str, title: &str, text: &str) {
-        let _ = with_activity(|env, activity| {
-            let channel = jstr(env, channel)?;
-            let title = jstr(env, title)?;
-            let text = jstr(env, text)?;
-            let cls = env
-                .find_class("com/sternelee/pi_mobile/ForegroundService")
-                .map_err(|e| format!("find class: {e}"))?;
-            env.call_static_method(
-                cls,
-                "notify",
-                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-                &[
-                    JValue::Object(activity),
-                    JValue::Object(&channel),
-                    JValue::Object(&title),
-                    JValue::Object(&text),
-                ],
-            )
-            .map_err(|e| format!("call notify: {e}"))?;
-            Ok(())
-        });
-    }
-
-    pub fn stop() {
-        let _ = with_activity(|env, activity| {
-            let cls = env
-                .find_class("com/sternelee/pi_mobile/ForegroundService")
-                .map_err(|e| format!("find class: {e}"))?;
-            env.call_static_method(
-                cls,
-                "stop",
-                "(Landroid/content/Context;)V",
-                &[JValue::Object(activity)],
-            )
-            .map_err(|e| format!("call stop: {e}"))?;
-            Ok(())
-        });
-    }
-}

@@ -41,8 +41,6 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 
 # M4 保活：keepalive.rs 经 JNI 驱动 Kotlin ForegroundService（已在 tauri 依赖树内）
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
-ndk-context = "0.1"
 
 [dev-dependencies]
 filetime = "0.2"
