@@ -55,8 +55,10 @@ fn hex(digest: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 解析 SKILL.md：frontmatter（name/description）+ 正文。
-fn parse_skill_md(text: &str) -> Option<(String, String, String)> {
+/// 解析 SKILL.md：frontmatter（name/description/command）+ 正文。
+/// `command: <slug>` 可选——声明后技能可作为自定义指令 `/slug` 调用
+/// （pi TUI 语义：/commit-it 这类命令式技能）。
+fn parse_skill_md(text: &str) -> Option<(String, String, Option<String>, String)> {
     let t = text.trim_start();
     let after_fence = t
         .strip_prefix("---\n")
@@ -64,11 +66,18 @@ fn parse_skill_md(text: &str) -> Option<(String, String, String)> {
     let (front, body) = after_fence.split_once("---")?;
     let mut name = String::new();
     let mut description = String::new();
+    let mut command: Option<String> = None;
     for line in front.lines() {
         if let Some((key, val)) = line.split_once(':') {
             match key.trim() {
                 "name" => name = val.trim().to_string(),
                 "description" => description = val.trim().to_string(),
+                "command" => {
+                    let slug = sanitize_id(val.trim());
+                    if !slug.is_empty() {
+                        command = Some(slug);
+                    }
+                }
                 _ => {}
             }
         }
@@ -76,7 +85,7 @@ fn parse_skill_md(text: &str) -> Option<(String, String, String)> {
     if name.is_empty() {
         return None;
     }
-    Some((name, description, body.trim().to_string()))
+    Some((name, description, command, body.trim().to_string()))
 }
 
 fn sanitize_id(s: &str) -> String {
@@ -185,7 +194,7 @@ fn install_from_bytes(
         (String::new(), text, Vec::new())
     };
 
-    let (name, description, _body) =
+    let (name, description, _command, _body) =
         parse_skill_md(&skill_md).ok_or("SKILL.md frontmatter must define at least 'name'")?;
     let id = sanitize_id(if name.is_empty() { &id_fallback } else { &name });
     if id.is_empty() {
@@ -333,7 +342,7 @@ pub fn enabled_for_injection(data_dir: &str) -> serde_json::Value {
         let Some(id) = e["id"].as_str() else { continue };
         let path = skills_dir(data_dir).join(id).join("SKILL.md");
         let Ok(text) = std::fs::read_to_string(path) else { continue };
-        let Some((name, description, body)) = parse_skill_md(&text) else { continue };
+        let Some((name, description, command, body)) = parse_skill_md(&text) else { continue };
         let mut clipped = body;
         if clipped.len() > MAX_SKILL_BYTES {
             clipped.truncate(MAX_SKILL_BYTES);
@@ -342,12 +351,18 @@ pub fn enabled_for_injection(data_dir: &str) -> serde_json::Value {
             clipped.truncate(TOTAL_BUDGET.saturating_sub(total));
         }
         total += clipped.len();
-        out.push(serde_json::json!({
+        let mut item = serde_json::json!({
             "id": id,
             "name": name,
             "description": description,
             "content": clipped,
-        }));
+        });
+        // 自定义指令形态（如 /commit-it）：声明了 command 的技能对 bundle
+        // 可命令寻址——展开逻辑在 bundle 侧（/slug args → 按 skill 执行）。
+        if let Some(cmd) = command {
+            item["command"] = serde_json::json!(cmd);
+        }
+        out.push(item);
         if total >= TOTAL_BUDGET {
             break;
         }
@@ -449,6 +464,33 @@ mod tests {
         let (u, r) = resolve_download_url("https://example.com/SKILL.md").unwrap();
         assert_eq!(u, "https://example.com/SKILL.md");
         assert_eq!(r, "direct");
+    }
+
+    #[test]
+    fn command_frontmatter_exposed_to_injection() {
+        let dir = std::env::temp_dir().join(format!("pi-skills-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+
+        install_from_bytes(
+            d,
+            "https://x/c.md",
+            "HEAD",
+            b"---\nname: commit-pro\ndescription: Write good commits\ncommand: commit-it\n---\nBody",
+        )
+        .unwrap();
+        // 无 command 字段：不暴露命令
+        install_from_bytes(d, "https://x/d.md", "HEAD", SKILL_MD.as_bytes()).unwrap();
+
+        let injected = enabled_for_injection(d);
+        let skills = injected["skills"].as_array().unwrap();
+        let with_cmd = skills.iter().find(|s| s["id"] == "commit-pro").unwrap();
+        assert_eq!(with_cmd["command"], "commit-it");
+        let without = skills.iter().find(|s| s["id"] == "commit-helper").unwrap();
+        assert!(without.get("command").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -36,6 +36,21 @@ const srv = createServer((req, res) => {
 				res.end('{"ok":true}');
 			} else if (method === "goal_get") {
 				res.end(JSON.stringify({ objective: goalOnServer }));
+			} else if (method === "skills_config") {
+				// 技能自定义指令（/commit-it）：声明 command 的技能可命令寻址
+				res.end(
+					JSON.stringify({
+						skills: [
+							{
+								id: "commit-pro",
+								name: "Commit Helper",
+								description: "Write good commits",
+								command: "commit-it",
+								content: "Commit rules here.",
+							},
+						],
+					}),
+				);
 			} else if (method === "creds_get") {
 				res.end('{"apiKey":"sk-test-fake"}');
 			} else if (method === "tool") {
@@ -119,5 +134,27 @@ if (!prompt.includes("Current goal") || !prompt.includes("ship the m4 milestone"
 	process.exit(1);
 }
 console.log("OK __pi_goal_apply: goal injected into system prompt");
+
+// 4) 技能自定义指令：__pi_commands 清单 + /commit-it 展开为按技能执行的 prompt
+const cmds = JSON.parse(globalThis.__pi_commands());
+if (!cmds.some((c) => c.cmd === "/commit-it" && c.name === "Commit Helper")) {
+	console.error("FAIL __pi_commands:", JSON.stringify(cmds));
+	process.exit(1);
+}
+console.log("OK __pi_commands: skill command listed");
+
+const beforeCmd = llmRequests.length;
+globalThis.__pi_prompt("/commit-it stage everything and write the message");
+for (let i = 0; i < 60 && JSON.parse(globalThis.__pi_status()).busy; i++) await sleep(250);
+const cmdReq = llmRequests.slice(beforeCmd).find((r) =>
+	typeof r.messages?.[0]?.content === "string" || Array.isArray(r.messages),
+);
+const cmdText = JSON.stringify(llmRequests.slice(beforeCmd));
+// JSON.stringify 会转义引号，按片段断言
+if (!cmdText.includes("Follow the") || !cmdText.includes("Commit Helper") || !cmdText.includes("stage everything")) {
+	console.error("FAIL: /commit-it not expanded:", cmdText.slice(0, 400));
+	process.exit(1);
+}
+console.log("OK /commit-it: expanded to skill-following prompt with user args");
 srv.close();
 process.exit(0);

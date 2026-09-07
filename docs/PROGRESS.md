@@ -2,6 +2,23 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-07 10:30 — 技能自定义指令（pi TUI /commit-it 语义）✅
+
+### Skills → 斜杠命令
+- **frontmatter `command: <slug>`**（可选）：声明后技能暴露为自定义指令
+  `/slug`（如 `/commit-it`）。Rust `skills_config` 注入时携带 `command`
+  字段；未声明的技能保持纯 systemPrompt 注入。
+- **bundle 展开**：`__pi_prompt("/commit-it stage files")` → 匹配 skillsCache
+  → 展开为 `Follow the "<name>" skill …: <args>`（技能正文已在 systemPrompt，
+  展开只发意图 + 参数，不重复注入）；未匹配的 /x 原样透传。
+  新增 `__pi_commands()` 诊断缝。
+- **UI**：`skills_applied` 事件后回读命令清单，命令面板合并展示内置 +
+  技能命令；未知斜杠命令匹配技能时透传 agent_prompt，否则提示。
+- **测试**：Rust 16/16（command frontmatter 注入暴露）；bundle 10/10
+  （pi-commands-test 增 `__pi_commands` 清单 + /commit-it 展开断言）。
+
+---
+
 ## 2026-09-07 09:40 — agent `fetch` 工具（方案 B：宿主 reqwest）✅
 
 ### 网络能力收敛到宿主

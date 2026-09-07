@@ -68,7 +68,7 @@
 | `ask_user_register` | 同 `ask_user` | `{ id, state: "pending"/"cancelled" }`（立即返回） | ask_user 的 kick+事件注入形态（禁长挂起 fetch）；作答经 `ask_user_respond` → `__pi_ask_resolve` 注入 |
 | `mcp_config` | `{}` | `{ servers: [{name, url}] }` | M4：MCP 服务器配置（存 `{data_dir}/mcp.json`）；bundle boot 时逐个 streamable-http 连接，工具注册为 `mcp__<server>__<tool>`（默认 ask 审批） |
 | `goal_get` | `{}` | `{ objective: string \| null }` | 扩展能力层 #3（pi-goal 移动原生化）：boot 注入 systemPrompt "Current goal" 节；持久化 `{data_dir}/goal.json` |
-| `skills_config` | `{}` | `{ skills: [{id,name,description,content}] }` | D12：启用中的技能全集（禁用已由宿主过滤）；bundle 注入 systemPrompt "# Skills" 节；总预算 64KB |
+| `skills_config` | `{}` | `{ skills: [{id,name,description,content,command?}] }` | D12：启用中的技能全集（禁用已由宿主过滤）；bundle 注入 systemPrompt "# Skills" 节；总预算 64KB。frontmatter `command: <slug>` 声明自定义指令（pi TUI /commit-it 语义）：bundle `__pi_prompt` 将 `/slug args` 展开为按技能执行，`__pi_commands()` 供 UI 命令面板 |
 
 **Provider/model 目录（AI provider 选择流程）**：provider 注册、模型目录（compat/contextWindow/thinkingLevel）、动态列表刷新（OpenRouter）与凭证解析全部由 bundle 内 `@earendil-works/pi-ai` 的 `createModels` + 内置 provider 工厂承担。UI 可见 4 家：`openai`（openai-responses）/`openrouter`（openai-completions，动态目录）/`deepseek`（openai-completions）/`google-gemini`（openai-completions 兼容层——内置 google provider 驱动 @google/genai，其 node-builtin 导入在嵌入 JSC 上 SIGSEGV，故用 `createProvider` + pi-ai 自带 openai-completions 实现 + Gemini 官方 OpenAI 兼容端点，模型目录数据仍取自 pi-ai 生成的 google catalog）。bundle 全局：`__pi_providers_list`（→ `providers_listed` 事件）/ `__pi_models_refresh(providerId)`（动态 provider 走网络刷新 → `models_listed`/`models_error`）/ `__pi_model_select({provider,modelId})`（热切换主 agent，子 agent 取运行时快照跟随 → `model_applied`）/ `__pi_model_current()`（当前模型 JSON）。
 

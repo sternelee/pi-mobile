@@ -1275,6 +1275,15 @@ globalThis.__pi_skills_apply = () => {
 	return "started";
 };
 
+// 自定义指令清单（pi TUI 语义）：声明了 command 的技能暴露为 /slug 命令。
+// UI 命令面板与展开判断共用；content 已注入 systemPrompt，展开只发意图。
+globalThis.__pi_commands = () =>
+	JSON.stringify(
+		skillsCache
+			.filter((s) => s.command)
+			.map((s) => ({ cmd: `/${s.command}`, name: s.name, description: s.description })),
+	);
+
 const sessionPersistError = (e) =>
 	emit({ type: "session_error", error: String(e?.message ?? e) });
 // agent_init 等 __pi_restored 再返回，保证 UI 的 agent_history 读到回放结果
@@ -1363,9 +1372,24 @@ globalThis.__pi_btw_start = (question) => {
 let lastError = null;
 let busy = false;
 
+// 自定义指令展开："/commit-it stage everything" → 按已注入的技能执行。
+// 未匹配技能命令的 /x 原样透传（模型自行理解）。技能正文在 systemPrompt
+// 里，展开只发执行意图 + 用户参数，避免内容重复注入。
+const expandSkillCommand = (text) => {
+	if (!text.startsWith("/")) return text;
+	const [first, ...rest] = text.trim().split(/\s+/);
+	const skill = skillsCache.find((s) => s.command && `/${s.command}` === first);
+	if (!skill) return text;
+	const arg = rest.join(" ").trim();
+	return arg
+		? `Follow the "${skill.name}" skill (its full instructions are in your system prompt) to fulfill: ${arg}`
+		: `Run the "${skill.name}" skill (its full instructions are in your system prompt). Confirm what you are about to do, then do it.`;
+};
+
 globalThis.__pi_prompt = (text) => {
 	try {
-		const t = typeof text === "string" && text.trim().startsWith("{") ? JSON.parse(text) : String(text);
+		let t = typeof text === "string" && text.trim().startsWith("{") ? JSON.parse(text) : String(text);
+		if (typeof t === "string") t = expandSkillCommand(t);
 		busy = true;
 		lastError = null;
 		// 用户手动交互重置 autoContinue：预算归零 + 清 Stop 抑制

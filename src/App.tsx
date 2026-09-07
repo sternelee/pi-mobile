@@ -132,6 +132,20 @@ const COMMANDS = [
   { cmd: "/todos", desc: "show/hide the agent's task list panel" },
 ];
 
+// 技能自定义指令（/commit-it 等）：skills_applied 事件后从 bundle 回读。
+// 面板合并展示；handleCommand 对匹配的未知命令透传 agent_prompt（bundle 展开）。
+const [skillCmds, setSkillCmds] = createSignal<{ cmd: string; desc: string }[]>([]);
+const allCommands = () => [...COMMANDS, ...skillCmds()];
+const refreshSkillCmds = () => {
+  invoke<string>("pi_call_global", { fnName: "__pi_commands", arg: "" })
+    .then((r) =>
+      setSkillCmds(
+        JSON.parse(r).map((c: any) => ({ cmd: c.cmd, desc: c.description ?? c.name })),
+      ),
+    )
+    .catch(() => setSkillCmds([]));
+};
+
 function fmtRel(ms: number): string {
   const mins = Math.floor((Date.now() - ms) / 60000);
   if (mins < 1) return "just now";
@@ -360,6 +374,7 @@ function App() {
           setReady(true);
           // 目录与当前模型回读（runtime 就绪后才有意义）
           refreshProviders();
+          refreshSkillCmds();
           invoke<string>("pi_call_global", { fnName: "__pi_model_current", arg: "" })
             .then((r) => {
               const m = JSON.parse(r);
@@ -407,6 +422,10 @@ function App() {
             freeform: "",
             comment: "",
           });
+          break;
+        case "skills_applied":
+          // 技能增删/启停后命令面板跟随（__pi_commands 回读）
+          refreshSkillCmds();
           break;
         case "mcp_ready":
           setMcpReady((prev) => new Set(prev).add(ev.server));
@@ -797,7 +816,16 @@ function App() {
       setTodoOpen(!todoOpen());
       return;
     }
-    push({ role: "status", text: `unknown command ${cmd} — try ${COMMANDS.map((c) => c.cmd).join(", ")}` });
+    // 未知命令：匹配技能自定义指令 → 透传（bundle 按 skill 展开）；否则提示
+    if (skillCmds().some((c) => c.cmd === cmd)) {
+      try {
+        await invoke("agent_prompt", { text });
+      } catch (e) {
+        push({ role: "status", text: `command failed: ${e}` });
+      }
+      return;
+    }
+    push({ role: "status", text: `unknown command ${cmd} — try ${allCommands().map((c) => c.cmd).join(", ")}` });
   }
 
   async function continueGoal() {
@@ -1399,7 +1427,7 @@ function App() {
 
       <Show when={input().startsWith("/")}>
         <div class="cmd-palette">
-          <For each={COMMANDS}>
+          <For each={allCommands()}>
             {(c) => (
               <button
                 class="cmd-row"
