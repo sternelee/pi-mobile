@@ -27,8 +27,7 @@ bun fork(skal 分支 pin dfcbb2b)─┤        (cmake JSCOnly + ninja jsc)
 1. **WebKit 仓库必须走镜像**：直连 GitHub clone 反复在 ~1GB 处
    `early EOF`（3 次尝试，各 ~1h）；GitHub tarball 因仓库超限返回 422。
    用 `https://gh-proxy.com/https://github.com/...` 前缀 9 分 18 秒完成
-   （1.64GiB，464897 文件，~3.5MiB/s）。**这是关键路径上唯一的阻塞点。**
-2. **WebKit 单独构建极快**：M2 Pro 12 核上 `ninja jsc` 仅 **4 分 24 秒**
+   （1.64GiB，464897 文件，~3.5MiB/s）。**这是关键路径上唯一的阻塞点。**2. **WebKit 单独构建极快**：M2 Pro 12 核上 `ninja jsc` 仅 **4 分 24 秒**
    （3080 targets），远低于文档预估的 1-2h。bun ios-release 内含 WebKit
    nested cmake 会重复编译，故 JSC 只需构建一次。
 3. **bun iOS 的 `bun-profile` link 步骤本身是坏的**：build.ninja 的
@@ -78,7 +77,36 @@ bun fork(skal 分支 pin dfcbb2b)─┤        (cmake JSCOnly + ninja jsc)
 - [ ] 真机验证 agent boot：dlopen 成功 → `runtime up: handle=…` →
       `agent bundle kicked` → 填 key → 首条对话（含工具 round-trip）
 - [ ] 复跑脚本的幂等性验证（二次运行应秒级跳过）
-- [ ] 文档：README 的 iOS 章节补「从源码构建 JSC」流程与磁盘需求
+- [x] 文档：README 的 iOS 章节已补「从源码构建 JSC」流程 + JIT 合规说明
+
+### JIT 合规排查（重要）
+初版构建并未处理 JIT。排查后发现 `jitEnabledByDefault()` 返回
+`isAddress64Bit()` —— arm64 上恒为 true，且 `ENABLE_JIT=ON`（已确认
+CMakeCache），而 bun 又硬编码 `JSC::Options::useJIT() = true`。
+
+WebKit 在真机靠两处降级（`runtime/VM.cpp: enableAssembler`）：
+- **① `getenv("JavaScriptCoreUseJIT")`**（VM.cpp:206）
+- ② `isJITEnabled()` 检查 `dynamic-codesigning` /
+  `com.apple.developer.cs.allow-jit` entitlement
+  （ExecutableAllocator.cpp:146）
+
+只依赖 ② 不稳：reservation 为空但 `isValid()` 可能仍为 true，
+分配 exec 页时才失败。**采用 ①**：在 `workerMain` 里于
+`bun.jsc.initialize()` 前 `setenv("JavaScriptCoreUseJIT", "0", 1)`。
+
+两个易错点（已写入代码注释）：
+- **`getenv` ≠ Zig `std.os.environ`**：后者是启动时快照的切片，而
+  `bun.jsc.initialize` 传给 `JSCInitialize` 的正是它 —— 所以
+  `BUN_JSC_*` 那套（JSCInitialize 内的 setOption 循环）在此**无效**。
+- **时序**：`canUseAssembler()` 用 `std::call_once` 缓存，由
+  `JSC::initialize()` 内的 `VM::computeCanUseJIT()` 触发 —— 都在
+  `bun.jsc.initialize()` 里，setenv 必须排在它之前。
+
+结果：`Options::useJIT()=false` + `notifyOptionsChanged()` 级联关掉
+useWasm 等依赖项，全程解释器。编译期仍构建 JIT 代码（DOMJIT/DFG
+类型依赖），不执行 —— 与 bun Android 预构建同策略，App Store 合规
+（RN 同款先例）。已用 `strings` 验证字符串进入 `bun-zig.2.o` 与最终
+`libskal.dylib`。
 
 ---
 

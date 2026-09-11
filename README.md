@@ -110,6 +110,22 @@ bun tauri ios build --debug
 > **磁盘**：WebKit 源码 ~8GB（shallow）+ JSC 构建目录 ~3GB + bun 构建目录 ~2GB
 > ≈ 13GB。清理：`rm -rf vendor/WebKit build/skal-jsc-ios vendor/bun/build/ios-release`。
 
+> **iOS 无 JIT（合规硬约束）**：Apple 不允许第三方 app 拥有可写可执行内存。
+> JSC 的 `ExecutableAllocator` 在真机上拿不到 exec 页。我们在
+> `workerMain` 里于 `bun.jsc.initialize()` 之前
+> `setenv("JavaScriptCoreUseJIT", "0", 1)` —— WebKit 的
+> `VM::enableAssembler` 经 `getenv` 读这个变量，于是
+> `VM::computeCanUseJIT()` 得出 `canUseJIT=false`，
+> `Options::useJIT()` 被置 false，全程解释器执行。
+>
+> 两个坑（已在 `patches/pi_entry.zig` 注释里详述）：① 必须用 `getenv`
+> 路径，`BUN_JSC_*` 前缀那套无效（Zig 的 `std.os.environ` 是启动时快照，
+> 而 `JSCInitialize` 读的正是它）；② 时序——`canUseAssembler()` 的结果
+> 被 `std::call_once` 缓存，必须在 `bun.jsc.initialize()` 前 setenv。
+>
+> 编译期仍构建 JIT 代码（DOMJIT/DFG 类型依赖无法剥离），与 bun 的
+> Android 预构建同策略，不执行 —— React Native 同款先例，App Store 合规。
+
 **模拟器**：走预构建 `libskal-iossim-arm64.dylib`（~63MB，无需编译 WebKit），
 存放于 `src-tauri/gen/apple/Externals/arm64/libskal.dylib` 即可。
 
