@@ -2,6 +2,86 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-12 00:40 — M5 出口条件达成：iOS 真机 libskal.dylib 从源码构建 ✅
+
+**成果**：`build/skal-ios-device/libskal.dylib`（64.4MB，platform IOS，
+minos 16.0）已嵌入 `build/arm64/pi-mobile.ipa`，deep codesign verify 通过。
+
+### 管线（三个脚本，全部可重跑）
+```
+WebKit(skal 分支 pin c1bdd50) ──┐
+                               ├─► scripts/build-jsc-ios.sh ─► libJavaScriptCore.a
+bun fork(skal 分支 pin dfcbb2b)─┤        (cmake JSCOnly + ninja jsc)
+                               └─► bun ios-release ─► 1124 个 .o + bun-zig.{0..11}.o
+                                                        │
+                          scripts/link-skal-ios.sh ◄────┘
+                          (llvm@21 clang++ -target arm64-apple-ios16.0)
+                                        │
+                                        ▼
+                          build/skal-ios-device/libskal.dylib
+                                        │
+                    gen/apple/project.yml (Embed Frameworks) ─► pi-mobile.ipa
+```
+
+### 关键技术发现
+1. **WebKit 仓库必须走镜像**：直连 GitHub clone 反复在 ~1GB 处
+   `early EOF`（3 次尝试，各 ~1h）；GitHub tarball 因仓库超限返回 422。
+   用 `https://gh-proxy.com/https://github.com/...` 前缀 9 分 18 秒完成
+   （1.64GiB，464897 文件，~3.5MiB/s）。**这是关键路径上唯一的阻塞点。**
+2. **WebKit 单独构建极快**：M2 Pro 12 核上 `ninja jsc` 仅 **4 分 24 秒**
+   （3080 targets），远低于文档预估的 1-2h。bun ios-release 内含 WebKit
+   nested cmake 会重复编译，故 JSC 只需构建一次。
+3. **bun iOS 的 `bun-profile` link 步骤本身是坏的**：build.ninja 的
+   `bun-profile.rsp` 里没有任何 `-target`/`-isysroot`，链接器按 macOS 目标
+   处理 iOS object → `building for 'macOS', but linking in object file built
+   for 'iOS'`。这正是 skal 用独立 link 脚本取 `.o` + `-rsp` 自行链接的原因。
+   **object 文件本身完全正确**，只有 bun 的最后一步 link 不可用。
+4. **`skal_entry.zig` 从未被编译过**（直到本次）：M1/M2 走的是 skal 预构建
+   `libskal.so`，那个文件绕过了自建 zig 源码。首次真编译暴露 4 处错误：
+   - `AnyTask.New(EventPumpTask, run)` → `run` 未限定（应 `EventPumpTask.run`）
+   - `@intFromPtr` 返回 `usize`，函数声明 `i64` → 需 `@intCast`
+   - 本 zig 版本 `std.posix` 无 `setenv` → 改 `extern "c" fn setenv`
+   - **我们的 zig 导出 `pibun_*`，而 Rust 侧绑定 `skal_*`** → 补 4 个
+     `skal_*` 兼容导出（create/evaluate/free_string/runtime_was_reused）。
+     这是 ABI 三方镜像（pi_bun.h / ffi.rs / bridge.ts）之外的第 4 处
+     一致性要求，已记录在代码注释。
+5. **iOS 签名 team 修正**：`project.yml` 原写 `WRZ67HMJUL`，但 Xcode 实际
+   账号是 `UJ8NW4N779`（Personal Team）→ `No Account for Team` 报错。
+   注意证书 CN 里的括号号（WRZ67HMJUL）与 OU（UJ8NW4N779）不一致，
+   以 Xcode 账号列表（`IDEProvisioningTeamByIdentifier`）为准。
+6. **iOS dylib 搜索路径**：XcodeGen 的 `framework:` 依赖只加
+   `-lskal`，不会自动补 `Externals/arm64`（原配置只有
+   `Externals/arm64/$(CONFIGURATION)` 供 libapp.a 用）→ 需显式加
+   `$(PROJECT_DIR)/Externals/arm64`。
+
+### 改动文件
+- `scripts/build-jsc-ios.sh`、`scripts/link-skal-ios.sh`（新增，从 skal 适配）
+- `scripts/link-skal-ios.sh`：导出符号列表裁剪为实际存在的 4 个 skal_*
+- `src-tauri/gen/apple/project.yml`：Embed libskal.dylib + 部署目标 16.0
+  + DEVELOPMENT_TEAM 修正 + `**/*.dylib` 从 sources 排除（防重复拷贝）
+- `src-tauri/src/pi_bun/mod.rs`：iOS 分支从「返回不支持」改为 dlopen
+  `@rpath/libskal.dylib`（移除 `cfg(target_os="ios")` 的错误分支与
+  `cfg_attr(ios, allow(dead_code))`）
+- `vendor/bun/src/skal_entry.zig`：4 处编译修复 + skal_* 兼容导出
+
+### 验证
+- `cargo build --target aarch64-apple-ios --release` ✅（1m13s）
+- `bun tauri ios build --debug` ✅ 零警告 → `build/arm64/pi-mobile.ipa`
+- `codesign --verify --deep --strict` ✅
+- app 与 dylib 同 team `UJ8NW4N779`，dylib install_name
+  `@rpath/libskal.dylib` 与 Rust 侧 dlopen 字串一致
+
+### 待办
+- [ ] **真机安装验证**：设备（iPhone SE, `00008030-000A21391A83802E`,
+      iOS 26.5.2）当前未连接，CoreDevice 不可达（error 1011）。接上 USB
+      后跑 `xcrun devicectl device install app --device <UDID> <ipa>`。
+- [ ] 真机验证 agent boot：dlopen 成功 → `runtime up: handle=…` →
+      `agent bundle kicked` → 填 key → 首条对话（含工具 round-trip）
+- [ ] 复跑脚本的幂等性验证（二次运行应秒级跳过）
+- [ ] 文档：README 的 iOS 章节补「从源码构建 JSC」流程与磁盘需求
+
+---
+
 ## 2026-09-07 13:10 — 双代理代码审查 + 配置/用量/压缩五项 ✅
 
 ### 双代理审查（bundle + Rust 全量并行审查）

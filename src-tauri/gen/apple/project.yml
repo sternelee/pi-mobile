@@ -2,7 +2,9 @@ name: pi-mobile
 options:
   bundleIdPrefix: com.sternelee.pi-mobile
   deploymentTarget:
-    iOS: 14.0
+    # 16.0: libskal.dylib（JSC 从源码构建）的 LC_BUILD_VERSION minos。
+    # 低于此版本链接器告警，且嵌入式运行时依赖 iOS 16 的 JSC/WTF 行为。
+    iOS: 16.0
 fileGroups: [../../src]
 configs:
   debug: debug
@@ -31,7 +33,11 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
+      # Externals 只作为搜索路径（LIBRARY_SEARCH_PATHS）；libskal.dylib 必须
+      # 走 Frameworks 依赖的 Embed 阶段，不能被当普通资源拷贝。
       - path: Externals
+        excludes:
+          - "**/*.dylib"
       - path: pi-mobile_iOS
       - path: assets
         buildPhase: resources
@@ -62,19 +68,21 @@ targets:
         RUST_LOG: info
     settings:
       base:
-        DEVELOPMENT_TEAM: WRZ67HMJUL
+        DEVELOPMENT_TEAM: UJ8NW4N779
         CODE_SIGN_STYLE: Automatic
         ENABLE_BITCODE: false
         ARCHS: [arm64]
         VALID_ARCHS: arm64 
         LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
-        LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64 $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
         EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
       groups: [app]
     dependencies:
       - framework: libapp.a
         embed: false
+      - framework: Externals/arm64/libskal.dylib
+        embed: true
       - sdk: CoreGraphics.framework
       - sdk: Metal.framework
       - sdk: MetalKit.framework

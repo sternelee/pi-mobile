@@ -357,7 +357,7 @@ const EventPumpTask = struct {
 fn enqueueEventPump(rt: *Runtime) void {
     const task = rt.allocator.create(EventPumpTask) catch return;
     task.* = .{ .rt = rt };
-    task.any = bun.jsc.AnyTask.New(EventPumpTask, run).init(task);
+    task.any = bun.jsc.AnyTask.New(EventPumpTask, EventPumpTask.run).init(task);
     task.concurrent = .{ .task = task.any.task(), .next = .none };
     rt.vm.eventLoop().enqueueTaskConcurrent(&task.concurrent);
 }
@@ -378,7 +378,7 @@ export fn pibun_create_runtime(
     defer global_mutex.unlock();
     if (global_runtime) |rt| {
         // 每进程一个 VM：复用既有句柄（skal 同款语义）
-        return @intFromPtr(rt);
+        return @intCast(@intFromPtr(rt));
     }
 
     const allocator = std.heap.c_allocator;
@@ -391,7 +391,7 @@ export fn pibun_create_runtime(
         rt.bundle_path = allocator.dupeZ(u8, std.mem.span(p)) catch "";
     }
     global_runtime = rt;
-    return @intFromPtr(rt);
+    return @intCast(@intFromPtr(rt));
 }
 
 export fn pibun_start(rt_handle: i64) callconv(.c) i32 {
@@ -454,6 +454,128 @@ export fn pibun_wake(rt_handle: i64) callconv(.c) void {
 
 export fn pibun_version() callconv(.c) [*:0]const u8 {
     return "libpi-bun 0.1.0";
+}
+
+// ── skal_* 兼容层 ─────────────────────────────────────────────────────
+//
+// pi-mobile 的 Rust 侧（src-tauri/src/pi_bun/mod.rs）目前绑定的是 skal 预构建
+// 的 ABI（skal_create_runtime / skal_evaluate / skal_free_string /
+// skal_runtime_was_reused）—— Android 走预构建 libskal.so，iOS 走本文件
+// 从源码构建的 libskal.dylib。两边必须导出同一套符号，故这层薄包装把
+// pibun_* 机制映射到 skal_* 签名（语义与 skal.h 一致）。
+//
+// 与 pibun_* 的差异：
+//   * create 只有 dir 一个参数（无 host_port；pi-bundle 走 loopback HTTP）
+//   * evaluate 结果用 C 分配器 NUL 结尾，由 skal_free_string 释放
+//   * 无 start（bundle 由宿主用 skal_evaluate 显式求值）
+
+var global_reused: bool = false;
+
+// libc setenv（本 zig 版本的 std.posix 无此成员）
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// skal_create_runtime(dir, dir_len) → 句柄（0 = 失败）。
+/// dir 用作 HOME/TMPDIR（App 数据目录）—— 与 skal 预构建语义一致。
+export fn skal_create_runtime(dir: [*]const u8, dir_len: usize) callconv(.c) i64 {
+    global_mutex.lock();
+    defer global_mutex.unlock();
+    if (global_runtime) |rt| {
+        global_reused = true;
+        return @intCast(@intFromPtr(rt));
+    }
+
+    // HOME/TMPDIR 指向 App 数据目录（bun 与 pi-ai 的目录解析依赖它们）
+    if (dir_len > 0) {
+        const dir_buf = std.heap.c_allocator.allocSentinel(u8, dir_len, 0) catch return 0;
+        defer std.heap.c_allocator.free(dir_buf);
+        @memcpy(dir_buf[0..dir_len], dir[0..dir_len]);
+        _ = setenv("HOME", dir_buf, 1);
+        _ = setenv("TMPDIR", dir_buf, 1);
+    }
+
+    const rt = Runtime.init(std.heap.c_allocator) catch {
+        std.debug.print("pi-bun: VM init failed\n", .{});
+        return 0;
+    };
+    global_runtime = rt;
+    global_reused = false;
+    return @intCast(@intFromPtr(rt));
+}
+
+/// skal_runtime_was_reused() → 1 = 复用了既有 VM（每进程一个）。
+export fn skal_runtime_was_reused() callconv(.c) i32 {
+    return if (global_reused) 1 else 0;
+}
+
+/// skal_evaluate(handle, source, source_len, url, url_len, out, out_len, out_is_error) —— void。
+/// 同步求值并等待 Promise 落定；结果由 skal_free_string 释放。
+export fn skal_evaluate(
+    rt_handle: i64,
+    source: [*]const u8,
+    source_len: usize,
+    url: [*]const u8,
+    url_len: usize,
+    out_result: *?[*:0]u8,
+    out_result_len: *usize,
+    out_is_error: *i32,
+) callconv(.c) void {
+    global_mutex.lock();
+    const rt_opt = global_runtime;
+    global_mutex.unlock();
+
+    const rt = rt_opt orelse {
+        out_result.* = null;
+        out_result_len.* = 0;
+        out_is_error.* = 1;
+        return;
+    };
+    if (@intFromPtr(rt) != rt_handle) {
+        out_result.* = null;
+        out_result_len.* = 0;
+        out_is_error.* = 1;
+        return;
+    }
+
+    const reply = rt.allocator.create(SyncReply) catch {
+        out_result.* = null;
+        out_result_len.* = 0;
+        out_is_error.* = 1;
+        return;
+    };
+    reply.* = .{};
+    const req = rt.allocator.create(EvalRequest) catch {
+        out_result.* = null;
+        out_result_len.* = 0;
+        out_is_error.* = 1;
+        return;
+    };
+    req.* = .{
+        .rt = rt,
+        .source = source[0..source_len],
+        .url = url[0..url_len],
+        .reply = reply,
+    };
+    req.runOnWorker();
+
+    // 复制到 libc 堆 + NUL 结尾（skal_free_string 用 free() 释放）
+    const n = reply.result_buf.len;
+    const raw = std.c.malloc(n + 1) orelse {
+        out_result.* = null;
+        out_result_len.* = 0;
+        out_is_error.* = 1;
+        return;
+    };
+    const cbuf: [*]u8 = @ptrCast(raw);
+    @memcpy(cbuf[0..n], reply.result_buf);
+    cbuf[n] = 0;
+    out_result.* = @ptrCast(cbuf);
+    out_result_len.* = n;
+    out_is_error.* = if (reply.is_error) 1 else 0;
+}
+
+/// skal_free_string(ptr) —— 释放 skal_evaluate 返回的缓冲区。
+export fn skal_free_string(ptr: ?[*:0]u8) callconv(.c) void {
+    if (ptr) |p| std.c.free(@ptrCast(p));
 }
 
 /// 同步求值（PoC/诊断用，镜像 skal_evaluate 语义）。

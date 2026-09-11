@@ -13,7 +13,7 @@ Tauri 2 + 嵌入式 Bun (JavaScriptCore) + SolidJS 构建的移动端 Pi Coding 
 | **M2** Agent Bundle | ✅ | pi-agent-core 在嵌入式 bun 内 headless 启动；真机端到端 LLM 对话 + 工具调用 round-trip 验证通过 |
 | **M3** 审批与产品化 | 🔨 | 工具审批（ask/auto/diff/回滚）、会话列表、文件树预览已落地；命令面板、用量可视化进行中 |
 | **M4** MCP + Skills | 📋 | MCP streamable-http 接入、pi-subagents/pi-goal/pi-ask-user 插件能力层、Skills 安装器 |
-| **M5** iOS + 桌面 | 📋 | iOS `tauri ios init` 已完成；真机需从源码构建 WebKit JSC（~7GB 磁盘 + 2h 编译） |
+| **M5** iOS + 桌面 | 🔄 | iOS 真机 `libskal.dylib` 从源码构建 + 嵌入 ipa 已跑通（设备安装待连接验证）；桌面待启动 |
 
 📖 **详细规划见 [docs/PLAN.md](docs/PLAN.md)** —— 架构、设计决策、里程碑路线图。
 
@@ -32,7 +32,7 @@ Tauri 2 + 嵌入式 Bun (JavaScriptCore) + SolidJS 构建的移动端 Pi Coding 
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **Agent 运行时**：`libpi-bun`（skal 工艺：zig 交叉编译 bun 为平台原生库），Android 用 `.so`（JNI dlopen），iOS 用 `.a`（静态链接）
+- **Agent 运行时**：`libpi-bun`（skal 工艺：zig 交叉编译 bun 为平台原生库），Android 用 `.so`（jniLibs dlopen），iOS 用 `.dylib`（Embed Frameworks + `@rpath` dlopen）
 - **JS↔Rust 桥**：bun 原生 fetch → loopback HTTP（127.0.0.1 随机端口）→ Rust hostcall 分发；Rust→JS 经 `skal_evaluate` 事件注入
 - **工具沙箱**：read / write / ls / grep 由 Rust 实现，路径越狱防护（jail 到 `app_data/workspace`），无 exec（D6 安全决策）
 - **LLM Provider**：经 `@earendil-works/pi-ai` 统一分发，支持 Anthropic / OpenAI / DeepSeek 等 OpenAI-compatible API
@@ -74,20 +74,49 @@ TAURI_DEV_HOST=<your-lan-ip> bun tauri android dev
 
 ### iOS 开发
 
-```bash
-# 模拟器（预构建 libskal-iossim，~63MB）
-# TODO: scripts/fetch-libpi-bun-ios.sh
+**真机（arm64 device）—— 已跑通**。三个脚本串起整条链：
 
-# 真机（需从源码构建 WebKit JSC）
-# 1. 克隆 WebKit fork（~2GB shallow clone）
+```bash
+# 0. 前置：cmake + ninja + llvm@21（brew），完整 Xcode（需 iPhoneOS SDK）
+brew install cmake ninja llvm@21
+
+# 1. 克隆两个 fork（WebKit 自动走 gh-proxy 镜像；约 10 分钟）
 bun run scripts/setup-bun-fork.sh
-# 2. 构建 JSC for iOS（~2h，需完整 Xcode）
-bash scripts/build-jsc-ios.sh  # TODO
-# 3. tauri ios build
-bun tauri ios build
+
+# 2. 构建 JSC for iOS → build/skal-jsc-ios/lib/libJavaScriptCore.a（~5 分钟）
+bash scripts/build-jsc-ios.sh
+
+# 3. 构建 bun iOS objects（~8 分钟；最后 link 步骤会失败，属预期）
+cd vendor/bun
+PATH="$HOME/.cargo/bin:$PATH" bun scripts/build.ts \
+    --profile=ios-release --build-dir=build/ios-release --configure-only
+PATH="$HOME/.cargo/bin:$PATH" ninja -C build/ios-release || true
+cd ../..
+
+# 4. 链接出 libskal.dylib（arm64-apple-ios16.0）
+bash scripts/link-skal-ios.sh
+
+# 5. 嵌入并出 ipa
+bun tauri ios build --debug
+# → src-tauri/gen/apple/build/arm64/pi-mobile.ipa
 ```
 
-> **iOS 真机空间需求**：WebKit 源码 ~2GB + 构建目录 ~3-5GB = 约 7GB 额外磁盘。模拟器路径仅需 ~63MB 预构建产物。
+> **为什么第 3 步的 link 会失败**：bun 自带的 `bun-profile` link 规则生成的
+> `bun-profile.rsp` 里没有 `-target`/`-isysroot`，会按 macOS 目标去链接 iOS
+> object（`building for 'macOS', but linking in object file built for 'iOS'`）。
+> 所有 `.o` 都是正确的，只有这最后一步不可用 —— 所以第 4 步用独立脚本取
+> `.o` 自己链接，这也是 skal 上游的做法。
+
+> **磁盘**：WebKit 源码 ~8GB（shallow）+ JSC 构建目录 ~3GB + bun 构建目录 ~2GB
+> ≈ 13GB。清理：`rm -rf vendor/WebKit build/skal-jsc-ios vendor/bun/build/ios-release`。
+
+**模拟器**：走预构建 `libskal-iossim-arm64.dylib`（~63MB，无需编译 WebKit），
+存放于 `src-tauri/gen/apple/Externals/arm64/libskal.dylib` 即可。
+
+> **签名**：`project.yml` 的 `DEVELOPMENT_TEAM` 必须匹配 Xcode 里已登录的账号
+> （查 `defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier`）。
+> 注意开发证书 CN 括号里的编号与证书 OU 可能不一致 —— 以 Xcode 账号列表为准。
+> `libskal.dylib` 无需手工签名，Xcode 的 Embed Frameworks 阶段会自动签。
 
 ## 构建 agent bundle
 

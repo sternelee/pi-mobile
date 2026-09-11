@@ -92,15 +92,9 @@ step "2/4 Exported-symbols list (skal C ABI)"
 SKAL_SYMS="${SKAL_BUILD}/skal-exports.txt"
 cat > "${SKAL_SYMS}" <<'EOF'
 _skal_create_runtime
-_skal_dispose_runtime
 _skal_evaluate
 _skal_free_string
-_skal_acquire_bridge
-_skal_wake_js
 _skal_runtime_was_reused
-_skal_init_dart_api
-_skal_set_host_port
-_skal_prewarm_store
 EOF
 
 step "3/4 Link libskal.dylib (iOS device, arm64-apple-ios16.0)"
@@ -121,15 +115,9 @@ LDFLAGS=(
   -Wl,-exported_symbols_list,"${SKAL_SYMS}"
   # Anchor each C export so dead_strip doesn't drop them.
   -Wl,-u,_skal_create_runtime
-  -Wl,-u,_skal_dispose_runtime
   -Wl,-u,_skal_evaluate
   -Wl,-u,_skal_free_string
-  -Wl,-u,_skal_acquire_bridge
-  -Wl,-u,_skal_wake_js
   -Wl,-u,_skal_runtime_was_reused
-  -Wl,-u,_skal_init_dart_api
-  -Wl,-u,_skal_set_host_port
-  -Wl,-u,_skal_prewarm_store
   -licucore
   -lresolv
 )

@@ -24,17 +24,34 @@ FORK_URL="https://github.com/skal-multiplatform"
 NO_WEBKIT=0
 [[ "${1:-}" == "--no-webkit" ]] && NO_WEBKIT=1
 
+# GitHub 直连对 WebKit（~1.6GiB pack）不可靠：实测 3 次均在 ~1GB 处
+# `fetch-pack: unexpected disconnect` / `fatal: early EOF`（各耗时 ~1h）。
+# gh-proxy.com 镜像 9 分 18 秒跑完（~3.5MiB/s）。GitHub tarball 路线不可行
+# ——仓库超限，codeload 对 skal 分支/任意 commit 一律返回 422。
+# 覆盖：GIT_MIRROR=https://gh-proxy.com  (空串 = 直连)
+GIT_MIRROR="${GIT_MIRROR-https://gh-proxy.com}"
+
 step() { echo -e "\n\033[1;34m===>\033[0m \033[1m$*\033[0m"; }
 note() { echo "     $*"; }
 
+# mirror_url <https-url> → 经 GIT_MIRROR 前缀转发（空则原样）。
+mirror_url() {
+  if [[ -z "${GIT_MIRROR}" ]]; then echo "$1"; else echo "${GIT_MIRROR}/$1"; fi
+}
+
 # clone <url> 的 <branch> 到 <dir>，并 checkout 到 <pin>。
 # pin 才是构建真源（分支会移动；构建不可漂移）。
+# --depth 1 必须保留：WebKit 无浅克隆时要拉 3M+ 个 tree 对象（38KiB/s，
+# 永不结束）；blobless 变体在 checkout 阶段按 blob 逐个下载，同样不可用。
 clone_pinned() {
   local url="$1" branch="$2" dir="$3" pin="$4"
   mkdir -p "${VENDOR}"
   if [[ ! -d "${dir}/.git" ]]; then
     echo "  clone ${url#@*/} @ ${branch} → ${dir#"${ROOT}"/}"
-    git clone --branch "${branch}" --depth 1 "${url}" "${dir}"
+    echo "  via ${GIT_MIRROR:-直连}"
+    git -c http.postBuffer=524288000 -c http.lowSpeedLimit=0 -c http.lowSpeedTime=999999 \
+      clone --branch "${branch}" --depth 1 --single-branch \
+      "$(mirror_url "${url}")" "${dir}"
   fi
   local current
   current="$(git -C "${dir}" rev-parse HEAD)"
@@ -53,6 +70,11 @@ clone_pinned "${FORK_URL}/bun.git" skal "${VENDOR}/bun" "${BUN_PIN}"
 if [[ ${NO_WEBKIT} -eq 0 ]]; then
   step "2/4 vendor/WebKit（JSC 源码，Android/iOS 构建需要，pin ${WEBKIT_PIN:0:12}）"
   clone_pinned "${FORK_URL}/WebKit.git" skal "${VENDOR}/WebKit" "${WEBKIT_PIN}"
+  # bun 的 ios-release/android profile 用 webkit:"local"，nested cmake 从
+  # webkitSrcDir() 找源码（默认 vendor/bun/vendor/WebKit）→ 必须放 symlink。
+  mkdir -p "${VENDOR}/bun/vendor"
+  ln -sfn "${VENDOR}/WebKit" "${VENDOR}/bun/vendor/WebKit"
+  note "symlink vendor/bun/vendor/WebKit → vendor/WebKit"
 else
   step "2/4 跳过 WebKit（--no-webkit）"
 fi
