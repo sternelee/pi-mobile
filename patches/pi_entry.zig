@@ -15,6 +15,7 @@
 //! 参考：docs/LIBPI-BUN-NOTES.md、docs/CONTRACTS.md §2。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const bun = @import("bun");
 const jsc = bun.jsc;
 
@@ -132,6 +133,34 @@ const Runtime = struct {
 
     /// Worker 线程主函数：终身持有 VM，跑 bun 事件循环直至进程退出。
     fn workerMain(self: *Runtime) void {
+        // ── iOS 真机：关 JIT（必须在 bun.jsc.initialize 之前）──────────
+        //
+        // Apple 不允许第三方 app 拥有可写可执行内存（W^X），JSC 的
+        // ExecutableAllocator 拿不到 exec 页。WebKit 提供两个降级点
+        // （都在 runtime/VM.cpp 的 enableAssembler）：
+        //   1. 读环境变量 `JavaScriptCoreUseJIT`（VM.cpp:206，**经 getenv()
+        //      而非 Options**）—— 注意：这条能生效是因为 getenv 读 C
+        //      `environ`，而 Zig 的 `std.os.environ` 是启动时快照的切片，
+        //      `bun.jsc.initialize` 传给 JSCInitialize 的正是后者 ——
+        //      所以只能靠 getenv 这条路径，不能靠 BUN_JSC_* 前缀。
+        //   2. `isJITEnabled()`（ExecutableAllocator.cpp:146）检查
+        //      dynamic-codesigning / com.apple.developer.cs.allow-jit
+        //      entitlement。
+        // 只依赖 (2) 不够稳：reservation 为空但 isValid() 可能仍为 true，
+        // 分配 exec 页时才失败。显式走 (1) 让 VM::computeCanUseJIT()
+        // 直接得出 canUseJIT=false → InitializeThreading 将
+        // Options::useJIT() 置 false（并 notifyOptionsChanged 级联关掉
+        // useWasm 等依赖项），全程解释器执行。
+        //
+        // 时序关键：`canUseAssembler()` 用 std::call_once 缓存，而它由
+        // JSC::initialize() 内部的 VM::computeCanUseJIT() 触发 —— 两者都
+        // 发生在 bun.jsc.initialize() 里。所以 setenv 必须排在它前面。
+        // 编译期 JIT 代码仍然构建（DOMJIT/DFG 类型依赖），但不执行 ——
+        // 与 bun Android 预构建同一策略。
+        if (builtin.os.tag == .ios) {
+            _ = setenv("JavaScriptCoreUseJIT", "0", 1);
+        }
+
         bun.jsc.initialize(false);
 
         // console.* 崩溃底线（skal 教训）：嵌入式路径不初始化
