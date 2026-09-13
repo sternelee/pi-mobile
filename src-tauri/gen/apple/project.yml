@@ -67,9 +67,11 @@ targets:
         #
         # 已在用（第一批）：定位。
         NSLocationWhenInUseUsageDescription: pi 需要你的位置，以便查询本地天气、通勤时间和附近信息。
-        # 第一批 1b（日历/通讯录/照片）将用；先声明避免插件落地时漏 key 而崩。
-        # TODO(1b)：iOS 17+ 读写日历改由 NSCalendarsFullAccessUsageDescription /
-        #   NSCalendarsWriteOnlyAccessUsageDescription 控制，需实测确认是否两个都要。
+        # 日历三个键都必须声明：iOS 17 把日历权限拆成了「完整访问」与
+        # 「仅写」，只声明老键时在 iOS 17+ 上请求完整访问会被系统**直接拒绝**
+        # （不弹窗，也不报错，就是拿不到权限）—— 这个坑很隐蔽。
+        NSCalendarsFullAccessUsageDescription: pi 需要读写你的日历，以便回答「今天有什么安排」并帮你创建事件。
+        NSCalendarsWriteOnlyAccessUsageDescription: pi 需要向你的日历添加事件。
         NSCalendarsUsageDescription: pi 需要读取日历，以便回答「今天有什么安排」并帮你创建事件。
         NSContactsUsageDescription: pi 需要读取通讯录，以便在你要求「给某某发消息」时找到对应联系人。
         NSPhotoLibraryUsageDescription: pi 需要访问照片，以便按你的要求查找、整理或复制图片到工作区。

@@ -280,6 +280,40 @@ const nativeTools = [
 		obj({ highAccuracy: { type: "boolean" } }, []),
 		{ channel: "native" },
 	),
+	// 日历拆成两个工具而不是一个带 op 的：审批策略只看工具名，合成一个的话
+	// 「读」也会被标成 mutating（要么每次弹审批，要么写操作失去审批）。
+	// 拆开后读自动放行、写走审批，与其它能力一致。
+	hostTool(
+		"calendar_list",
+		"Calendar list",
+		"List events from the user's system calendar in a time window, sorted by start time. Times are epoch milliseconds; omit both bounds for the next 7 days. Read-only. Args: {fromMs?, toMs?, limit?} (limit default 50)",
+		obj(
+			{
+				fromMs: { type: "number", description: "epoch ms (inclusive)" },
+				toMs: { type: "number", description: "epoch ms (exclusive)" },
+				limit: { type: "number", description: "max events, default 50" },
+			},
+			[],
+		),
+		{ channel: "native" },
+	),
+	hostTool(
+		"calendar_create",
+		"Calendar create",
+		"Create an event in the user's system calendar. title and startMs (epoch ms) are required; endMs defaults to startMs + 1 hour. Requires user approval. Args: {title, startMs, endMs?, allDay?, notes?, location?}",
+		obj(
+			{
+				title: { type: "string" },
+				startMs: { type: "number", description: "epoch ms" },
+				endMs: { type: "number", description: "epoch ms, default startMs + 1h" },
+				allDay: { type: "boolean" },
+				notes: { type: "string" },
+				location: { type: "string" },
+			},
+			["title", "startMs"],
+		),
+		{ channel: "native", mutating: true },
+	),
 	hostTool(
 		"weather",
 		"Weather",

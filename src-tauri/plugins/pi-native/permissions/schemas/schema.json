@@ -295,6 +295,18 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the calendar command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-calendar",
+          "markdownDescription": "Enables the calendar command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the calendar command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-calendar",
+          "markdownDescription": "Denies the calendar command without any pre-configured scope."
+        },
+        {
           "description": "Enables the location command without any pre-configured scope.",
           "type": "string",
           "const": "allow-location",
@@ -305,6 +317,18 @@
           "type": "string",
           "const": "deny-location",
           "markdownDescription": "Denies the location command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the requestPermission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-requestPermission",
+          "markdownDescription": "Enables the requestPermission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the requestPermission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-requestPermission",
+          "markdownDescription": "Denies the requestPermission command without any pre-configured scope."
         },
         {
           "description": "Default permissions for pi-native (device capabilities implemented in-tree).\n\nThese commands are invoked from the Rust host, not from the webview, so the\nACL is not the authorization boundary here — capability-level consent is\nhandled by the OS permission dialogs plus pi-mobile's approval policy\n(see src-tauri/src/native/mod.rs).\n\n#### This default permission set includes:\n\n- `allow-location`",

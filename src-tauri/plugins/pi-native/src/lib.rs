@@ -73,10 +73,61 @@ pub struct LocationArgs {
     pub timeout_ms: u64,
 }
 
+/// `calendar` 命令的参数。
+///
+/// 时间一律用 **epoch 毫秒**：模型不需要猜时区/日期格式，两端也不需要各自
+/// 解析 ISO8601（历史上正是这类地方最容易出现「差一天/差几小时」的静默错误）。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarArgs {
+    /// "list" | "create"
+    pub op: String,
+    /// list: 时间窗口（闭开区间）。缺省 = 从现在起 7 天。
+    #[serde(default)]
+    pub from_ms: Option<i64>,
+    #[serde(default)]
+    pub to_ms: Option<i64>,
+    /// list: 返回条数上限（防止把用户十年日历灌进上下文）
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// create: 必填
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub start_ms: Option<i64>,
+    #[serde(default)]
+    pub end_ms: Option<i64>,
+    #[serde(default)]
+    pub all_day: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+/// 可主动请求授权的能力（触发系统弹窗）。
+///
+/// 目前只有日历需要：定位/通知/剪贴板的授权走各自官方插件。
+/// 之所以不把日历权限查询也做成「可查询」——EventKit 的授权状态与
+/// Android 的运行时权限语义差异较大，做成统一的 status 反而会掩盖差异；
+/// 让 UI 显示 unknown 并提供「Allow」，比给一个可能不准的状态更诚实。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionKind {
+    Calendar,
+}
+
+/// `requestPermission` 命令的参数。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionArgs {
+    pub kind: PermissionKind,
+}
+
 /// 初始化插件。注册的命令名必须与 `build.rs` 的 COMMANDS 一致。
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("pi-native")
-        .invoke_handler(tauri::generate_handler![location])
+        .invoke_handler(tauri::generate_handler![location, calendar, request_permission])
         .setup(|app, api| {
             #[cfg(mobile)]
             let pi_native = mobile::init(app, api)?;
@@ -111,4 +162,35 @@ async fn location<R: Runtime>(
     use tauri::Manager;
     let pi_native = app.state::<PiNative<R>>();
     pi_native.location(args)
+}
+
+/// 主动请求某项系统权限（触发系统弹窗，用户在系统弹窗作答后才返回）。
+///
+/// 与其它命令同理必须 async：弹窗要主线程，同步命令占着主线程会死锁。
+#[tauri::command]
+async fn request_permission<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    args: PermissionArgs,
+) -> Result<Value> {
+    use tauri::Manager;
+    let pi_native = app.state::<PiNative<R>>();
+    pi_native.request_permission(args.kind)
+}
+
+/// 读/写系统日历。
+///
+/// `op: "list"` 返回 `{ events: [...] }`；`op: "create"` 返回 `{ id, ... }`。
+/// 时间字段全部为 epoch 毫秒，事件对象另带 `calendarName` 便于模型/用户辨认
+/// 事件属于哪个日历（"工作"/"家庭" 等）。
+///
+/// 与 `location` 同理**必须 async**：权限弹窗与 EventKit/CalendarContract 的
+/// 查询都可能等主线程做事，同步命令占着主线程会死锁。
+#[tauri::command]
+async fn calendar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    args: CalendarArgs,
+) -> Result<Value> {
+    use tauri::Manager;
+    let pi_native = app.state::<PiNative<R>>();
+    pi_native.calendar(args)
 }

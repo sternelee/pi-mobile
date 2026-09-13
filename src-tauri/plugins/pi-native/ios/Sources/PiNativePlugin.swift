@@ -25,6 +25,11 @@ class LocationArgs: Decodable {
   var timeoutMs: UInt64?
 }
 
+class PermissionArgs: Decodable {
+  /// "calendar"（目前唯一需要主动请求的）
+  let kind: String
+}
+
 class PiNativePlugin: Plugin {
   @objc public func location(_ invoke: Invoke) throws {
     invoke.reject(
@@ -32,6 +37,24 @@ class PiNativePlugin: Plugin {
         + "(this rejection exists so the command set stays symmetric and a wrong "
         + "routing shows up as a clear error instead of a hang)"
     )
+  }
+
+  /// 系统日历读/写（EventKit）。实现见 Calendar.swift。
+  @objc public func calendar(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(CalendarArgs.self)
+    CalendarBridge.handle(args, invoke)
+  }
+
+  /// 主动请求系统权限（弹窗）。目前只有日历 —— 定位/通知/剪贴板的授权
+  /// 走各自的官方插件。
+  @objc public func requestPermission(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(PermissionArgs.self)
+    switch args.kind {
+    case "calendar":
+      CalendarAccess.requestFullAccess(invoke)
+    default:
+      invoke.reject("unknown permission kind '\(args.kind)'")
+    }
   }
 }
 

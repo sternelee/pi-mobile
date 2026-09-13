@@ -13,9 +13,12 @@
          位置可用。两个都声明才能让用户在两种精度间选择。 -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- M6 1b：日历（读写分开申请，便于「只看不写」用法与最小权限说明） -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+
     <!--
       M6 后续批次在此追加（落地时同步开对应能力，不提前声明无关权限）：
-      · 1b 日历：READ_CALENDAR / WRITE_CALENDAR
       · 1b 通讯录：READ_CONTACTS（只看不写，不申请 WRITE_CONTACTS）
       · 1b 照片：READ_MEDIA_IMAGES（Android 13+）/
         READ_EXTERNAL_STORAGE（maxSdkVersion=32）

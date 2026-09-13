@@ -89,6 +89,14 @@ pub const CAPABILITIES: &[Capability] = &[
         needs_permission: true,
     },
     Capability {
+        id: "calendar",
+        title: "日历",
+        detail: "读取你的日程安排，或把新事件写进系统日历（写入要你确认）",
+        tools: &["calendar_list", "calendar_create"],
+        platforms: &["android", "ios"],
+        needs_permission: true,
+    },
+    Capability {
         id: "weather",
         title: "天气",
         detail: "查询当前天气与多日预报（数据来自 Open-Meteo，无需账号）",
@@ -156,6 +164,10 @@ fn permission_state(cap: &str) -> &'static str {
                 Err(_) => "unknown",
             }
         }
+        // 日历：没有 Rust 侧可查的 API（需走原生 EventKit/CalendarContract），
+        // 故这里报 unknown 而不谎报 granted —— UI 只会因此多给一个「Allow」
+        // 按钮，而谎报 granted 会让用户以为已授权却在调用时失败。
+        "calendar" => "unknown",
         // 无 API 可查询的能力：视为无需授权
         _ => "granted",
     }
@@ -178,6 +190,14 @@ pub fn request(cap: &str) -> Result<Value, String> {
                 .request_permissions(Some(vec![PermissionType::Location]))
                 .map_err(|e| format!("location permission: {e}"))?;
         }
+        "calendar" => {
+            // 日历权限只能由原生侧触发系统弹窗，走 pi-native 的
+            // requestPermission 命令；两端实现里都用系统 API 请求。
+            use tauri_plugin_pi_native::PiNativeExt;
+            app.pi_native()
+                .request_permission(tauri_plugin_pi_native::PermissionKind::Calendar)
+                .map_err(|e| format!("calendar permission: {e}"))?;
+        }
         other => return Err(format!("capability '{other}' has no requestable permission")),
     }
     Ok(json!({ "capability": cap, "permission": permission_state(cap) }))
@@ -193,6 +213,8 @@ pub fn tool(name: &str, args: &Value) -> Result<String, String> {
         "clipboard" => clipboard(args),
         "notify" => notify(args),
         "location" => location(args),
+        "calendar_list" => calendar("list", args),
+        "calendar_create" => calendar("create", args),
         "weather" => weather(args),
         other => Err(format!("unknown native tool: {other}")),
     }
@@ -381,6 +403,39 @@ fn location(args: &Value) -> Result<String, String> {
         "fromLastKnown": false,
     }))
     .unwrap_or_else(|_| "{}".into()))
+}
+
+// ── 日历 ──────────────────────────────────────────────────────────────
+//
+// 走自建 `pi-native`（两端都没有官方插件）。时间一律 epoch 毫秒：
+// 模型不需要猜时区/日期格式，两端也不需要各自解析 ISO8601 ——
+// 这类地方最容易出现「差一天/差几小时」的静默错误。
+//
+// 读（list）自动放行；写（create）在 JS 侧标了 mutating，由审批把关。
+// 权限未授时返回可执行指引，而不是空列表 —— 空列表会让模型得出
+// 「用户最近没有安排」这个错误结论。
+fn calendar(op: &str, args: &Value) -> Result<String, String> {
+    use tauri_plugin_pi_native::PiNativeExt;
+    let app = app()?;
+
+    let a = tauri_plugin_pi_native::CalendarArgs {
+        op: op.to_string(),
+        from_ms: args.get("fromMs").and_then(|v| v.as_i64()),
+        to_ms: args.get("toMs").and_then(|v| v.as_i64()),
+        limit: args.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+        title: args.get("title").and_then(|v| v.as_str()).map(String::from),
+        start_ms: args.get("startMs").and_then(|v| v.as_i64()),
+        end_ms: args.get("endMs").and_then(|v| v.as_i64()),
+        all_day: args.get("allDay").and_then(|v| v.as_bool()),
+        notes: args.get("notes").and_then(|v| v.as_str()).map(String::from),
+        location: args.get("location").and_then(|v| v.as_str()).map(String::from),
+    };
+
+    let result: Value = app
+        .pi_native()
+        .calendar(a)
+        .map_err(|e| format!("calendar {op} failed: {e}"))?;
+    Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()))
 }
 
 // ── 天气（Open-Meteo，无需 key）────────────────────────────────────────

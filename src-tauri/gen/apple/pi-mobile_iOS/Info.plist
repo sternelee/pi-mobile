@@ -20,8 +20,12 @@
 	<string>0.1.0</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>pi 需要读写你的日历，以便回答「今天有什么安排」并帮你创建事件。</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>pi 需要读取日历，以便回答「今天有什么安排」并帮你创建事件。</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>pi 需要向你的日历添加事件。</string>
 	<key>NSContactsUsageDescription</key>
 	<string>pi 需要读取通讯录，以便在你要求「给某某发消息」时找到对应联系人。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

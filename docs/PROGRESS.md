@@ -2,6 +2,65 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-13 — M6 1b 日历：Android 真机全绿 ✅（iOS 待验）
+
+新增 `calendar_list` / `calendar_create` 两个工具（`plugins/pi-native` 的
+第一个双端能力实现）。
+
+**Android 真机 8 项自检全绿**，日历两条：
+```
+calendar_list    OK  50ms   真实日程（系统「Message」日历里的银行还款提醒）
+calendar_create  OK  40ms   {"id":"14168","title":"pi-mobile self-check",
+                             "calendarId":15,"timeZone":"Asia/Shanghai",...}
+```
+同一轮 location 还拿到了**实时 fix**（`fromLastKnown:false, provider:network`,
+3726ms）—— 证明上一步的修复不只依赖缓存回退。
+
+### 设计取舍
+- **拆成两个工具**，而不是一个带 `op` 参数的：审批策略只看工具名。合成一个的话
+  「读」要么被迫标 mutating（每次都弹审批），要么写操作失去审批。拆开后
+  读自动放行、写走审批，与其它能力一致。
+- **时间一律 epoch 毫秒**：模型不用猜时区/日期格式，两端也不用各自解析
+  ISO8601 —— 这类地方最容易出现「差一天/差几小时」的静默错误。
+- **未给 endMs 时默认 +1 小时**：日历事件必须有 end，让模型每次算一遍容易
+  造出 0 长度事件。
+- **权限未授返回可执行指引，而不是空列表**：空列表会让模型得出「用户最近
+  没有安排」这个**错误结论**。
+- list 默认 7 天窗口 + 50 条上限：一次查询可能命中数百条，全塞进上下文既
+  费 token 又淹掉真正相关的那几条。
+
+### iOS 17 的日历权限坑（已处理）
+iOS 17 把日历权限拆成「完整访问」与「仅写」，Info.plist 的键也随之拆分。
+**只声明老的 `NSCalendarsUsageDescription` 时，在 iOS 17+ 上请求完整访问会被
+系统直接拒绝** —— 不弹窗、不报错，就是拿不到权限。三个键都已在
+`project.yml` 声明，`Calendar.swift` 按系统版本分流
+（`requestFullAccessToEvents` / `requestAccess`），并在
+`.writeOnly` 状态下如实报错而不是返回空列表。
+
+### Android 用 Instances 而非 Events 表
+按时间窗口查询必须走 `CalendarContract.Instances`（重复事件的每一次发生
+才会展开），`Events` 表只有原始行的 DTSTART。写入前先确认存在**可写**日历
+（`CALENDAR_ACCESS_LEVEL >= CONTRIBUTOR`）—— 只读的节假日/订阅日历会导致
+写入失败，且报出的底层错误对模型毫无意义。
+
+### 踩坑：`parseArgs(JSObject::class.java)` 静默给出空对象
+真机表现极具迷惑性：`calendar_create` 返回了和 `calendar_list` **一模一样**
+的 3819 字节列表，且因为走的是 list 成功路径而**毫无报错**。
+
+根因是 Tauri Android 的一个 API 陷阱：`parseArgs` 用 Jackson 把 argsJson
+反序列化进 `JSObject`（org.json 风格，构造器吃 JSON 字符串），实测得到**空
+对象**；于是 `args.optString("op", "list")` 落到默认值 "list"。正确 API 是
+`invoke.getArgs()`（直接用 argsJson 构造）。
+
+**教训（已影响后续验证方式）**：探针只断言 ok/失败是不够的 —— 它当时报了
+ok，但结果形状是错的。通讯录/照片会按「断言返回形状」而不只是「断言成功」
+来验证（例如 create 必须返回带 id 的小对象，而不是事件列表）。
+
+### 待办
+- [ ] **iOS 日历真机验证**（代码已写、三端编译通过、Info.plist 三键已就位，
+      但尚未上机跑过）
+- [ ] 1b 剩余：通讯录 / 照片
+- [ ] Android 定位已修（自建 LocationManager）；剪贴板/通知走官方插件可用
 ## 2026-09-13 — M6 系统原生能力第一批 1a：剪贴板/通知/定位/天气 ✅
 
 **iOS 真机全绿**（授权后自检实测）：

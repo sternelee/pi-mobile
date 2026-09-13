@@ -23,6 +23,32 @@ handled by the OS permission dialogs plus pi-mobile's approval policy
 <tr>
 <td>
 
+`pi-native:allow-calendar`
+
+</td>
+<td>
+
+Enables the calendar command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pi-native:deny-calendar`
+
+</td>
+<td>
+
+Denies the calendar command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `pi-native:allow-location`
 
 </td>
@@ -42,6 +68,32 @@ Enables the location command without any pre-configured scope.
 <td>
 
 Denies the location command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pi-native:allow-requestPermission`
+
+</td>
+<td>
+
+Enables the requestPermission command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pi-native:deny-requestPermission`
+
+</td>
+<td>
+
+Denies the requestPermission command without any pre-configured scope.
 
 </td>
 </tr>

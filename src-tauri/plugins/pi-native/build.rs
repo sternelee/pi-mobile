@@ -11,7 +11,7 @@
 //
 // COMMANDS 是 Rust ↔ 原生两侧的方法名清单，必须与 src/mobile.rs 里
 // run_mobile_plugin 的字符串、以及两侧原生实现的命令名三处一致。
-const COMMANDS: &[&str] = &["location"];
+const COMMANDS: &[&str] = &["location", "calendar", "requestPermission"];
 
 fn main() {
     tauri_plugin::Builder::new(COMMANDS)

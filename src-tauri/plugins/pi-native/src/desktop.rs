@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
-use crate::{Error, LocationArgs};
+use crate::{CalendarArgs, Error, LocationArgs, PermissionKind};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
@@ -26,5 +26,13 @@ pub struct PiNative<R: Runtime>(std::marker::PhantomData<fn() -> R>);
 impl<R: Runtime> PiNative<R> {
     pub fn location(&self, _args: LocationArgs) -> crate::Result<Value> {
         Err(Error::Unsupported("location"))
+    }
+
+    pub fn calendar(&self, _args: CalendarArgs) -> crate::Result<Value> {
+        Err(Error::Unsupported("calendar"))
+    }
+
+    pub fn request_permission(&self, _kind: PermissionKind) -> crate::Result<Value> {
+        Err(Error::Unsupported("requestPermission"))
     }
 }

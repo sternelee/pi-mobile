@@ -40,6 +40,17 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
   // 合成一步就看不出到底是哪个坏了。
   await step("weather", { latitude: 22.5431, longitude: 114.0579, days: 1 }, "weather_coords");
   await step("weather", { days: 1 }, "weather_via_location");
+  // 日历：读（含权限流程）→ 写。
+  // 写入用「一年后的凌晨」并只写一条，避免污染用户真实日程；验证完就留在
+  // 那里由用户自行删除（探针不该顺手删用户数据，也不该假设自己有权删）。
+  await step("calendar_list", { limit: 3 }, "calendar_list");
+  const inAYear = Date.now() + 365 * 24 * 3600 * 1000;
+  await step(
+    "calendar_create",
+    { title: "pi-mobile self-check", startMs: inAYear, endMs: inAYear + 3600_000 },
+    "calendar_create",
+  );
+
   // 剪贴板：写入 → 读回，验证两个方向
   await step("clipboard", { op: "write", text: "pi-mobile self-check" }, "clipboard_write");
   await step("clipboard", { op: "read" }, "clipboard_read");

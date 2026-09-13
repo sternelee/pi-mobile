@@ -31,9 +31,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import app.tauri.PermissionState
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -58,6 +60,13 @@ private const val FRESH_ENOUGH_MS = 120_000L // 2 分钟内的 last-known 视为
                 Manifest.permission.ACCESS_COARSE_LOCATION
             ],
             alias = "location"
+        ),
+        Permission(
+            strings = [
+                Manifest.permission.READ_CALENDAR,
+                Manifest.permission.WRITE_CALENDAR
+            ],
+            alias = "calendar"
         )
     ]
 )
@@ -65,6 +74,46 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
 
     override fun load(webView: android.webkit.WebView) {
         super.load(webView)
+    }
+
+    /**
+     * 主动请求系统权限（弹窗）。目前只有日历 —— 定位/通知/剪贴板的授权
+     * 走各自的官方插件。
+     *
+     * 用 requestPermissionForAlias：Tauri 的权限流程会把结果回调进
+     * permissionCallback（已由 @PermissionCallback 注册），届时按
+     * 实际授权状态如实 resolve。这样用户拒绝也能拿到明确答复，
+     * 而不是一个含糊的异常。
+     */
+    @Command
+    fun requestPermission(invoke: Invoke) {
+        val args = invoke.getArgs()
+        when (args.optString("kind", "")) {
+            "calendar" -> requestPermissionForAlias("calendar", invoke, "permissionCallback")
+            else -> invoke.reject("unknown permission kind '${args.optString("kind", "")}'")
+        }
+    }
+
+    @PermissionCallback
+    private fun permissionCallback(invoke: Invoke) {
+        val granted = getPermissionState("calendar") == PermissionState.GRANTED
+        val ret = JSObject()
+        ret.put("kind", "calendar")
+        ret.put("granted", granted)
+        invoke.resolve(ret)
+    }
+
+    /// 日历读/写（CalendarContract）。实现见 Calendar.kt。
+    @Command
+    fun calendar(invoke: Invoke) {
+        // 用 getArgs() 而不是 parseArgs(JSObject::class.java)：后者走 Jackson
+        // 反序列化进 JSObject（org.json 风格，构造器吃 JSON 字符串），实测会
+        // 得到一个**空对象** —— 于是 CalendarBridge 里 optString("op", "list")
+        // 落到默认值，create 请求被当成 list 执行（真机表现为
+        // calendar_create 返回了和 calendar_list 一样的列表，且因为“成功”
+        // 而毫无报错）。getArgs() 直接用 argsJson 构造，才是原样的入参。
+        val args = invoke.getArgs()
+        CalendarBridge.handle(activity, args, invoke)
     }
 
     @Command
