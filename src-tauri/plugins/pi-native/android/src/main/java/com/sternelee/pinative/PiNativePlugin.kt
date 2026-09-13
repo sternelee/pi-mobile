@@ -69,7 +69,13 @@ private const val FRESH_ENOUGH_MS = 120_000L // 2 分钟内的 last-known 视为
             alias = "calendar"
         ),
         // 只声明读权限：本插件不写通讯录（见 Contacts.kt 头注）
-        Permission(strings = [Manifest.permission.READ_CONTACTS], alias = "contacts")
+        Permission(strings = [Manifest.permission.READ_CONTACTS], alias = "contacts"),
+        // 相册读权限：Android 13 起是 READ_MEDIA_IMAGES，旧的 READ_EXTERNAL_STORAGE
+        // 在清单里带 maxSdkVersion=32。两个都登记，Tauri 会按当前 SDK 取可用的那个。
+        Permission(
+            strings = [Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_EXTERNAL_STORAGE],
+            alias = "photos"
+        )
     ]
 )
 class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
@@ -93,6 +99,7 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
         when (args.optString("kind", "")) {
             "calendar" -> requestPermissionForAlias("calendar", invoke, "permissionCallback")
             "contacts" -> requestPermissionForAlias("contacts", invoke, "permissionCallback")
+            "photos" -> requestPermissionForAlias("photos", invoke, "permissionCallback")
             else -> invoke.reject("unknown permission kind '${args.optString("kind", "")}'")
         }
     }
@@ -115,6 +122,15 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
                 ret.put(
                     "state",
                     if (CalendarBridge.hasReadPermission(activity)) "granted" else "prompt"
+                )
+                invoke.resolve(ret)
+            }
+            "photos" -> {
+                val ret = JSObject()
+                ret.put("kind", "photos")
+                ret.put(
+                    "state",
+                    if (PhotosBridge.hasReadPermission(activity)) "granted" else "prompt"
                 )
                 invoke.resolve(ret)
             }
@@ -141,6 +157,12 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
         ret.put("kind", kind)
         ret.put("granted", granted)
         invoke.resolve(ret)
+    }
+
+    /// 系统相册（只读：list / save）。实现见 Photos.kt。
+    @Command
+    fun photos(invoke: Invoke) {
+        PhotosBridge.handle(activity, invoke.getArgs(), invoke)
     }
 
     /// 读系统通讯录（只读：search / get）。实现见 Contacts.kt。

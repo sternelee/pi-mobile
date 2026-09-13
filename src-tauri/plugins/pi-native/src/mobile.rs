@@ -12,7 +12,10 @@ use tauri::{
     AppHandle, Runtime,
 };
 
-use crate::{CalendarArgs, ContactsArgs, Error, LocationArgs, PermissionKind, PermissionStatus};
+use crate::{
+    CalendarArgs, ContactsArgs, Error, LocationArgs, PermissionKind, PermissionStatus,
+    PhotosArgs,
+};
 
 /// Android 插件类的完全限定名（包名 + 类名）。
 #[cfg(target_os = "android")]
@@ -65,6 +68,18 @@ impl<R: Runtime> PiNative<R> {
         let raw: Value = self
             .0
             .run_mobile_plugin("contacts", args)
+            .map_err(Error::PluginInvoke)?;
+        Ok(raw)
+    }
+
+    /// 系统相册（只读）。
+    ///
+    /// save 可能较慢：iOS 上 iCloud 原图需要下载，所以原生侧/上层都给了
+    /// 宽松超时，而不是沿用默认的 30s。
+    pub fn photos(&self, args: PhotosArgs) -> crate::Result<Value> {
+        let raw: Value = self
+            .0
+            .run_mobile_plugin("photos", args)
             .map_err(Error::PluginInvoke)?;
         Ok(raw)
     }

@@ -127,6 +127,32 @@ Denies the permissionState command without any pre-configured scope.
 <tr>
 <td>
 
+`pi-native:allow-photos`
+
+</td>
+<td>
+
+Enables the photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pi-native:deny-photos`
+
+</td>
+<td>
+
+Denies the photos command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `pi-native:allow-requestPermission`
 
 </td>

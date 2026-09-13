@@ -105,6 +105,14 @@ pub const CAPABILITIES: &[Capability] = &[
         needs_permission: true,
     },
     Capability {
+        id: "photos",
+        title: "照片",
+        detail: "按时间查看相册，并把选中的原图复制到工作区（不修改你的相册）",
+        tools: &["photos_list", "photos_save"],
+        platforms: &["android", "ios"],
+        needs_permission: true,
+    },
+    Capability {
         id: "weather",
         title: "天气",
         detail: "查询当前天气与多日预报（数据来自 Open-Meteo，无需账号）",
@@ -183,6 +191,22 @@ fn permission_state(cap: &str) -> &'static str {
         // 报成 granted 会让用户以为能读、直到工具调用才失败。向上折叠成
         // "denied" 并让 UI 引导用户去系统设置补全访问 —— 对用户来说可操作
         // 的动作是一样的（去开权限）。
+        "photos" => {
+            use tauri_plugin_pi_native::PiNativeExt;
+            match app.pi_native().permission_state(
+                tauri_plugin_pi_native::PermissionKind::Photos,
+            ) {
+                Ok(st) => match st.state.as_str() {
+                    "granted" => "granted",
+                    // iOS 14+ 的「受限访问」：能读但不完整。折叠成 denied 让 UI
+                    // 引导去补全（对用户来说动作一样：去开权限）。
+                    "limited" => "denied",
+                    "denied" => "denied",
+                    _ => "prompt",
+                },
+                Err(_) => "unknown",
+            }
+        }
         "contacts" => {
             use tauri_plugin_pi_native::PiNativeExt;
             match app.pi_native().permission_state(
@@ -250,6 +274,12 @@ pub fn request(cap: &str) -> Result<Value, String> {
                 .request_permission(tauri_plugin_pi_native::PermissionKind::Contacts)
                 .map_err(|e| format!("contacts permission: {e}"))?;
         }
+        "photos" => {
+            use tauri_plugin_pi_native::PiNativeExt;
+            app.pi_native()
+                .request_permission(tauri_plugin_pi_native::PermissionKind::Photos)
+                .map_err(|e| format!("photos permission: {e}"))?;
+        }
         other => return Err(format!("capability '{other}' has no requestable permission")),
     }
     Ok(json!({ "capability": cap, "permission": permission_state(cap) }))
@@ -268,6 +298,8 @@ pub fn tool(name: &str, args: &Value) -> Result<String, String> {
         "calendar_list" => calendar("list", args),
         "calendar_create" => calendar("create", args),
         "contacts" => contacts(args),
+        "photos_list" => photos("list", args),
+        "photos_save" => photos("save", args),
         "weather" => weather(args),
         other => Err(format!("unknown native tool: {other}")),
     }
@@ -518,6 +550,84 @@ fn contacts(args: &Value) -> Result<String, String> {
         .pi_native()
         .contacts(a)
         .map_err(|e| format!("contacts {op} failed: {e}"))?;
+    Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()))
+}
+
+// ── 照片 ──────────────────────────────────────────────────────────────
+//
+// 只读：list 取元数据、save 把原图写进 workspace。**不写回用户相册**
+// （那需要额外权限，且风险与收益不对称）。
+//
+// save 的信任边界刻意放在这里：原生侧只接收一个**绝对路径**并写字节，
+// 不做任何路径判断；路径由 Rust 用 jail_path 校验后再传入（与
+// read/write 工具同一套越狱防护）。这样两个平台上都不存在第二份路径逻辑。
+fn photos(op: &str, args: &Value) -> Result<String, String> {
+    use tauri_plugin_pi_native::PiNativeExt;
+    let app = app()?;
+
+    // save 的 default 文件名：用时间戳避免覆盖已有文件（模型可能连存多张）。
+    // 仍受 jail 约束 —— 只是相对 workspace 的默认位置。
+    let dest_rel = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            format!("photos/photo-{ts}.jpg")
+        });
+    // save：先过 workspace jail（与 read/write 工具同一套越狱防护），
+    // 再把**绝对路径**交给原生侧 —— 原生侧不做任何路径判断，信任边界只有
+    // 这一处。
+    let dest_abs = if op == "save" {
+        let abs = crate::pi_bun::loopback::jail_path(&dest_rel)?;
+        // 原生侧写文件不会自动建父目录，这里显式建（仍在校验过的路径内）
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create dir for photo: {e}"))?;
+        }
+        Some(abs)
+    } else {
+        None
+    };
+
+    let op_id = args
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // **必须给 id**：save 没有 id 无从取图，list 无 id 是正常的。
+    if op == "save" && op_id.is_none() {
+        return Err("id is required for photos_save".into());
+    }
+
+    let a = tauri_plugin_pi_native::PhotosArgs {
+        op: op.to_string(),
+        from_ms: args.get("fromMs").and_then(|v| v.as_i64()),
+        to_ms: args.get("toMs").and_then(|v| v.as_i64()),
+        limit: args.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+        id: op_id,
+        dest_path: dest_abs
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+    };
+
+    let result: Value = app
+        .pi_native()
+        .photos(a)
+        .map_err(|e| format!("photos {op} failed: {e}"))?;
+
+    // save：把原生侧回传的绝对路径换回 workspace 相对路径（不把宿主绝对
+    // 路径喂给模型 —— 与 read/write 的展示口径一致）。
+    if op == "save" {
+        let mut v = result;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("path".into(), Value::String(dest_rel.clone()));
+        }
+        return Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()));
+    }
     Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()))
 }
 

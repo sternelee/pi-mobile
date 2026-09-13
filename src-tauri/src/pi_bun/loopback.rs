@@ -32,7 +32,7 @@ pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
 }
 
 /// 路径越狱防护：限制在 workspace 内，拒绝绝对路径与 `..`。
-fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
     let root = WORKSPACE_DIR
         .get()
         .ok_or("workspace not configured")?;

@@ -71,6 +71,26 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
     flush();
   }
 
+  // 相册：list 元数据。**不跑 save** —— save 会往 workspace 写真实图片文件，
+  // 探针每启动一次就写一张，用户会看到工作区被无声堆满。save 路径靠 UI 手动
+  // 触发验证（或后续单独做一次性检查）。
+  const photosRes = await step("photos_list", { limit: 3 }, "photos_list");
+  // 只在**成功**时补备注。早期版本无条件补「library is empty」——权限被拒时
+  // 也照报，把「没授权」伪装成「相册是空的」（这类误导性文案已经坑过两次：
+  // 先是被旧日志骗，再是被 ok-but-wrong-shape 骗）。宁可不报，也不报错的。
+  if (photosRes?.ok) {
+    try {
+      const ids = JSON.parse(photosRes.text ?? "{}")?.photos ?? [];
+      if (ids.length === 0) {
+        steps.photos_note = { ok: true, ms: 0, text: "library is empty (or limited access)" };
+        flush();
+      }
+    } catch (e) {
+      steps.photos_note = { ok: false, ms: 0, error: `probe: could not parse photos_list: ${e}` };
+      flush();
+    }
+  }
+
   // 剪贴板：写入 → 读回，验证两个方向
   await step("clipboard", { op: "write", text: "pi-mobile self-check" }, "clipboard_write");
   await step("clipboard", { op: "read" }, "clipboard_read");

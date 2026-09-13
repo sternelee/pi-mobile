@@ -129,6 +129,33 @@ pub struct ContactsArgs {
     pub limit: Option<u32>,
 }
 
+/// `photos` 命令的参数。
+///
+/// 只读（list 元数据 / save 把原图写进调用方指定的绝对路径）。
+/// **不提供「写入用户相册」** —— 那需要额外权限（iOS
+/// NSPhotoLibraryAddUsageDescription / Android 无对应）且风险与收益不对称。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotosArgs {
+    /// "list" | "save"
+    pub op: String,
+    /// list: 时间窗（epoch 毫秒）+ 条数上限
+    #[serde(default)]
+    pub from_ms: Option<i64>,
+    #[serde(default)]
+    pub to_ms: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// save: 照片 id（list 结果里的 id）
+    #[serde(default)]
+    pub id: Option<String>,
+    /// save: **绝对目标路径**。由 Rust 侧做完 workspace jail 校验后传入 ——
+    /// 原生侧只负责写字节，不做路径判断（信任边界集中在 Rust，见
+    /// src-tauri/src/native/mod.rs 的 photos_save）。
+    #[serde(default)]
+    pub dest_path: Option<String>,
+}
+
 /// 可主动请求授权的能力（触发系统弹窗）。
 ///
 /// 目前只有日历需要：定位/通知/剪贴板的授权走各自官方插件。
@@ -140,6 +167,7 @@ pub struct ContactsArgs {
 pub enum PermissionKind {
     Calendar,
     Contacts,
+    Photos,
 }
 
 /// `requestPermission` 命令的参数。
@@ -180,6 +208,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             location,
             calendar,
             contacts,
+            photos,
             permission_state,
             request_permission,
         ])
@@ -230,6 +259,19 @@ async fn contacts<R: Runtime>(
     use tauri::Manager;
     let pi_native = app.state::<PiNative<R>>();
     pi_native.contacts(args)
+}
+
+/// 系统相册（只读：list 元数据 / save 原图到指定路径）。
+///
+/// **必须 async**：权限弹窗与 iCloud 取原图（可能走网络）都会等。
+#[tauri::command]
+async fn photos<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    args: PhotosArgs,
+) -> Result<Value> {
+    use tauri::Manager;
+    let pi_native = app.state::<PiNative<R>>();
+    pi_native.photos(args)
 }
 
 /// 查询某项系统权限的当前状态。**同步、不弹窗** —— 供设置页展示，

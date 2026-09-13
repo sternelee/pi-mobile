@@ -8,7 +8,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
-use crate::{CalendarArgs, ContactsArgs, Error, LocationArgs, PermissionKind, PermissionStatus};
+use crate::{
+    CalendarArgs, ContactsArgs, Error, LocationArgs, PermissionKind, PermissionStatus,
+    PhotosArgs,
+};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
     _app: &AppHandle<R>,
@@ -38,6 +41,10 @@ impl<R: Runtime> PiNative<R> {
 
     pub fn contacts(&self, _args: ContactsArgs) -> crate::Result<Value> {
         Err(Error::Unsupported("contacts"))
+    }
+
+    pub fn photos(&self, _args: PhotosArgs) -> crate::Result<Value> {
+        Err(Error::Unsupported("photos"))
     }
 
     pub fn permission_state(&self, _kind: PermissionKind) -> crate::Result<PermissionStatus> {

@@ -2,7 +2,64 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
-## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 真机全绿
+## 2026-09-13 — M6 1b 照片（只读）—— 双端实现完成，iOS 未授权路径已验证
+
+新增 `photos_list` / `photos_save` 两个工具（1b 第 1 批最后一项）。双端实现：
+iOS Photos.framework / Android MediaStore。
+
+### 工具划分与信任边界
+- `photos_list`：只返回**元数据**（id/文件名/时间/尺寸/有无 GPS），永不返回图像
+  字节 —— 读类自动放行。
+- `photos_save`：把某张照片的**原图字节**复制进 workspace，走审批。
+- **save 的路径校验刻意只在一处**：Rust 用 `loopback::jail_path`（与 read/write
+  同一套越狱防护）算出绝对路径后传给原生侧；原生侧只写字节、不做任何路径判断。
+  这样两个平台上不存在第二份路径逻辑。
+- **不提供「保存到用户相册」**：那需要额外权限（iOS 需
+  NSPhotoLibraryAddUsageDescription）且风险收益不对称。
+
+### 踩坑：iOS 可用性标注（编译期，非运行时）
+`PHPhotoLibrary.authorizationStatus(for:)` 与 `PHAuthorizationStatus.limited`
+都是 **iOS 14+** API，而 **swift-rs 的实际编译部署目标低于 14**（即使
+Package.swift 写了 `.iOS(.v14)`）→ 直接编译失败，且 swift-rs 把错误藏在
+「Failed to compile swift package」后面。
+
+排查手法：`swiftc -parse -sdk <iphoneos sdk> -target arm64-apple-ios14.0 <file>`
+逐个文件做语法检查（都干净）→ 说明是模块级错误 → 再跑一次 cargo check 拿完整
+Swift 输出（这次打印了具体行号）。
+修法：给 `PhotosBridge` 加 `@available(iOS 14.0, *)`，并在 3 个调用点做
+`guard #available` 守卫。
+
+### 其它实现要点
+- **iOS 14+ 的「受限访问」(.limited) 如实报 limited**，向上折叠成 denied 让 UI
+  引导补全；不报 granted（理由同通讯录：会让「没找到这张照片」被误读成「相册
+  里没有」）
+- **iCloud 原图**：`PHImageRequestOptions.isNetworkAccessAllowed = true`。
+  不允许的话会**静默返回降级缩略图** —— 用户以为存了原图实际是压缩版，是最糟
+  的失败方式。
+- **`PHImageResultIsDegradedKey`**：该 API 可能回调两次（先低清再高清），用
+  settled 标志位保证只结算一次。
+- **保存上限 20MB**：超限直接拒绝并告知，而不是写一半留坏文件。Android 侧先查
+  SIZE 再决定是否开始读，避免把几十 MB 拉进内存才拒绝。
+- **Android 13 分水岭**：API 33+ 用 READ_MEDIA_IMAGES，≤32 用
+  READ_EXTERNAL_STORAGE（清单里带 `android:maxSdkVersion="32"`，否则新系统上会
+  多出一个用户看不懂的权限请求）。
+- **DATE_ADDED 是秒**：MediaStore 用秒，对外协议一律毫秒，换算集中在一处，
+  避免各处漏乘 1000。
+- **save 先写 `.part` 再 rename**：中途出错不会在 workspace 里留半个坏图片。
+- **探针不跑 save**：save 会往 workspace 写真实文件，每启动一次写一张会把用户的
+  工作区无声堆满 —— 只验证 list。
+- 顺带修掉探针一处误导性文案：早期版本在 `photos_list` **失败**时也报
+  「library is empty」，把「没授权」伪装成「相册是空的」。这类误导文案已坑过两次
+  （先被旧日志骗、再被 ok-but-wrong-shape 骗），现在只在成功时才补备注。
+
+### iOS 真机（未授权状态）
+```
+photos_list   FAIL  13ms  photos permission not granted — ask the user to tap
+                          Allow for 照片 in Settings → Agent
+```
+其余 11 项全绿。授权后的真实读取待验证。
+
+## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 真机全绿## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 真机全绿
 
 **踩坑（值得单独记）：未取 formatter 所需 key → ObjC 异常 → 整个 app 崩溃**
 

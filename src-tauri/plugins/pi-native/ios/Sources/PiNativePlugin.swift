@@ -45,6 +45,16 @@ class PiNativePlugin: Plugin {
     CalendarBridge.handle(args, invoke)
   }
 
+  /// 系统相册（只读：list / save）。实现见 Photos.swift。
+  @objc public func photos(_ invoke: Invoke) throws {
+    guard #available(iOS 14.0, *) else {
+      invoke.reject("photos requires iOS 14 or newer")
+      return
+    }
+    let args = try invoke.parseArgs(PhotosArgs.self)
+    PhotosBridge.handle(args, invoke)
+  }
+
   /// 读系统通讯录（只读：search / get）。实现见 Contacts.swift。
   @objc public func contacts(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(ContactsArgs.self)
@@ -59,6 +69,12 @@ class PiNativePlugin: Plugin {
       invoke.resolve(["kind": "calendar", "state": CalendarAccess.currentState()])
     case "contacts":
       invoke.resolve(["kind": "contacts", "state": ContactsBridge.currentState()])
+    case "photos":
+      guard #available(iOS 14.0, *) else {
+        invoke.resolve(["kind": "photos", "state": "denied"])
+        return
+      }
+      invoke.resolve(["kind": "photos", "state": PhotosBridge.currentState()])
     default:
       invoke.reject("unknown permission kind '\(args.kind)'")
     }
@@ -73,6 +89,12 @@ class PiNativePlugin: Plugin {
       CalendarAccess.requestFullAccess(invoke)
     case "contacts":
       ContactsBridge.requestAccess(invoke)
+    case "photos":
+      guard #available(iOS 14.0, *) else {
+        invoke.resolve(["kind": "photos", "granted": false])
+        return
+      }
+      PhotosBridge.requestAccess(invoke)
     default:
       invoke.reject("unknown permission kind '\(args.kind)'")
     }

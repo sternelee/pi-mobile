@@ -19,4 +19,12 @@
     <!-- 通讯录：只申请读权限。本插件不写通讯录 —— agent 修改用户联系人的
          风险与收益严重不对称（误删不可逆），且没有产品需求。 -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+
+    <!-- 相册：Android 13 起为细粒度媒体权限；旧的 READ_EXTERNAL_STORAGE 带
+         maxSdkVersion=32，否则新系统上会多出一个用户看不懂的权限请求。
+         只读 —— 不写回相册（那在分区存储下要另走 MediaStore insert）。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 </manifest>

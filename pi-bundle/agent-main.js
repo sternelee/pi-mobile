@@ -333,6 +333,33 @@ const nativeTools = [
 		{ channel: "native" },
 	),
 	hostTool(
+		"photos_list",
+		"Photos list",
+		"List photos from the user's photo library, newest first. Returns metadata only (id, filename, created, dimensions, and GPS when the photo has it) — never the image bytes. Pass the returned id to photos_save to copy an image into the workspace. Read-only. Args: {limit?, fromMs?, toMs?} (limit default 20, times are epoch ms)",
+		obj(
+			{
+				limit: { type: "number", description: "max photos, default 20" },
+				fromMs: { type: "number", description: "epoch ms, creation time >= this" },
+				toMs: { type: "number", description: "epoch ms, creation time < this" },
+			},
+			[],
+		),
+		{ channel: "native" },
+	),
+	hostTool(
+		"photos_save",
+		"Photos save",
+		"Copy one photo's original bytes from the library into the workspace so it can be read/edited with the file tools. Requires user approval. The photo library itself is never modified. Note: iCloud photos may need to download first, and images above 20MB are refused. Args: {id, path?} (path is workspace-relative; a timestamped name is chosen if omitted)",
+		obj(
+			{
+				id: { type: "string", description: "photo id from photos_list" },
+				path: { type: "string", description: "workspace-relative destination" },
+			},
+			["id"],
+		),
+		{ channel: "native", mutating: true },
+	),
+	hostTool(
 		"weather",
 		"Weather",
 		"Get current weather plus a multi-day forecast in plain text (data from Open-Meteo, no account needed). Provide latitude+longitude, or omit both to use the device's current location. Args: {latitude?, longitude?, days?}",
