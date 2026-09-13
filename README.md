@@ -13,7 +13,7 @@ Tauri 2 + 嵌入式 Bun (JavaScriptCore) + SolidJS 构建的移动端 Pi Coding 
 | **M2** Agent Bundle | ✅ | pi-agent-core 在嵌入式 bun 内 headless 启动；真机端到端 LLM 对话 + 工具调用 round-trip 验证通过 |
 | **M3** 审批与产品化 | 🔨 | 工具审批（ask/auto/diff/回滚）、会话列表、文件树预览已落地；命令面板、用量可视化进行中 |
 | **M4** MCP + Skills | 📋 | MCP streamable-http 接入、pi-subagents/pi-goal/pi-ask-user 插件能力层、Skills 安装器 |
-| **M5** iOS + 桌面 | 🔄 | iOS 真机 `libskal.dylib` 从源码构建 + 嵌入 ipa 已跑通（设备安装待连接验证）；桌面待启动 |
+| **M5** iOS + 桌面 | 🔄 | iOS 真机已跑通（自测成功：agent boot + tools/skills/providers + 对话）；桌面待启动 |
 
 📖 **详细规划见 [docs/PLAN.md](docs/PLAN.md)** —— 架构、设计决策、里程碑路线图。
 
@@ -126,8 +126,25 @@ bun tauri ios build --debug
 > 编译期仍构建 JIT 代码（DOMJIT/DFG 类型依赖无法剥离），与 bun 的
 > Android 预构建同策略，不执行 —— React Native 同款先例，App Store 合规。
 
+> **iOS 网络（必读）**：bun 默认 DNS 后端选取只给 `.mac/.windows` 用系统
+> resolver，其余（含 `.ios`）落到 c-ares —— 但 c-ares 需要 `/etc/resolv.conf`，
+> iOS app 沙箱读不到，于是去连 `127.0.0.1:53` 并报
+> `DNSException: getaddrinfo ECONNREFUSED`（真机实测），所有外网请求全挂。
+> 修法在 `patches/bun-dns-ios-system.patch`（把 `.ios` 并入 `.system`），
+> 由 `scripts/setup-bun-fork.sh` 自动 `git apply`。**必须应用，否则构建出来的
+> 真机包无法访问任何 LLM API。**
+
 **模拟器**：走预构建 `libskal-iossim-arm64.dylib`（~63MB，无需编译 WebKit），
 存放于 `src-tauri/gen/apple/Externals/arm64/libskal.dylib` 即可。
+
+> **真机排障**：iOS 上 `println!` 进统一日志，但 `devicectl` 不转 stdout、
+> `idevicesyslog` 在 CoreDevice 隧道占用 uSMux 后也连不上设备。所以 `logcat`
+> 同时写 `<HOME>/Documents/pi-bun.log`（Zig 侧 `trace()` 也写同一文件），拉回：
+> ```bash
+> xcrun devicectl device copy from --device <UDID> \
+>   --domain-type appDataContainer --domain-identifier com.sternelee.pi-mobile \
+>   --source Documents/pi-bun.log --destination /tmp/pi-bun.log
+> ```
 
 > **签名**：`project.yml` 的 `DEVELOPMENT_TEAM` 必须匹配 Xcode 里已登录的账号
 > （查 `defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier`）。
