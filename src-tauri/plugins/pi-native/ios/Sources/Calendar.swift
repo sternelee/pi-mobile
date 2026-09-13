@@ -48,7 +48,45 @@ enum CalendarError: Error, CustomStringConvertible {
 }
 
 enum CalendarAccess {
-  /// 主动请求日历完整权限（供 requestPermission 命令调用）。
+  /// 权限未授时的统一指引（文案与其它能力保持一致，指向设置页的可操作位置）。
+  private static let hint =
+    "calendar permission not granted — ask the user to tap Allow for 日历 in Settings → Agent"
+
+  /// 确保拿到完整读写权限。
+  ///
+  /// **关键：这里绝不主动弹权限框。** 早期版本在 `.notDetermined` 时调
+  /// `requestFullAccessToEvents` 并等用户作答 —— 真机实测后果是：agent 的
+  /// 工具调用挂在那里等系统弹窗，直到 JS 侧 30s hostcall 超时才返回一个
+  /// 毫无信息量的 "The operation timed out"，而且用户此刻可能正对着弹窗
+  /// 犹豫。这与本仓库对 approval_request 的既有结论是同一条纪律
+  /// （CONTRACTS §2.2：「禁止长挂起 fetch」）。
+  ///
+  /// 权限获取是 UI 的职责：用户在 设置 → Agent 的「设备能力」里点 Allow，
+  /// 走 `native_request_permission` → `CalendarAccess.requestFullAccess`
+  /// （那条路径本身就是 async 命令，弹窗期间不占宿主线程）。
+  static func ensureFullAccess(_ invoke: Invoke, then: @escaping () -> Void) {
+    if #available(iOS 17.0, *) {
+      switch EKEventStore.authorizationStatus(for: .event) {
+      case .fullAccess:
+        then()
+      case .writeOnly:
+        // 只有写权限：读会失败。如实告知而不是返回空列表（空列表会让模型
+        // 以为「用户这几天没安排」，那是错误结论）。
+        invoke.reject("calendar access is write-only — grant full access in Settings → Agent to read events")
+      default:
+        invoke.reject(hint)
+      }
+    } else {
+      switch EKEventStore.authorizationStatus(for: .event) {
+      case .authorized:
+        then()
+      default:
+        invoke.reject(hint)
+      }
+    }
+  }
+
+  /// 主动请求日历完整权限（**仅供 `requestPermission` 命令调用**）。
   /// 用户未作答前不返回 —— 所以 Rust 侧命令必须是 async（不能占主线程）。
   static func requestFullAccess(_ invoke: Invoke) {
     let store = EKEventStore()
@@ -76,47 +114,13 @@ enum CalendarAccess {
       }
     }
   }
-
-  /// 确保拿到完整读写权限。已完成/被拒都会立即返回（不挂起）。
-  static func ensureFullAccess(_ store: EKEventStore, _ invoke: Invoke, then: @escaping () -> Void) {
-    if #available(iOS 17.0, *) {
-      switch EKEventStore.authorizationStatus(for: .event) {
-      case .fullAccess:
-        then()
-      case .notDetermined:
-        store.requestFullAccessToEvents { granted, _ in
-          DispatchQueue.main.async {
-            if granted { then() } else { invoke.reject("calendar access denied by user") }
-          }
-        }
-      case .writeOnly:
-        // 只有写权限：读会失败。如实告知而不是返回空列表（空列表会让模型
-        // 以为「用户这几天没安排」，那是错误结论）。
-        invoke.reject("calendar access is write-only — grant full access in 设置 to read events")
-      default:
-        invoke.reject("calendar access denied — enable it in 设置")
-      }
-    } else {
-      switch EKEventStore.authorizationStatus(for: .event) {
-      case .authorized:
-        then()
-      case .notDetermined:
-        store.requestAccess(to: .event) { granted, _ in
-          DispatchQueue.main.async {
-            if granted { then() } else { invoke.reject("calendar access denied by user") }
-          }
-        }
-      default:
-        invoke.reject("calendar access denied — enable it in 设置")
-      }
-    }
-  }
 }
 
 enum CalendarBridge {
   static func handle(_ args: CalendarArgs, _ invoke: Invoke) {
+    // store 在这里才建：权限已经确认过了（ensureFullAccess 不弹窗）
     let store = EKEventStore()
-    CalendarAccess.ensureFullAccess(store, invoke) {
+    CalendarAccess.ensureFullAccess(invoke) {
       do {
         switch args.op {
         case "list": try list(args, store, invoke)
