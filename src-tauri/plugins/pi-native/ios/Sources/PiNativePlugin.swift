@@ -45,6 +45,17 @@ class PiNativePlugin: Plugin {
     CalendarBridge.handle(args, invoke)
   }
 
+  /// 查询权限当前状态（同步、不弹窗）—— 设置页展示用。
+  @objc public func permissionState(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(PermissionArgs.self)
+    switch args.kind {
+    case "calendar":
+      invoke.resolve(["kind": "calendar", "state": CalendarAccess.currentState()])
+    default:
+      invoke.reject("unknown permission kind '\(args.kind)'")
+    }
+  }
+
   /// 主动请求系统权限（弹窗）。目前只有日历 —— 定位/通知/剪贴板的授权
   /// 走各自的官方插件。
   @objc public func requestPermission(_ invoke: Invoke) throws {

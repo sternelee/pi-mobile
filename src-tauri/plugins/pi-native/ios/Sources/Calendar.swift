@@ -86,6 +86,35 @@ enum CalendarAccess {
     }
   }
 
+  /// 当前权限状态（**同步、不弹窗**）—— 供设置页展示。
+  ///
+  /// 如实区分 `writeOnly`：只有写权限时读会失败，把它报成 granted 会让
+  /// 用户以为能读（然后工具调用才失败，体验更差）。
+  static func currentState() -> String {
+    let status: EKAuthorizationStatus
+    if #available(iOS 17.0, *) {
+      status = EKEventStore.authorizationStatus(for: .event)
+    } else {
+      status = EKEventStore.authorizationStatus(for: .event)
+    }
+    switch status {
+    case .fullAccess:
+      return "granted"
+    case .authorized:
+      // iOS 17 之前只有 authorized（等价于完整访问）
+      return "granted"
+    case .notDetermined:
+      return "prompt"
+    case .denied, .restricted:
+      return "denied"
+    default:
+      if #available(iOS 17.0, *), status == .writeOnly {
+        return "writeOnly"
+      }
+      return "prompt"
+    }
+  }
+
   /// 主动请求日历完整权限（**仅供 `requestPermission` 命令调用**）。
   /// 用户未作答前不返回 —— 所以 Rust 侧命令必须是 async（不能占主线程）。
   static func requestFullAccess(_ invoke: Invoke) {

@@ -809,6 +809,10 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
                 }
             }
         }
+        // 能力清单 + 权限态（与 UI 的 native_capabilities 命令同源）。
+        // 给 agent/probe 用：设置页的状态以前只能靠肉眼看 UI，探针拿到它
+        // 才能自动验证「授权后状态真的更新了」。
+        "native_capabilities" => crate::native::status(),
         "creds_get" => {
             let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
             match creds_get(provider) {

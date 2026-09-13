@@ -12,7 +12,7 @@ use tauri::{
     AppHandle, Runtime,
 };
 
-use crate::{CalendarArgs, Error, LocationArgs, PermissionKind};
+use crate::{CalendarArgs, Error, LocationArgs, PermissionKind, PermissionStatus};
 
 /// Android 插件类的完全限定名（包名 + 类名）。
 #[cfg(target_os = "android")]
@@ -58,6 +58,13 @@ impl<R: Runtime> PiNative<R> {
             .run_mobile_plugin("calendar", args)
             .map_err(Error::PluginInvoke)?;
         Ok(raw)
+    }
+
+    /// 查询权限当前状态（同步、不弹窗）。原生侧直接读系统 API。
+    pub fn permission_state(&self, kind: PermissionKind) -> crate::Result<PermissionStatus> {
+        self.0
+            .run_mobile_plugin("permissionState", serde_json::json!({ "kind": kind }))
+            .map_err(Error::PluginInvoke)
     }
 
     /// 请求系统权限（当前只有日历）。阻塞到用户在系统弹窗作答 —— 调用方

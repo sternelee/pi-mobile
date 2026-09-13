@@ -164,10 +164,32 @@ fn permission_state(cap: &str) -> &'static str {
                 Err(_) => "unknown",
             }
         }
-        // 日历：没有 Rust 侧可查的 API（需走原生 EventKit/CalendarContract），
-        // 故这里报 unknown 而不谎报 granted —— UI 只会因此多给一个「Allow」
-        // 按钮，而谎报 granted 会让用户以为已授权却在调用时失败。
-        "calendar" => "unknown",
+        // 日历：走 pi-native 的原生查询（EventKit / CalendarContract），
+        // **同步且不弹窗**。
+        //
+        // 早期版本在这里硬编码 "unknown"（理由是「Rust 侧查不到」）——
+        // 后果是设置页永远显示 Allow，用户授权后看不到状态更新，只能靠
+        // 反复点击试探。状态查询本来就不需要弹窗能力，让它真的去问系统。
+        //
+        // 原生侧可能返回第五种值 "writeOnly"（iOS 只写权限）：那是「能写不能读」，
+        // 报成 granted 会让用户以为能读、直到工具调用才失败。向上折叠成
+        // "denied" 并让 UI 引导用户去系统设置补全访问 —— 对用户来说可操作
+        // 的动作是一样的（去开权限）。
+        "calendar" => {
+            use tauri_plugin_pi_native::PiNativeExt;
+            match app.pi_native().permission_state(
+                tauri_plugin_pi_native::PermissionKind::Calendar,
+            ) {
+                Ok(st) => match st.state.as_str() {
+                    "granted" => "granted",
+                    "denied" => "denied",
+                    "writeOnly" => "denied",
+                    "prompt" => "prompt",
+                    _ => "unknown",
+                },
+                Err(_) => "unknown",
+            }
+        }
         // 无 API 可查询的能力：视为无需授权
         _ => "granted",
     }

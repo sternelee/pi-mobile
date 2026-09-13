@@ -60,6 +60,22 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
     body: "native tools are wired up",
   });
 
+  // 权限态查询（同步、不弹窗）：验证设置页显示的状态来源是真的在问系统。
+  // 这一步是修 bug 加的 —— 早期 permission_state 硬编码 "unknown"，UI 于是
+  // 永远显示 Allow，用户授权后看不到状态更新。
+  try {
+    const caps = await hostcall("native_capabilities", {});
+    const cal = (caps.capabilities || []).find((c) => c.id === "calendar");
+    steps.capabilities = {
+      ok: !!cal,
+      ms: 0,
+      text: `calendar.permission=${cal ? cal.permission : "?"} platform=${caps.platform}`,
+    };
+  } catch (e) {
+    steps.capabilities = { ok: false, ms: 0, error: String(e) };
+  }
+  flush();
+
   globalThis.__nativeprobe.state = "done";
 })();
 

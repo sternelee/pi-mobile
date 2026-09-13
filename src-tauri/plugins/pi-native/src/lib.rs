@@ -124,10 +124,39 @@ pub struct PermissionArgs {
     pub kind: PermissionKind,
 }
 
+/// 权限当前状态。由原生侧**同步查询**（绝不弹窗）—— 弹窗只在
+/// `requestPermission` 里发生。
+///
+/// 为什么不让 Rust 侧统一「猜」：iOS 有 `.writeOnly` 这一档（只写），
+/// Android 没有对应概念；把它硬塞进 granted/denied 会让 UI 显示错误状态
+/// （谎报 granted 会让用户以为能读，实际读取会失败）。所以状态枚举保留
+/// 两端差异，由上层决定怎么展示。
+// 不 derive Copy：`String` 字段不满足 Copy（`PermissionKind` 是 Copy 但结构体
+// 整体不是）。Clone 足够 —— 调用点只读一次。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionStatus {
+    pub kind: PermissionKind,
+    /// "granted" | "denied" | "prompt" | "writeOnly"
+    pub state: String,
+}
+
+/// `permissionState` 命令的参数。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionStateArgs {
+    pub kind: PermissionKind,
+}
+
 /// 初始化插件。注册的命令名必须与 `build.rs` 的 COMMANDS 一致。
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("pi-native")
-        .invoke_handler(tauri::generate_handler![location, calendar, request_permission])
+        .invoke_handler(tauri::generate_handler![
+            location,
+            calendar,
+            permission_state,
+            request_permission,
+        ])
         .setup(|app, api| {
             #[cfg(mobile)]
             let pi_native = mobile::init(app, api)?;
@@ -162,6 +191,18 @@ async fn location<R: Runtime>(
     use tauri::Manager;
     let pi_native = app.state::<PiNative<R>>();
     pi_native.location(args)
+}
+
+/// 查询某项系统权限的当前状态。**同步、不弹窗** —— 供设置页展示，
+/// 不会打扰用户。
+#[tauri::command]
+async fn permission_state<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    args: PermissionStateArgs,
+) -> Result<PermissionStatus> {
+    use tauri::Manager;
+    let pi_native = app.state::<PiNative<R>>();
+    pi_native.permission_state(args.kind)
 }
 
 /// 主动请求某项系统权限（触发系统弹窗，用户在系统弹窗作答后才返回）。

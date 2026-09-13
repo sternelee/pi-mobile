@@ -55,6 +55,9 @@ object CalendarBridge {
         }
     }
 
+    /** 读权限是否已授（供 permissionState 命令查询；同步、不弹窗）。 */
+    fun hasReadPermission(c: Context) = hasRead(c)
+
     private fun hasRead(c: Context) =
         ContextCompat.checkSelfPermission(c, Manifest.permission.READ_CALENDAR) ==
             PackageManager.PERMISSION_GRANTED

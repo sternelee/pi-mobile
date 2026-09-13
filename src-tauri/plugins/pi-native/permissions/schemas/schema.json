@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the location command without any pre-configured scope."
         },
         {
+          "description": "Enables the permissionState command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-permissionState",
+          "markdownDescription": "Enables the permissionState command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the permissionState command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-permissionState",
+          "markdownDescription": "Denies the permissionState command without any pre-configured scope."
+        },
+        {
           "description": "Enables the requestPermission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-requestPermission",

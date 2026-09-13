@@ -75,6 +75,32 @@ Denies the location command without any pre-configured scope.
 <tr>
 <td>
 
+`pi-native:allow-permissionState`
+
+</td>
+<td>
+
+Enables the permissionState command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pi-native:deny-permissionState`
+
+</td>
+<td>
+
+Denies the permissionState command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `pi-native:allow-requestPermission`
 
 </td>

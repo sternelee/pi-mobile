@@ -94,6 +94,31 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /**
+     * 查询权限当前状态（同步、不弹窗）—— 设置页展示用。
+     *
+     * Android 无法可靠区分「未询问」与「已拒绝且不再询问」（要区分得自己
+     * 记录是否问过）。这里如实报 granted 或 prompt —— 报 prompt 时 UI 给
+     * 「Allow」按钮，用户点了若系统不再弹窗（已被永久拒绝），会看到系统
+     * 无反应；所以 requestPermission 的结果里会带回最终状态，UI 据此更新。
+     */
+    @Command
+    fun permissionState(invoke: Invoke) {
+        val args = invoke.getArgs()
+        when (args.optString("kind", "")) {
+            "calendar" -> {
+                val ret = JSObject()
+                ret.put("kind", "calendar")
+                ret.put(
+                    "state",
+                    if (CalendarBridge.hasReadPermission(activity)) "granted" else "prompt"
+                )
+                invoke.resolve(ret)
+            }
+            else -> invoke.reject("unknown permission kind '${args.optString("kind", "")}'")
+        }
+    }
+
     @PermissionCallback
     private fun permissionCallback(invoke: Invoke) {
         val granted = getPermissionState("calendar") == PermissionState.GRANTED
