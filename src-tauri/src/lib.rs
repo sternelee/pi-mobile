@@ -372,6 +372,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_geolocation::init())
+        // 自建设备能力：官方插件覆盖不到的（1b 的日历/通讯录/照片），以及官方
+        // 插件在其上不可用的（Android 定位走 Google fused provider 且无超时，
+        // 国内 ROM 上会永久挂起）。详见 plugins/pi-native/src/lib.rs 头注。
+        .plugin(tauri_plugin_pi_native::init())
         .setup(|app| {
             // agent_event / approval_required / ask_user → WebView 事件桥。
             // oauth_open_url 同时唤起系统浏览器（provider 授权页）。

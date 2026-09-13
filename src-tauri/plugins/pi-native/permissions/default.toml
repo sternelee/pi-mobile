@@ -1,0 +1,18 @@
+"$schema" = "schemas/schema.json"
+
+# pi-native 的默认权限集。
+#
+# 注意：本插件的调用全部来自 **Rust 侧**（`run_mobile_plugin`），不经过
+# WebView→插件的 IPC 通道，因此 Tauri 的 ACL 并不参与鉴权 —— 这里登记
+# `allow-location` 是让命令集在生成物里保持一致（也让未来若从 UI 直接调用
+# 时有现成的权限项可用）。
+[default]
+description = """
+Default permissions for pi-native (device capabilities implemented in-tree).
+
+These commands are invoked from the Rust host, not from the webview, so the
+ACL is not the authorization boundary here — capability-level consent is
+handled by the OS permission dialogs plus pi-mobile's approval policy
+(see src-tauri/src/native/mod.rs).
+"""
+permissions = ["allow-location"]

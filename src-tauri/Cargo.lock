@@ -2984,6 +2984,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-os",
+ "tauri-plugin-pi-native",
  "tauri-plugin-store",
  "zip",
 ]
@@ -4496,6 +4497,17 @@ dependencies = [
  "serde_json",
  "serialize-to-javascript",
  "sys-locale",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tauri-plugin-pi-native"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.20",

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  pi-native 的 Android 权限声明。
+
+  ACCESS_COARSE_LOCATION 必须与 FINE 一起声明：只声明 FINE 时，Android 12+
+  的系统弹窗会略过「仅大致位置」选项，用户一旦拒绝精确定位就彻底没有位置
+  可用；两个都声明才能让用户在两种精度间选择（且本插件的 provider 选择逻辑
+  会在拿不到 GPS 时落到 network）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+</manifest>

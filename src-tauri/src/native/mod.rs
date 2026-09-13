@@ -283,7 +283,64 @@ fn notify(args: &Value) -> Result<String, String> {
 }
 
 // ── 定位 ──────────────────────────────────────────────────────────────
+//
+// **平台分流是刻意的**，不是遗漏：
+//   * iOS → 官方 `tauri-plugin-geolocation`（CoreLocation）。真机实测可用
+//     （精度 ~11m）。
+//   * Android → 自建 `tauri-plugin-pi-native`（`LocationManager`）。官方插件
+//     的 Kotlin 实现走 Google **fused** provider 且
+//     `getCurrentLocation(prio, null)` 没有 CancellationToken、没有超时；
+//     国内 ROM（实测 Honor MEY-AN00）用高德代理网络定位、GPS provider
+//     不可用，拿不到 fix 时回调既不 success 也不 failure → 永久挂起，最后被
+//     JS 侧 30s hostcall 超时打断，报出无信息量的 "The operation timed out"。
+//
+// 两侧返回的 JSON 字段名保持一致（latitude/longitude/accuracyMeters/…），
+// 所以 `native::tool("location")` 与 weather 的隐式定位无需分支。
+// Android 侧额外给出 `fromLastKnown`/`staleMs` —— 国内 ROM 上首次 fix 常
+// 拿不到，只能回退到缓存位置；这两个字段让模型/UI 能判断可信度，而不是把
+// 缓存当成实时位置用。
 
+/// 等 fix 的超时（毫秒）。比 JS 侧 hostcall 的 30s 短，这样超时由**我们**
+/// 报出（带原因与建议），而不是被 JS 侧截断成一个没有上下文的
+/// "The operation timed out"。
+const LOCATION_TIMEOUT_MS: u64 = 12_000;
+
+/// 权限未授时统一的、可执行的提示文案（两平台共用，避免措辞漂移）。
+fn location_permission_hint() -> String {
+    "location permission not granted — ask the user to enable 定位 in 设置".into()
+}
+
+#[cfg(target_os = "android")]
+fn location(args: &Value) -> Result<String, String> {
+    use tauri_plugin_pi_native::PiNativeExt;
+    let app = app()?;
+    let high = args
+        .get("highAccuracy")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // 先判权限：未授时给可执行指引，而不是让原生侧报更底层的错误。
+    // 复用官方插件的权限查询（它与本插件声明的是同一组 Android 权限）。
+    use tauri_plugin_geolocation::GeolocationExt;
+    let perm = app
+        .geolocation()
+        .check_permissions()
+        .map_err(|e| format!("location permission check: {e}"))?;
+    if perm.location != tauri::plugin::PermissionState::Granted {
+        return Err(location_permission_hint());
+    }
+
+    let result: Value = app
+        .pi_native()
+        .location(tauri_plugin_pi_native::LocationArgs {
+            high_accuracy: high,
+            timeout_ms: LOCATION_TIMEOUT_MS,
+        })
+        .map_err(|e| format!("get_current_position: {e}"))?;
+    Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()))
+}
+
+#[cfg(not(target_os = "android"))]
 fn location(args: &Value) -> Result<String, String> {
     use tauri_plugin_geolocation::GeolocationExt;
     let app = app()?;
@@ -297,20 +354,20 @@ fn location(args: &Value) -> Result<String, String> {
         .check_permissions()
         .map_err(|e| format!("location permission check: {e}"))?;
     if perm.location != tauri::plugin::PermissionState::Granted {
-        return Err(
-            "location permission not granted — ask the user to enable 定位 in 设置".into(),
-        );
+        return Err(location_permission_hint());
     }
 
     let pos = app
         .geolocation()
         .get_current_position(Some(tauri_plugin_geolocation::PositionOptions {
             enable_high_accuracy: high,
-            timeout: 15_000,
+            timeout: LOCATION_TIMEOUT_MS as u32,
             maximum_age: 0,
         }))
         .map_err(|e| format!("get_current_position: {e}"))?;
 
+    // 字段集与 Android 分支对齐（provider/staleMs/fromLastKnown 在 iOS 上
+    // 无意义，给 null/0/false）—— 让上层与模型看到的 schema 一致。
     Ok(serde_json::to_string_pretty(&json!({
         "latitude": pos.coords.latitude,
         "longitude": pos.coords.longitude,
@@ -319,6 +376,9 @@ fn location(args: &Value) -> Result<String, String> {
         "heading": pos.coords.heading,
         "speed": pos.coords.speed,
         "timestampMs": pos.timestamp,
+        "provider": Value::Null,
+        "staleMs": 0,
+        "fromLastKnown": false,
     }))
     .unwrap_or_else(|_| "{}".into()))
 }
