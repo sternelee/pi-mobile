@@ -2,6 +2,97 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-13 — M5 iOS 真机跑通（自测成功）+ 三个真机 bug 复盘 ✅
+
+**成果**：iPhone SE（iOS 26.5.2）上 pi-mobile 完整跑起来 —— `libskal.dylib`
+从源码构建、dlopen 成功、agent bundle 求值完成、tools/skills/providers
+全部注册、首条对话可用。用户自测确认。
+
+### 真机日志的关键证据
+```
+[pi-bun] runtime up: handle=4521553920 reused=0 bun-pins=1.3.14
+[pi-zig] eval enter → enqueue → vm-thread run enter → vm-thread evaluated → wait returned
+[pi-bun] agent_event: agent_ready
+[pi-bun] agent_event: mcp_tools_registered
+[pi-bun] agent bundle kicked
+[pi-bun] agent_event: providers_listed
+```
+
+### Bug 1【致命】SyncReply 整体赋值 ⇒ skal_evaluate 永久挂死
+真机症状：`runtime up` 之后一片静默 —— agent 不就绪、"loading models"
+无限转圈、"Sign in with Kimi" 无反应。
+
+根因：宿主线程阻塞在 `reply.done.wait()` 期间，worker 线程执行
+`reply.* = .{ .result_buf = ..., .is_error = ... }` —— **整体结构体赋值把
+同步原语 `done` 一并重置成全新的 ResetEvent**。在 waiter 等待期间覆写
+同步原语是数据竞争，唤醒丢失 ⇒ 永久挂起。
+修法：逐字段写 + 最后 `set()`（`SyncReply.complete`）。
+
+为何之前一直没暴露：Android 走 skal **预构建** dylib（用 skal 自己的
+evaluate 实现），我们这层 `skal_*` 兼容导出是本次真机才第一次被真正调用。
+
+教训：**给 waiter 用的同步对象不能被「整体赋值」碰** —— 先写载荷，
+最后发信号。
+
+### Bug 2【致命】iOS 选错 DNS 后端 ⇒ 所有外网请求失败
+`vendor/bun/src/dns/dns.zig` 的 default backend 只给 `.mac/.windows`
+选 `.system`，其余（含 `.ios`）落到 `.c_ares`。而那段代码的注释自己就写了
+c-ares 为何不可用：「can't discover nameservers (no /etc/resolv.conf)」
+—— iOS app 沙箱同样读不到 resolv.conf，于是 c-ares 去连 127.0.0.1:53，
+实测 `DNSException: getaddrinfo ECONNREFUSED`。
+
+修法：`.ios => .system`（libc getaddrinfo → 系统 resolver）。
+修后错误变成 `ENOTFOUND`，确认已切到系统 resolver 路径。
+
+补丁落 `patches/bun-dns-ios-system.patch`，由 `setup-bun-fork.sh` 统一
+`git apply`（幂等：已应用则跳过）—— 否则 vendor/ 的改动会丢。
+
+### Bug 3 iOS 聚焦输入框页面自动放大
+WKWebView 老行为：聚焦 `font-size < 16px` 的表单控件时自动放大。我们正好
+踩上：`.composer textarea` 0.92rem≈14.7px、`.ask-input` 0.82rem≈13px、
+`.session-search` 0.9rem≈14.4px。
+
+修法：把控件字号抬到 16px，**而不是** viewport 写 `maximum-scale=1`
+（后者会一并禁掉用户捐合缩放，牺牲无障碍）。限定在
+`@supports (-webkit-overflow-scrolling: touch)`；规则放文件末尾且不在任何
+`@layer` 内（非 layer 声明优先于 layer 内声明，且同特异性下后写胜出）。
+
+### 配套的可观测性（真机排障必需）
+- **iOS 日志通道**：`println` 进统一日志但 `devicectl` 拉不到，
+  `idevicesyslog` 在 CoreDevice 隧道占用 uSMux 后连不上设备。
+  ⇒ `logcat` 现在同时写 `<HOME>/Documents/pi-bun.log`，用
+  `devicectl device copy from --domain-type appDataContainer` 拉回。
+- **Zig 侧 `trace()`**（同文件同格式）—— 直接拿到 VM 线程内部时序，
+  就是它坐实了 Bug 1。
+- `agent_init` 失败串（含 JS 侧 `boot_error`）现在进设备日志。
+- `pi-bundle/netprobe.js`：DNS / loopback / 外网 HTTPS（域名）/ HTTPS（IP）
+  四步探测，iOS 启动时自动跑一次 —— 就是它定位了 Bug 2。
+- `scripts/ios-device-run.sh`：一键装机 + 控制台启动。
+
+### 其他真机确认项
+- **JIT 已正确关闭**：`workerMain` 里在 `bun.jsc.initialize()` 前
+  `setenv("JavaScriptCoreUseJIT", "0")`。注意 `getenv` ≠ Zig
+  `std.os.environ`（后者是启动时快照，而 `JSCInitialize` 读的正是它）——
+  所以 `BUN_JSC_*` 那套在此无效。
+- **HOME 不能改**：早期版本在 `skal_create_runtime` 里 `setenv("HOME", dir)`，
+  导致 Tauri `app_data_dir()`（= `$HOME/Library/Application Support/<id>`）
+  算出双层嵌套路径 `<dir>/Library/Application Support/<id>`，两份
+  sessions/workspace 分裂。改回 skal 上游做法：不碰环境变量，
+  只装 JS 全局 `__pi_data_dir` / `__skal_data_dir`（bundle 实际走
+  `__PI_CONFIG.dataDir`）。
+- **iOS 签名 team**：`project.yml` 必须是 Xcode 已登录账号的 team。
+  开发证书 CN 括号里的号（WRZ67HMJUL）与 OU（UJ8NW4N779）不一致 ——
+  以 `defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier`
+  为准。卸载重装后需重新在设备上「信任」开发者。
+
+### 待办
+- [ ] 真机端到端对话 + 工具 round-trip 截图存档
+- [ ] 模拟器路径（预构建 iossim dylib）一并验证
+- [ ] 脚本幂等性：二次跑 build-jsc-ios.sh / ninja 应为秒级跳过
+- [ ] 清理：`pi-bundle/netprobe.js` 的启动自跑可改为按需触发
+
+---
+
 ## 2026-09-12 00:40 — M5 出口条件达成：iOS 真机 libskal.dylib 从源码构建 ✅
 
 **成果**：`build/skal-ios-device/libskal.dylib`（64.4MB，platform IOS，
