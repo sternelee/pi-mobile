@@ -48,9 +48,15 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn agent_init(app: tauri::AppHandle) -> Result<(), String> {
     let data_dir = app_data_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || pi_bun::agent_init(&data_dir))
+    let r = tauri::async_runtime::spawn_blocking(move || pi_bun::agent_init(&data_dir))
         .await
-        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| format!("join: {e}"))?;
+    // 失败要进设备日志（真机上只有设备日志可看，前端那条 status 文字
+    // 拿不出来）—— 错误串里带 JS 侧 boot_error，是定位根因的关键。
+    if let Err(e) = &r {
+        pi_bun::logcat(&format!("agent_init failed: {e}"));
+    }
+    r
 }
 
 /// M2：提交 prompt（kick；回复经 `pi-agent-event` 事件流回 WebView）。

@@ -1332,3 +1332,32 @@ button {
   flex: 1;
   min-width: 0;
 }
+
+/* ── iOS 聚焦缩放抑制 ────────────────────────────────────────────────
+ *
+ * WKWebView/Safari 有个历史行为：聚焦 font-size < 16px 的表单控件时自动
+ * 放大页面（且失焦后不一定缩回）。我们正好踩上：
+ *   .composer textarea  0.92rem ≈ 14.7px
+ *   .ask-input          0.82rem ≈ 13px
+ *   .session-search     0.9rem  ≈ 14.4px
+ *
+ * 官方推荐的修法是把控件字号抬到 ≥16px，而不是在 viewport 里写
+ * maximum-scale=1 —— 后者会一并禁掉用户的捐合缩放，牺牲无障碍。
+ *
+ * 两个细节：
+ *   1. @supports (-webkit-overflow-scrolling: touch) —— 该特性只在 iOS
+ *      WebKit 上为真（macOS Safari 不匹配），桌面端排版不受影响。
+ *   2. 放在文件末尾且**不在任何 @layer 内**。级联中非 layer 的普通声明
+ *      优先于 layer 内声明，且同特异性下后写的胜出；这里显式列出类名
+ *      与上面的 .ask-input 等保持同特异性，靠顺序确保生效。
+ */
+@supports (-webkit-overflow-scrolling: touch) {
+  .ask-input,
+  .session-search,
+  .composer textarea,
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}

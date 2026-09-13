@@ -22,6 +22,9 @@ const HELLO_JS: &str = include_str!("../../../pi-bundle/hello.js");
 const BRIDGE_JS: &str = include_str!("../../../pi-bundle/bridge.js");
 /// M2 桥冒烟：异步（skal_evaluate 等待 Promise 落定）
 const SMOKE2_JS: &str = include_str!("../../../pi-bundle/smoke2.js");
+/// M5 真机网络探测（iOS 排障：DNS / loopback / 外网 HTTPS）
+#[cfg(target_os = "ios")]
+const NETPROBE_JS: &str = include_str!("../../../pi-bundle/netprobe.js");
 
 // ── skal C ABI（只用 PoC 需要的 4 个符号）──────────────────────────
 
@@ -83,6 +86,23 @@ pub(crate) fn logcat(msg: &str) {
 #[cfg(not(target_os = "android"))]
 pub(crate) fn logcat(msg: &str) {
     println!("[pi-bun] {msg}");
+    // iOS 上 println 进的是统一日志，但 devicectl 拉不到、idevicesyslog 在
+    // CoreDevice 隧道占用 uSMux 后也连不上设备 —— 真机排障只剩文件这条路。
+    // 同时写 <HOME>/Documents/pi-bun.log，用
+    //   xcrun devicectl device copy from --domain-type appDataContainer \
+    //     --domain-identifier <bundle-id> --source Documents/pi-bun.log --destination <本地>
+    // 拉回。 （macOS 上 HOME 存在，同样有效，便于桌面端排障。）
+    use std::io::Write;
+    static LOG_PATH: OnceLock<String> = OnceLock::new();
+    let path = LOG_PATH.get_or_init(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let docs = std::path::Path::new(&home).join("Documents");
+        let _ = std::fs::create_dir_all(&docs);
+        docs.join("pi-bun.log").to_string_lossy().into_owned()
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[pi-bun] {msg}");
+    }
 }
 
 /// 初始化（懒加载）：dlopen + create_runtime，失败原因显式返回。
@@ -179,10 +199,58 @@ fn evaluate_blocking(js: &str, url: &str) -> Result<(String, bool), String> {
 /// M2 agent bundle（bun build 单文件产物，kick 模式加载）。
 const AGENT_JS: &str = include_str!("../../../pi-bundle/dist/agent.js");
 
+/// iOS 真机网络探测：kick netprobe.js，轮询逐步结果，全部写进设备日志。
+///
+/// 背景：真机上 “loading models” 卡住时，fetch 既不 resolve 也不 reject
+/// （既无 models_listed 也无 models_error）—— 需要区分 DNS / TLS / loopback。
+/// 注意探测本身也不能返回 Promise（缘由见 smoke2.js 头注）。
+#[cfg(target_os = "ios")]
+fn run_netprobe() {
+    let (r, err) = match evaluate_blocking(NETPROBE_JS, "pi-bundle/netprobe.js") {
+        Ok(v) => v,
+        Err(e) => {
+            logcat(&format!("netprobe kick failed: {e}"));
+            return;
+        }
+    };
+    if err || r.trim() != "started" {
+        logcat(&format!("netprobe kick odd: err={err} r={r}"));
+    }
+
+    // 各步超时合计 5+8+8 = 21s，另加 DNS；给 30s 观察窗口。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last = String::from("{\"state\":\"?\"}");
+    loop {
+        match evaluate_blocking("JSON.stringify(globalThis.__netprobe)", "pi:netprobe") {
+            Ok((s, false)) => {
+                last = s.clone();
+                if s.contains("\"done\"") {
+                    break;
+                }
+            }
+            Ok((s, true)) => {
+                logcat(&format!("netprobe poll threw: {s}"));
+                break;
+            }
+            Err(e) => {
+                logcat(&format!("netprobe poll failed: {e}"));
+                break;
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    logcat(&format!("netprobe -> {last}"));
+}
+
 /// 初始化 agent：配置注入 + bundle 加载（同步 kick，立即返回）。
 pub fn agent_init(data_dir: &str) -> Result<(), String> {
     let port = loopback::start()?;
     init(data_dir)?;
+    #[cfg(target_os = "ios")]
+    run_netprobe();
 
     let workspace = format!("{data_dir}/workspace");
     std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace: {e}"))?;

@@ -1,0 +1,18 @@
+diff --git a/src/dns/dns.zig b/src/dns/dns.zig
+index 43f9b89..c0f0628 100644
+--- a/src/dns/dns.zig
++++ b/src/dns/dns.zig
+@@ -177,6 +177,13 @@ pub const GetAddrInfo = struct {
+ 
+         pub const default: GetAddrInfo.Backend = switch (bun.Environment.os) {
+             .mac, .windows => .system,
++            // Skal: iOS has the exact problem the Android note below describes —
++            // the app sandbox has no readable /etc/resolv.conf, so c-ares finds
++            // no nameservers and dials 127.0.0.1:53 → every lookup fails with
++            // `DNSException: getaddrinfo ECONNREFUSED` (measured on device).
++            // libSystem's getaddrinfo goes through the system resolver
++            // (mDNSResponder), which works in the sandbox.
++            .ios => .system,
+             // Android: c-ares can't discover nameservers (no /etc/resolv.conf,
+             // no JNI for ares_library_init_android). bionic getaddrinfo proxies
+             // through netd which knows the real resolvers.

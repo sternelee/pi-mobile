@@ -64,11 +64,11 @@ clone_pinned() {
   fi
 }
 
-step "1/4 vendor/bun（skal bun fork @ skal 分支，pin ${BUN_PIN:0:12}）"
+step "1/5 vendor/bun（skal bun fork @ skal 分支，pin ${BUN_PIN:0:12}）"
 clone_pinned "${FORK_URL}/bun.git" skal "${VENDOR}/bun" "${BUN_PIN}"
 
 if [[ ${NO_WEBKIT} -eq 0 ]]; then
-  step "2/4 vendor/WebKit（JSC 源码，Android/iOS 构建需要，pin ${WEBKIT_PIN:0:12}）"
+  step "2/5 vendor/WebKit（JSC 源码，Android/iOS 构建需要，pin ${WEBKIT_PIN:0:12}）"
   clone_pinned "${FORK_URL}/WebKit.git" skal "${VENDOR}/WebKit" "${WEBKIT_PIN}"
   # bun 的 ios-release/android profile 用 webkit:"local"，nested cmake 从
   # webkitSrcDir() 找源码（默认 vendor/bun/vendor/WebKit）→ 必须放 symlink。
@@ -76,10 +76,10 @@ if [[ ${NO_WEBKIT} -eq 0 ]]; then
   ln -sfn "${VENDOR}/WebKit" "${VENDOR}/bun/vendor/WebKit"
   note "symlink vendor/bun/vendor/WebKit → vendor/WebKit"
 else
-  step "2/4 跳过 WebKit（--no-webkit）"
+  step "2/5 跳过 WebKit（--no-webkit）"
 fi
 
-step "3/4 覆盖 src/skal_entry.zig ← patches/pi_entry.zig（最小 diff：fork 的 build.zig 固定引用该文件名）"
+step "3/5 覆盖 src/skal_entry.zig ← patches/pi_entry.zig（最小 diff：fork 的 build.zig 固定引用该文件名）"
 if [[ -f "${PATCHES_DIR}/pi_entry.zig" ]]; then
   cp "${PATCHES_DIR}/pi_entry.zig" "${VENDOR}/bun/src/skal_entry.zig"
   note "installed pi_entry.zig as src/skal_entry.zig（实现 pi_bun_* ABI）"
@@ -88,7 +88,23 @@ else
   exit 1
 fi
 
-step "4/4 vendor/bun 内 bun install（bun 自身 codegen 需要）"
+step "4/5 应用 bun 源码补丁（patches/*.patch，git apply）"
+shopt -s nullglob
+for p in "${PATCHES_DIR}"/*.patch; do
+  if git -C "${VENDOR}/bun" apply --check "${p}" 2>/dev/null; then
+    git -C "${VENDOR}/bun" apply "${p}"
+    note "applied $(basename "${p}")"
+  elif git -C "${VENDOR}/bun" apply --reverse --check "${p}" 2>/dev/null; then
+    note "already applied: $(basename "${p}")"
+  else
+    echo "  error: $(basename "${p}") 无法应用（上游漂移？）" >&2
+    echo "         调查：git -C vendor/bun apply --check -v ${p}" >&2
+    exit 1
+  fi
+done
+shopt -u nullglob
+
+step "5/5 vendor/bun 内 bun install（bun 自身 codegen 需要）"
 (cd "${VENDOR}/bun" && bun install --silent)
 
 echo

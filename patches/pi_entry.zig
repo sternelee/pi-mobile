@@ -111,6 +111,9 @@ const Runtime = struct {
     host_port: HostPort = .{},
     /// bundle 路径（pibun_start 时求值）
     bundle_path: [:0]const u8 = "",
+    /// App 数据目录（create 时传入）—— 仅装成 JS 全局，不改环境变量。
+    /// 命名对齐 skal 的 `__skal_data_dir`（见 skal_create_runtime 注释）。
+    data_dir: []const u8 = "",
 
     /// Rust → bun 事件队列（pibun_post_event 入队；pump 任务出队并分发）
     event_mutex: std.Thread.Mutex = .{},
@@ -119,10 +122,13 @@ const Runtime = struct {
     /// 缓存的 `__pi_on_event` 引用（首 pump 后 Protect，GC 不回收）
     on_event_fn: ?JSObjectRef = null,
 
-    fn init(allocator: std.mem.Allocator) !*Runtime {
+    fn init(allocator: std.mem.Allocator, data_dir: []const u8) !*Runtime {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator };
+        if (data_dir.len > 0) {
+            self.data_dir = allocator.dupe(u8, data_dir) catch "";
+        }
         self.worker_thread = try std.Thread.spawn(.{}, workerMain, .{self});
         self.ready.wait();
         if (self.init_failed.load(.acquire)) {
@@ -225,6 +231,28 @@ fn installPiGlobals(vm: *jsc.VirtualMachine) void {
 
     // __pi_hostcall(json) -> 应答 json 字符串（同步，走宿主端口）
     installHostFn(ctx, global_obj, "__pi_hostcall", hostcall_jsCallback);
+
+    // 数据目录作为 JS 全局（skal 同款做法）—— 见 skal_create_runtime
+    // 注释：为什么不用 HOME。bundle 实际走 __PI_CONFIG.dataDir（Rust 注入），
+    // 这里装两个名字只为诊断（pi-bundle/hello.js 就探 __skal_data_dir）。
+    if (active_runtime) |rt| {
+        if (rt.data_dir.len > 0) {
+            installStringGlobal(ctx, global_obj, "__pi_data_dir", rt.data_dir);
+            installStringGlobal(ctx, global_obj, "__skal_data_dir", rt.data_dir);
+        }
+    }
+}
+
+/// 把一个 Zig 字符串装成 JS 全局（内部 makeString + setProperty）。
+fn installStringGlobal(ctx: JSContextRef, global_obj: JSObjectRef, name: [*:0]const u8, value: []const u8) void {
+    const name_str = JSStringCreateWithUTF8CString(name);
+    defer JSStringRelease(name_str);
+    const val_buf = std.heap.c_allocator.allocSentinel(u8, value.len, 0) catch return;
+    defer std.heap.c_allocator.free(val_buf);
+    @memcpy(val_buf[0..value.len], value);
+    const val_str = JSStringCreateWithUTF8CString(val_buf.ptr);
+    defer JSStringRelease(val_str);
+    JSObjectSetProperty(ctx, global_obj, name_str, JSValueMakeString(ctx, val_str), 0, null);
 }
 
 /// JS 侧 `__pi_hostcall(json)`：取参 → 宿主端口 → 应答字符串。
@@ -278,11 +306,15 @@ const EvalRequest = struct {
     fn runOnWorker(self: *EvalRequest) void {
         self.any = bun.jsc.AnyTask.New(EvalRequest, runOnVmThread).init(self);
         self.concurrent = .{ .task = self.any.task(), .next = .none };
+        trace("enqueue start", .{});
         self.rt.vm.eventLoop().enqueueTaskConcurrent(&self.concurrent);
+        trace("enqueue done, waiting", .{});
         if (self.reply) |reply| reply.done.wait();
+        trace("wait returned", .{});
     }
 
     fn runOnVmThread(self: *EvalRequest) bun.JSError!void {
+        trace("vm-thread run enter", .{});
         const global = self.rt.vm.global;
         var exception: jsc.JSValue = .js_undefined;
         const result = Bun__REPL__evaluate(
@@ -308,9 +340,9 @@ const EvalRequest = struct {
 
         const text = final.toUTF8Bytes(global, self.rt.allocator) catch
             self.rt.allocator.dupe(u8, "<toString failed>") catch return;
+        trace("vm-thread evaluated err={} len={d}", .{ is_error, text.len });
         if (self.reply) |reply| {
-            reply.* = .{ .result_buf = text, .is_error = is_error };
-            reply.done.set();
+            reply.complete(text, is_error);
         } else if (is_error) {
             // bundle 启动失败仅记录（agent 循环正常时永不结束）
             std.debug.print("pi-bun: bundle eval failed: {s}\n", .{text});
@@ -325,6 +357,17 @@ const SyncReply = struct {
     result_buf: []u8 = "",
     is_error: bool = false,
     done: std.Thread.ResetEvent = .{},
+
+    /// 完成应答。**必须逐字段写，不能整体赋值 `reply.* = .{...}`** ——
+    /// 整体赋值会把 `done` 一并重置成全新的 ResetEvent，而宿主线程此刻
+    /// 正阻塞在同一个 `done` 上等待唤醒。在 waiter 等待期间覆写同步原语
+    /// 是数据竞争，宿主会永久挂在 wait()（真机实测：第一个
+    /// skal_evaluate 永不返回）。所以先写载荷，最后 set。
+    fn complete(self: *SyncReply, buf: []u8, is_error: bool) void {
+        self.result_buf = buf;
+        self.is_error = is_error;
+        self.done.set();
+    }
 };
 
 // ── 事件泵（Rust → JS：__pi_on_event(json)）──────────────────────────
@@ -411,7 +454,9 @@ export fn pibun_create_runtime(
     }
 
     const allocator = std.heap.c_allocator;
-    const rt = Runtime.init(allocator) catch {
+    // pibun_create_runtime 的 home_dir 参数是遗留的（pi_bun.h v1 草案）；
+    // 数据目录一律走 skal_create_runtime(dir,len)（Rust 侧实际用的入口）。
+    const rt = Runtime.init(allocator, "") catch {
         std.debug.print("pi-bun: VM init failed\n", .{});
         return 0;
     };
@@ -501,10 +546,40 @@ export fn pibun_version() callconv(.c) [*:0]const u8 {
 var global_reused: bool = false;
 
 // libc setenv（本 zig 版本的 std.posix 无此成员）
+// 仅用于 iOS 关 JIT（JavaScriptCoreUseJIT），不用于 HOME。
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+
+/// Zig 侧追踪：追加到 `$HOME/Documents/pi-bun.log`（与 Rust 侧 logcat
+/// 同一个文件）。真机上 println/stderr 都拿不到（devicectl 不转 stdout，
+/// idevicesyslog 在 CoreDevice 隧道占用 uSMux 后连不上），文件是唯一
+/// 可靠通道。只为排障，每次调用开/关文件——不在热路径上。
+fn trace(comptime fmt: []const u8, args: anytype) void {
+    const home_ptr = getenv("HOME") orelse return;
+    const home = std.mem.span(home_ptr);
+    var path_buf: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/Documents/pi-bun.log", .{home}) catch return;
+    const f = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch return;
+    defer f.close();
+    f.seekFromEnd(0) catch {};
+    var line_buf: [640]u8 = undefined;
+    const msg = std.fmt.bufPrint(&line_buf, "[pi-zig] " ++ fmt ++ "\n", args) catch return;
+    f.writeAll(msg) catch {};
+}
 
 /// skal_create_runtime(dir, dir_len) → 句柄（0 = 失败）。
-/// dir 用作 HOME/TMPDIR（App 数据目录）—— 与 skal 预构建语义一致。
+///
+/// dir = App 数据目录。**不要把 dir 写进 HOME/TMPDIR** —— Tauri 的
+/// `app_data_dir()` = `dirs::data_dir()` + bundle_id，而 iOS 上
+/// `dirs::data_dir()` 就是 `$HOME/Library/Application Support`。
+/// 一旦把 HOME 改成 dir，第二次 `app_data_dir()` 就会得到
+/// `<dir>/Library/Application Support/<bundle-id>`（实测出现的双层嵌套），
+/// 两个路径各建一份 sessions/workspace → 会话文件看不到。
+///
+/// skal 上游的做法：不碰环境变量，只把 dir 装成 JS 全局
+/// `globalThis.__skal_data_dir` 供 JS 侧读取。我们的 bundle 走的是
+/// `__PI_CONFIG.dataDir`（Rust 在求值 bundle 前注入），所以这里装全局只是
+/// 为诊断/兼容；两个名字都装。
 export fn skal_create_runtime(dir: [*]const u8, dir_len: usize) callconv(.c) i64 {
     global_mutex.lock();
     defer global_mutex.unlock();
@@ -513,16 +588,7 @@ export fn skal_create_runtime(dir: [*]const u8, dir_len: usize) callconv(.c) i64
         return @intCast(@intFromPtr(rt));
     }
 
-    // HOME/TMPDIR 指向 App 数据目录（bun 与 pi-ai 的目录解析依赖它们）
-    if (dir_len > 0) {
-        const dir_buf = std.heap.c_allocator.allocSentinel(u8, dir_len, 0) catch return 0;
-        defer std.heap.c_allocator.free(dir_buf);
-        @memcpy(dir_buf[0..dir_len], dir[0..dir_len]);
-        _ = setenv("HOME", dir_buf, 1);
-        _ = setenv("TMPDIR", dir_buf, 1);
-    }
-
-    const rt = Runtime.init(std.heap.c_allocator) catch {
+    const rt = Runtime.init(std.heap.c_allocator, if (dir_len > 0) dir[0..dir_len] else "") catch {
         std.debug.print("pi-bun: VM init failed\n", .{});
         return 0;
     };
@@ -584,7 +650,9 @@ export fn skal_evaluate(
         .url = url[0..url_len],
         .reply = reply,
     };
+    trace("eval enter len={d} url={s}", .{ source_len, url[0..@min(url_len, 48)] });
     req.runOnWorker();
+    trace("eval back err={} len={d}", .{ reply.is_error, reply.result_buf.len });
 
     // 复制到 libc 堆 + NUL 结尾（skal_free_string 用 free() 释放）
     const n = reply.result_buf.len;
