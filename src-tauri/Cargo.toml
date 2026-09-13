@@ -36,6 +36,9 @@ rand = "0.10"
 base64 = "0.22"
 # D12 skills 安装器：reqwest 已在依赖树内（tauri-plugin-http），显式声明以直接用
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+tauri-plugin-clipboard-manager = "2.3.3"
+tauri-plugin-notification = "2.4.0"
+tauri-plugin-geolocation = "2.3.3"
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。

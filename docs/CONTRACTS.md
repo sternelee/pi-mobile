@@ -57,7 +57,8 @@
 |--------|------|------|------|
 | `ping` | 任意 | `{pong, echo, ts}` | 连通性 |
 | `log` | `{ msg }` | `{ok}` | logcat（tag `pibun`） |
-| `tool` | `{ name, args }` | `{ text }` / `{ error }` | read/write/ls/grep，jail 到 `{dataDir}/workspace`，D6 无 exec |
+| `tool` | `{ name, args }` | `{ text }` / `{ error }` | read/write/ls/grep/mkdir/edit，jail 到 `{dataDir}/workspace`，D6 无 exec |
+| `native` | `{ name, args }` | `{ text }` / `{ error }` | **M6 系统原生能力**（下表）。与 `tool` 分通道的原因：`tool` 是 workspace jail 内的文件操作，本通道读的是**真实用户数据**（剪贴板/位置/通知），两套信任模型不混。实现：`src-tauri/src/native/mod.rs`；能力↔权限单一真源是同文件的 `CAPABILITIES`。 |
 | `http` | `{ url, method?, headers?, body? }` | `{ status, contentType, body, truncated }` / `{ error }` | agent `fetch` 工具宿主侧（`http_tool.rs`）：reqwest blocking + rustls，30s 超时、响应体 256KB 上限、HTML 转纯文本；SSRF 防护——仅 http/https，拒 loopback/私网/链路本地/`*.local`（已知边界：无 DNS 解析级校验，白名单/审计留策略层） |
 | `creds_get` | `{ provider }` | `{ apiKey }` / `{ error }` | 凭证不出宿主内存，JS 仅注入运行时内存 |
 | `creds_set` | `{ provider, apiKey }` | `{ ok }` / `{ error }` | pi-ai CredentialStore.modify 的宿主后端（OAuth 刷新等写路径；空串即清除） |
@@ -74,6 +75,23 @@
 | `creds_json_get` / `creds_json_set` | `{ provider }` / `{ provider, json }` | `{ json }` / `{ ok }` | OAuth 凭证（pi-ai Credential JSON）存取——`{provider}#oauth` 隔离条目，与 api key 同库不同键；空串即删除 |
 
 **Provider/model 目录（AI provider 选择流程）**：provider 注册、模型目录（compat/contextWindow/thinkingLevel）、动态列表刷新（OpenRouter）与凭证解析全部由 bundle 内 `@earendil-works/pi-ai` 的 `createModels` + 内置 provider 工厂承担。UI 可见 4 家：`openai`（openai-responses）/`openrouter`（openai-completions，动态目录）/`deepseek`（openai-completions）/`google-gemini`（openai-completions 兼容层——内置 google provider 驱动 @google/genai，其 node-builtin 导入在嵌入 JSC 上 SIGSEGV，故用 `createProvider` + pi-ai 自带 openai-completions 实现 + Gemini 官方 OpenAI 兼容端点，模型目录数据仍取自 pi-ai 生成的 google catalog）。bundle 全局：`__pi_providers_list`（→ `providers_listed` 事件）/ `__pi_models_refresh(providerId)`（动态 provider 走网络刷新 → `models_listed`/`models_error`）/ `__pi_model_select({provider,modelId})`（热切换主 agent，子 agent 取运行时快照跟随 → `model_applied`）/ `__pi_model_current()`（当前模型 JSON）。
+
+### 2.2.1 `native` 通道的工具集（M6 第一批）
+
+实现选型纪律（承 `keepalive.rs` 两次真机事故）：**能用官方 Tauri 插件就用插件**
+—— 插件把 Android JNI / iOS ObjC 管线封在各自原生侧，Rust 只调
+`run_mobile_plugin`，不把宿主线程暴露给原生代码的崩溃。插件覆盖不到的
+（日历/通讯录/照片 → 后续批次）按正规 Tauri 插件形态补，不写裸 JNI。
+
+| 工具 | args | 审批 | 实现 |
+|------|------|------|------|
+| `clipboard` | `{ op: "read"\|"write"\|"clear", text? }` | read 自动；write/clear **ask** | `tauri-plugin-clipboard-manager`（mobile 走 `write_text_with_label`，避免 iOS 每次写入弹「已粘贴自…」） |
+| `notify` | `{ title, body? }` | **ask**（可 "always" 记住） | `tauri-plugin-notification`；权限未授时返回可读错误而非静默失败。定时通知归后续「提醒事项」批次（iOS 用 EventKit、Android 用 AlarmManager，语义更贴用户预期） |
+| `location` | `{ highAccuracy? }` | 自动 | `tauri-plugin-geolocation`（`get_current_position`）；返回 JSON |
+| `weather` | `{ latitude?, longitude?, days? }` | 自动 | 无系统 API → Open-Meteo 公共接口（无需 key），纯 Rust HTTP；不给坐标则先取当前位置（隐式依赖定位权限）；WMO code 折成人话 + 紧凑文本（省 token） |
+
+**无权限 API 可预请求的能力**（如剪贴板）在 `CAPABILITIES` 里标 `needs_permission: false`；
+UI 侧的命令：`native_capabilities`（能力清单+权限态）、`native_request_permission`。
 
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 

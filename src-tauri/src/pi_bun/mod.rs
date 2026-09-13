@@ -22,9 +22,10 @@ const HELLO_JS: &str = include_str!("../../../pi-bundle/hello.js");
 const BRIDGE_JS: &str = include_str!("../../../pi-bundle/bridge.js");
 /// M2 桥冒烟：异步（skal_evaluate 等待 Promise 落定）
 const SMOKE2_JS: &str = include_str!("../../../pi-bundle/smoke2.js");
-/// M5 真机网络探测（iOS 排障：DNS / loopback / 外网 HTTPS）
-#[cfg(target_os = "ios")]
+/// M5 真机网络探测（排障：DNS / loopback / 外网 HTTPS）
 const NETPROBE_JS: &str = include_str!("../../../pi-bundle/netprobe.js");
+/// M6 系统原生能力自检（四个能力各打一次 hostcall）
+const NATIVEPROBE_JS: &str = include_str!("../../../pi-bundle/nativeprobe.js");
 
 // ── skal C ABI（只用 PoC 需要的 4 个符号）──────────────────────────
 
@@ -199,29 +200,35 @@ fn evaluate_blocking(js: &str, url: &str) -> Result<(String, bool), String> {
 /// M2 agent bundle（bun build 单文件产物，kick 模式加载）。
 const AGENT_JS: &str = include_str!("../../../pi-bundle/dist/agent.js");
 
-/// iOS 真机网络探测：kick netprobe.js，轮询逐步结果，全部写进设备日志。
+/// 开发期自检：kick 一个探测脚本，轮询 `globalThis.<slot>` 直到 done，
+/// 把逐步结果写进设备日志。
 ///
-/// 背景：真机上 “loading models” 卡住时，fetch 既不 resolve 也不 reject
-/// （既无 models_listed 也无 models_error）—— 需要区分 DNS / TLS / loopback。
-/// 注意探测本身也不能返回 Promise（缘由见 smoke2.js 头注）。
-#[cfg(target_os = "ios")]
-fn run_netprobe() {
-    let (r, err) = match evaluate_blocking(NETPROBE_JS, "pi-bundle/netprobe.js") {
+/// 背景：真机上很多坑只能靠日志定位（devicectl 不转 stdout、
+/// idevicesyslog 在 CoreDevice 隧道占用 uSMux 后连不上设备）—— 所以
+/// logcat 同时写 `<HOME>/Documents/pi-bun.log`。
+///
+/// 两个约束：
+/// 1. 探测脚本**不能返回 Promise**（skal_evaluate 的 waitForPromise 会阻塞
+///    VM worker 线程，而被探测的 fetch/插件回调恰好靠该线程 tick）。脚本
+///    立即返回 "started"，结果增量写全局槽位。
+/// 2. 不得阻塞启动 —— 调用方应在独立线程里跑（见 agent_init）。
+fn run_probe(label: &str, script: &str, url: &str, slot: &str, budget: std::time::Duration) {
+    let (r, err) = match evaluate_blocking(script, url) {
         Ok(v) => v,
         Err(e) => {
-            logcat(&format!("netprobe kick failed: {e}"));
+            logcat(&format!("{label} kick failed: {e}"));
             return;
         }
     };
     if err || r.trim() != "started" {
-        logcat(&format!("netprobe kick odd: err={err} r={r}"));
+        logcat(&format!("{label} kick odd: err={err} r={r}"));
     }
 
-    // 各步超时合计 5+8+8 = 21s，另加 DNS；给 30s 观察窗口。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + budget;
+    let poll = format!("JSON.stringify(globalThis.{slot})");
     let mut last = String::from("{\"state\":\"?\"}");
     loop {
-        match evaluate_blocking("JSON.stringify(globalThis.__netprobe)", "pi:netprobe") {
+        match evaluate_blocking(&poll, &format!("pi:{label}")) {
             Ok((s, false)) => {
                 last = s.clone();
                 if s.contains("\"done\"") {
@@ -229,31 +236,48 @@ fn run_netprobe() {
                 }
             }
             Ok((s, true)) => {
-                logcat(&format!("netprobe poll threw: {s}"));
+                logcat(&format!("{label} poll threw: {s}"));
                 break;
             }
             Err(e) => {
-                logcat(&format!("netprobe poll failed: {e}"));
+                logcat(&format!("{label} poll failed: {e}"));
                 break;
             }
         }
         if std::time::Instant::now() > deadline {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(400));
     }
-    logcat(&format!("netprobe -> {last}"));
+    logcat(&format!("{label} -> {last}"));
 }
 
 /// 初始化 agent：配置注入 + bundle 加载（同步 kick，立即返回）。
 pub fn agent_init(data_dir: &str) -> Result<(), String> {
     let port = loopback::start()?;
     init(data_dir)?;
-    // 网络探测是排障工具，不能在启动路径上阻塞：它最坏要等 4 步超时
-    // （5+8+8+8≈29s）+ 真实外网请求。丢到后台线程跑，日志照样进
-    // <HOME>/Documents/pi-bun.log。
-    #[cfg(target_os = "ios")]
-    std::thread::spawn(run_netprobe);
+    // 开发期自检：debug 构建才跑，且不得阻塞启动（最坏要等各步超时
+    // 合计 ~30s + 真实网络/定位往返）。丢到后台线程，日志照样进
+    // <HOME>/Documents/pi-bun.log。release 构建下整段被编译掉。
+    #[cfg(debug_assertions)]
+    {
+        std::thread::spawn(|| {
+            run_probe(
+                "netprobe",
+                NETPROBE_JS,
+                "pi-bundle/netprobe.js",
+                "__netprobe",
+                std::time::Duration::from_secs(30),
+            );
+            run_probe(
+                "nativeprobe",
+                NATIVEPROBE_JS,
+                "pi-bundle/nativeprobe.js",
+                "__nativeprobe",
+                std::time::Duration::from_secs(40),
+            );
+        });
+    }
 
     let workspace = format!("{data_dir}/workspace");
     std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace: {e}"))?;

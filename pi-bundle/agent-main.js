@@ -82,6 +82,10 @@ const waitForApproval = (id) =>
 	});
 
 function hostTool(name, label, description, parameters, opts = {}) {
+	// 通道：文件类工具走 `tool`（host↔workspace jail），系统原生能力走
+	// `native`（host↔真实用户数据）—— 两套信任模型在 Rust 侧分开，见
+	// src-tauri/src/native/mod.rs 头注释。
+	const channel = opts.channel ?? "tool";
 	return {
 		name,
 		label,
@@ -99,10 +103,10 @@ function hostTool(name, label, description, parameters, opts = {}) {
 					if (apr.pending) decision = await waitForApproval(apr.requestId);
 					if (decision !== "allow")
 						return errContent(
-							`User did not approve the ${name} of "${params?.path}" (${decision === "deny" ? "denied" : decision}). Nothing was written — choose another approach or ask the user.`,
+							`User did not approve ${name} ${approvalTarget(params)} (${decision === "deny" ? "denied" : decision}). Nothing changed — choose another approach or ask the user.`,
 						);
 				}
-				const r = await hostcall("tool", { name, args: params });
+				const r = await hostcall(channel, { name, args: params });
 				if (r.error) throw new Error(r.error);
 				return { content: [{ type: "text", text: r.text ?? "" }], details: {} };
 			} catch (e) {
@@ -110,6 +114,15 @@ function hostTool(name, label, description, parameters, opts = {}) {
 			}
 		},
 	};
+}
+
+// 审批文案里的「操作对象」：文件工具用 path，其余（通知标题/剪贴板写入等）
+// 退化为紧凑 JSON。原来硬写 "${params.path}" 对非文件工具会显示 "undefined"。
+function approvalTarget(params) {
+	if (!params || typeof params !== "object") return "";
+	if (typeof params.path === "string") return `of "${params.path}"`;
+	const s = JSON.stringify(params);
+	return `(${s.length > 120 ? s.slice(0, 117) + "…" : s})`;
 }
 
 const obj = (props, required) => ({
@@ -233,9 +246,52 @@ const askUserTool = {
 	},
 };
 
+// ---- nativeTools：系统原生能力（M6）----
+//
+// 与 coreTools 的区别：这些不是文件操作，而是读真实用户数据（剪贴板/位置）
+// 或驱动系统服务（通知）。hostcall 走 `native` 通道，Rust 侧
+// src-tauri/src/native/mod.rs。能力↔权限的单一真源是同文件的 CAPABILITIES；
+// 此处新增工具必须同步登记到 docs/CONTRACTS.md §2.2。
+//
+// 审批策略：
+//   * 读类（location / weather / clipboard read / contacts / photos）→ 自动，
+//     否则模型每查一次天气都要打断用户。
+//   * 改类（clipboard write/clear、notify、写日历）→ ask（用户可以选
+//     "always" 记住），因为它们会改变设备状态或打扰用户。
+const nativeTools = [
+	hostTool(
+		"clipboard",
+		"Clipboard",
+		"Read or write the system clipboard (shared with all other apps). op=read returns the current text; op=write copies `text`; op=clear empties it. Writing/clearing requires user approval. Args: {op: \"read\"|\"write\"|\"clear\", text?}",
+		obj({ op: { type: "string", enum: ["read", "write", "clear"] }, text: { type: "string" } }, ["op"]),
+		{ channel: "native" },
+	),
+	hostTool(
+		"notify",
+		"Notify",
+		"Send a local system notification (appears in the notification center / lock screen even when the app is in the background). Requires user approval. Args: {title, body?}",
+		obj({ title: { type: "string" }, body: { type: "string" } }, ["title"]),
+		{ channel: "native", mutating: true },
+	),
+	hostTool(
+		"location",
+		"Location",
+		"Get the device's current position (latitude/longitude/accuracy). Read-only, no approval — but the OS location permission must be granted by the user. Returns JSON. Args: {highAccuracy?}",
+		obj({ highAccuracy: { type: "boolean" } }, []),
+		{ channel: "native" },
+	),
+	hostTool(
+		"weather",
+		"Weather",
+		"Get current weather plus a multi-day forecast in plain text (data from Open-Meteo, no account needed). Provide latitude+longitude, or omit both to use the device's current location. Args: {latitude?, longitude?, days?}",
+		obj({ latitude: { type: "number" }, longitude: { type: "number" }, days: { type: "number" } }, []),
+		{ channel: "native" },
+	),
+];
+
 const extensionTools = [askUserTool];
 
-const tools = [...coreTools, fetchTool, ...extensionTools];
+const tools = [...coreTools, fetchTool, ...nativeTools, ...extensionTools];
 
 // ---- subagents（pi-subagents 移动原生化：agent 委托）----
 // 上游的 fleet/workflow/mission 机制基于 pi-server 运行时，移动端取其核心

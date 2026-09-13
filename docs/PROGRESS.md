@@ -2,6 +2,95 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-13 — M6 系统原生能力第一批 1a：剪贴板/通知/定位/天气 ✅
+
+**iOS 真机全绿**（授权后自检实测）：
+```
+location         OK  31ms   22.5676,113.8910  精度 11.7m  海拔 13.4m
+weather          OK 996ms   Open-Meteo 真实数据（小雨 26.7°C / 体感 30.7°C / 湿度 86%）
+clipboard_write  OK  30ms
+clipboard_read   OK  43ms   读回 "pi-mobile self-check"（双向可用）
+notify           OK  18ms   通知发送成功
+```
+
+### 架构：为什么另开 `native` 通道而不是塞进 `tool`
+`loopback.rs` 的 `tool` 是 **workspace jail 内的文件操作**（D6：无 exec、
+路径越狱防护）；系统能力读的是**真实用户数据**（位置/剪贴板/通讯录）。
+两套信任模型混在一起会让 jail 语义变模糊，审计时也看不清哪些调用碰了
+真实数据。所以单开 `native` hostcall，工具名与权限在
+`src-tauri/src/native/mod.rs` 的 `CAPABILITIES` 里统一登记（单一真源）。
+
+### 原生实现的选型纪律（承 keepalive.rs 两次真机事故）
+`keepalive.rs` 的记录：从 Rust 走 `ndk_context` 裸 JNI 会因 panic 杀死宿主
+线程（审批决策丢失）或带崩 wry 事件循环。因此本层纪律是「**能用官方插件
+就用插件**」—— 插件把 Android JNI / iOS ObjC 管线封在各自原生侧，Rust 只
+调 `run_mobile_plugin`。当前用插件：剪贴板 / 通知 / 定位。
+
+选型前的关键侦察：**插件的 JS API 面向 WebView，而 agent 跑在 bun 里** ——
+所以必须先确认插件暴露可用的 Rust API。三个插件都有
+（`ClipboardExt` / `NotificationExt` / `GeolocationExt`），故 4 项能力
+（含天气）**零自定义原生代码**即可落地。日历/通讯录/照片没有插件，
+才需要自建 Tauri 插件（1b）。
+
+### Bug 1【致命】同步 Tauri 命令 + 需要主队列的插件 = 死锁
+症状：设置页点「定位 Allow」→ 整屏卡死。
+
+根因：Tauri 同步命令在宿主线程执行，而 `run_mobile_plugin` 是阻塞的
+（等原生侧回调）。`tauri-plugin-geolocation` 的 iOS 实现在
+`.notDetermined` 时把 invoke **挂起直到用户作答**，并且弹窗走
+`DispatchQueue.main.async` —— 同步命令占着主线程等回复、弹窗等主线程，
+互等成环。通知插件同样挂起 invoke，但它的弹窗不需要主线程，所以
+「其他权限正常、只定位卡死」，正好指向这个机制。
+
+修法：两个 UI 命令改成 `async fn` + `spawn_blocking`，与仓库里
+`pi_bun_smoke` 的既有纪律一致（「任何同步阻塞调用都不得占主线程」）。
+
+附带确认：agent 工具侧是安全的 —— loopback HTTP 的 handler 跑在每连接
+独立的 `thread::spawn` 上，不占主线程，所以模型调 `location` 不会触发
+同类死锁。
+
+### Bug 2 设置页 Agent 标签无法滚动
+SheetContent 是 `flex flex-col` + `h-full`，每个标签页必须自带
+`flex-1 overflow-y-auto` 才能滚。Providers/MCP/Skills 都有，Agent 页漏了
+—— 之前内容短没暴露，加了 Device 卡片后就溢出。已按 Providers 同款写法
+整页包进滚动容器。
+
+### 设置页信息架构：Device 标签取消，并入 Agent
+审批策略管「工作区内的文件改动」，设备能力管「工作区外的真实用户数据」
+—— 两者都是 agent 的权限边界，放同一页才不会让用户以为还有第二组开关。
+现在标签页：Providers / MCP / Skills / Agent（内含 Agent behavior +
+Device access 两个分组）。
+
+### 平台声明（缺了就崩，不是返回错误）
+iOS Info.plist 逐项补用途描述，文案原则是「agent 拿它做什么」而非
+「我们需要此权限」（审核会读，用户也会在系统弹窗看到）。Android 侧只加了
+定位两个权限（`ACCESS_COARSE_LOCATION` 必须一起声明，否则 Android 12+
+弹窗会略过「仅大致位置」选项）。
+
+**流程坑（已踩）**：`tauri ios build` **不会**从 `project.yml` 重新生成
+Info.plist —— 改完必须手跑 `xcodegen generate`，否则用途描述不进包、
+运行时直接崩。
+
+### 开发期自检（debug 构建才跑）
+`pi-bundle/netprobe.js` + `nativeprobe.js`：直接打 `hostcall` 而非经模型，
+避免「模型可能不调/调错」带来的验证不确定性。两者都遵守同一条纪律：
+**脚本不能返回 Promise**（`skal_evaluate` 的 `waitForPromise` 会阻塞 VM
+worker 线程，而被探测的 fetch/插件回调恰好靠该线程 tick），立即返回
+`"started"`、结果增量写全局槽位、宿主轮询。统一收敛到
+`pi_bun::run_probe`，`#[cfg(debug_assertions)]` 下在后台线程跑（不阻塞启动）。
+
+### 待办
+- [ ] 1a Android 真机验证（当前无设备连接，`adb devices` 为空）
+- [ ] 1b：日历 / 通讯录 / 照片 —— 需自建 Tauri 插件（EventKit +
+      Contacts + Photos / Kotlin CalendarContract + ContactsContract +
+      MediaStore），见下方「原生化 13 项能力」的批次划分
+- [ ] bundle 体积：`dist/agent.js` 已 2.94MB 且未 minify —— 对无 JIT 的
+      iOS 解释器是每次冷启的解析成本。build.sh 的后处理依赖**未压缩**源码
+      形态（正则匹配 `import.meta.require`、`^import …`），开 minify 需先
+      重构后处理，别直接加 flag。
+
+---
+
 ## 2026-09-13 — M5 iOS 真机跑通（自测成功）+ 三个真机 bug 复盘 ✅
 
 **成果**：iPhone SE（iOS 26.5.2）上 pi-mobile 完整跑起来 —— `libskal.dylib`

@@ -60,6 +60,21 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.1.0
         CFBundleVersion: "0.1.0"
+        # ── M6 系统能力的用途描述 ─────────────────────────────────
+        # iOS 强制要求：访问对应 API 前若缺 key，不是返回错误而是**直接崩溃**。
+        # 文案原则：说清「agent 拿它做什么」，不是「我们需要此权限」——
+        # 审核会读这段，用户也在系统弹窗里看到它。
+        #
+        # 已在用（第一批）：定位。
+        NSLocationWhenInUseUsageDescription: pi 需要你的位置，以便查询本地天气、通勤时间和附近信息。
+        # 第一批 1b（日历/通讯录/照片）将用；先声明避免插件落地时漏 key 而崩。
+        # TODO(1b)：iOS 17+ 读写日历改由 NSCalendarsFullAccessUsageDescription /
+        #   NSCalendarsWriteOnlyAccessUsageDescription 控制，需实测确认是否两个都要。
+        NSCalendarsUsageDescription: pi 需要读取日历，以便回答「今天有什么安排」并帮你创建事件。
+        NSContactsUsageDescription: pi 需要读取通讯录，以便在你要求「给某某发消息」时找到对应联系人。
+        NSPhotoLibraryUsageDescription: pi 需要访问照片，以便按你的要求查找、整理或复制图片到工作区。
+        # 批次 2（提醒事项/蓝牙）落地时再加：NSRemindersUsageDescription、
+        #   NSBluetoothAlwaysUsageDescription —— 未实现的权限不提前声明。
     entitlements:
       path: pi-mobile_iOS/pi-mobile_iOS.entitlements
     scheme:

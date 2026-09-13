@@ -7,6 +7,24 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- M6 系统能力：定位（第一批）。
+         ACCESS_COARSE_LOCATION 是 Android 12+ 的强制兼容项：只声明 FINE
+         时，系统弹窗会忽略「仅大致位置」选项，用户拒绝精确定位后就彻底没有
+         位置可用。两个都声明才能让用户在两种精度间选择。 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!--
+      M6 后续批次在此追加（落地时同步开对应能力，不提前声明无关权限）：
+      · 1b 日历：READ_CALENDAR / WRITE_CALENDAR
+      · 1b 通讯录：READ_CONTACTS（只看不写，不申请 WRITE_CONTACTS）
+      · 1b 照片：READ_MEDIA_IMAGES（Android 13+）/
+        READ_EXTERNAL_STORAGE（maxSdkVersion=32）
+      · 2 提醒事项：SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM
+      · 2 蓝牙：BLUETOOTH_SCAN / BLUETOOTH_CONNECT（API 31+）
+      · 4 无障碍：BIND_ACCESSIBILITY_SERVICE（属受限制权限，见
+        docs/PROGRESS.md 的安全模型讨论）
+    -->
+
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 

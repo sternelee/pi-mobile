@@ -305,6 +305,36 @@ function App() {
   const [settingsView, setSettingsView] = createSignal<
     "providers" | "provider" | "mcp" | "skills" | "agent"
   >("providers");
+  // M6 系统能力：能力清单 + 权限态（Rust 侧 native::status 为单一真源）
+  type NativeCapability = {
+    id: string;
+    title: string;
+    detail: string;
+    tools: string[];
+    needsPermission: boolean;
+    permission: "granted" | "denied" | "prompt" | "unknown";
+    supported: boolean;
+  };
+  const [nativeCaps, setNativeCaps] = createSignal<NativeCapability[]>([]);
+  const [nativeErr, setNativeErr] = createSignal("");
+  async function refreshNativeCaps() {
+    try {
+      const v = await invoke<{ capabilities: NativeCapability[] }>("native_capabilities");
+      setNativeCaps(v.capabilities ?? []);
+      setNativeErr("");
+    } catch (e) {
+      setNativeErr(String(e));
+    }
+  }
+  async function requestNativePermission(cap: string) {
+    try {
+      await invoke("native_request_permission", { capability: cap });
+    } catch (e) {
+      push({ role: "status", text: `permission request failed: ${e}` });
+    }
+    // 系统弹窗是异步的，留一点时间让用户在弹窗上作答后再拉状态
+    setTimeout(() => void refreshNativeCaps(), 600);
+  }
   // 审批策略（write 基线 ask/auto）——Agent 设置页的开关
   const [approvalPolicy, setApprovalPolicy] = createSignal<"ask" | "auto">("ask");
   const setApprovalPolicyPersist = async (next: "ask" | "auto") => {
@@ -1850,6 +1880,8 @@ function App() {
                 invoke<string>("approval_policy_get")
                   .then((p) => setApprovalPolicy(p === "auto" ? "auto" : "ask"))
                   .catch(() => {});
+                // 设备能力清单（含权限态）与审批策略同页，一起拉
+                void refreshNativeCaps();
               }}
             >
               Agent
@@ -2156,33 +2188,87 @@ function App() {
           </Show>
 
           <Show when={settingsView() === "agent"}>
-            <div class="settings-section-title">Agent behavior</div>
-            <div class="settings-subtitle">
-              Approval gates protect the on-device workspace. MCP tools always
-              ask regardless of this setting.
-            </div>
-            <div class="item-card flex items-center justify-between gap-3">
-              <div>
-                <div class="item-title">Approve file changes</div>
+            <div class="-mx-1 flex-1 overflow-y-auto px-1">
+              <div class="settings-section-title">Agent behavior</div>
+              <div class="settings-subtitle">
+                Approval gates protect the on-device workspace. MCP tools always
+                ask regardless of this setting.
+              </div>
+              <div class="item-card flex items-center justify-between gap-3">
+                <div>
+                  <div class="item-title">Approve file changes</div>
+                  <div class="item-sub">
+                    {approvalPolicy() === "ask"
+                      ? "write / edit / mkdir ask before running"
+                      : "write / edit / mkdir run without asking"}
+                  </div>
+                </div>
+                <ToggleSwitch
+                  on={approvalPolicy() === "ask"}
+                  onChange={(next) => void setApprovalPolicyPersist(next ? "ask" : "auto")}
+                />
+              </div>
+              <div class="item-card">
+                <div class="item-title">Never approved without asking</div>
                 <div class="item-sub">
-                  {approvalPolicy() === "ask"
-                    ? "write / edit / mkdir ask before running"
-                    : "write / edit / mkdir run without asking"}
+                  bash-style command execution does not exist in this build — the
+                  agent can only touch the sandboxed workspace.
                 </div>
               </div>
-              <ToggleSwitch
-                on={approvalPolicy() === "ask"}
-                onChange={(next) => void setApprovalPolicyPersist(next ? "ask" : "auto")}
-              />
-            </div>
-            <div class="item-card">
-              <div class="item-title">Never approved without asking</div>
-              <div class="item-sub">
-                bash-style command execution does not exist in this build — the
-                agent can only touch the sandboxed workspace.
+
+              {/* 设备能力并入本页：审批策略管的是「工作区内的文件改动」，
+                  设备能力管的是「工作区外的真实用户数据」—— 两者都是 agent
+                  的权限边界，放同一页才不会让用户以为还有第二个开关组。
+                  清单与权限态的单一真源是 Rust 侧 native::CAPABILITIES。 */}
+              <div class="settings-section-title">Device access</div>
+              <div class="settings-subtitle">
+                What the agent can reach outside the sandboxed workspace. Reading
+                needs no prompt; anything that changes device state still asks.
+              </div>
+              <Show when={nativeErr()}>
+                <div class="item-card">
+                  <div class="item-title">Could not load capabilities</div>
+                  <div class="item-sub">{nativeErr()}</div>
+                </div>
+              </Show>
+              <For each={nativeCaps()}>
+                {(cap) => (
+                  <div class="item-card flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                      <div class="item-title">
+                        {cap.title}
+                        <span class="item-sub"> · {cap.tools.join(", ")}</span>
+                      </div>
+                      <div class="item-sub">{cap.detail}</div>
+                      <Show when={!cap.supported}>
+                        <div class="item-sub">Not available on this platform</div>
+                      </Show>
+                    </div>
+                    <Show
+                      when={cap.supported && cap.needsPermission && cap.permission !== "granted"}
+                      fallback={
+                        <span class="item-sub">
+                          {cap.permission === "granted" ? "Allowed" : "—"}
+                        </span>
+                      }
+                    >
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        class="h-7 text-xs"
+                        onClick={() => void requestNativePermission(cap.id)}
+                      >
+                        {cap.permission === "denied" ? "Open Settings" : "Allow"}
+                      </Button>
+                    </Show>
+                  </div>
+                )}
+              </For>
+              <div class="settings-footer">
+                The agent never sends your location, clipboard or contacts
+                anywhere on its own — only to the model when a tool call reads it.
               </div>
             </div>
-            <div class="settings-footer">pi-mobile · sessions stay on this device</div>
           </Show>
         </SheetContent>
       </Sheet>

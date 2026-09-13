@@ -791,6 +791,24 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
                 }
             }
         }
+        // M6：系统原生能力（剪贴板/通知/定位/天气）。与 `tool` 分通道的原因：
+        // `tool` 是 workspace jail 内的文件操作，本通道读的是真实用户数据
+        // （位置、剪贴板），两套信任模型不混。
+        "native" => {
+            let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            logcat(&format!("hostcall native: {name} args={}", args));
+            match crate::native::tool(name, &args) {
+                Ok(text) => {
+                    logcat(&format!("hostcall native: {name} ok ({} bytes)", text.len()));
+                    serde_json::json!({ "text": text })
+                }
+                Err(e) => {
+                    logcat(&format!("hostcall native: {name} err: {e}"));
+                    serde_json::json!({ "error": e })
+                }
+            }
+        }
         "creds_get" => {
             let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
             match creds_get(provider) {

@@ -7,6 +7,7 @@ mod http_tool;
 mod keepalive;
 mod oauth;
 mod mcp;
+mod native;
 mod pi_bun;
 mod sessions;
 mod skills;
@@ -248,6 +249,36 @@ async fn pi_call_global(fn_name: String, arg: String) -> Result<String, String> 
         .map_err(|e| format!("join: {e}"))?
 }
 
+// ── M6：系统原生能力（UI 侧）──────────────────────────────────────
+//
+// agent 工具侧走 hostcall `native`（loopback.rs，每条连接独立线程，安全）；
+// UI 侧走这两个命令。
+//
+// ⚠️ 两个命令**必须** async + spawn_blocking，不能写成同步命令：
+// Tauri 的同步命令在宿主线程上执行，而插件的 `run_mobile_plugin` 是阻塞的
+// —— 它等到原生侧回调才返回。iOS 上 `requestWhenInUseAuthorization` 恰好
+// 又必须回主队列才能弹窗（插件 Swift 里就是 `DispatchQueue.main.async`）：
+// 同步命令占着主线程等回复、弹窗等主线程 → 死锁，实测「点 Allow 整屏卡死」。
+// CLLocationManager 在 .notDetermined 时还会把 invoke 挂起直到用户作答，
+// 阻塞窗口不是一个瞬间。
+// 这与 `pi_bun_smoke` 的纪律一致：任何同步阻塞调用都不得占主线程。
+
+/// 能力清单 + 各自权限态（设置页展示用）。
+#[tauri::command]
+async fn native_capabilities() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(native::status)
+        .await
+        .map_err(|e| format!("join: {e}"))
+}
+
+/// 请求某项能力的系统权限（弹系统窗，用户作答前一直挂着）。
+#[tauri::command]
+async fn native_request_permission(capability: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || native::request(&capability))
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
 #[tauri::command]
 fn goal_set(app: tauri::AppHandle, objective: String) -> Result<(), String> {
     let dir = app_data_dir(&app)?;
@@ -336,6 +367,11 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
+        // M6 系统能力：插件把 Android JNI / iOS ObjC 管线封装在各自原生侧，
+        // Rust 只调 run_mobile_plugin —— 不会重蹈 keepalive.rs 裸 JNI 覆辙。
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_geolocation::init())
         .setup(|app| {
             // agent_event / approval_required / ask_user → WebView 事件桥。
             // oauth_open_url 同时唤起系统浏览器（provider 授权页）。
@@ -360,6 +396,11 @@ pub fn run() {
             approval::set_event_sink(emit.clone());
             ask_user::set_event_sink(emit);
 
+            // M6：native 能力层需要 AppHandle 调插件 API
+            // （ClipboardExt/NotificationExt/GeolocationExt 都实现于 Manager）。
+            // 注意：`handle` 已被上面的 emit 闭包 move 走，这里重新取一份。
+            native::set_app(app.handle().clone());
+
             // pimobile:// deep link → bundle 的 __pi_oauth_callback（oauth.rs
             // 注释：辅助回调通道；本工程 manifest 已注册 pimobile scheme）。
             use tauri_plugin_deep_link::DeepLinkExt;
@@ -383,6 +424,8 @@ pub fn run() {
             agent_status,
             agent_stop,
             agent_history,
+            native_capabilities,
+            native_request_permission,
             set_creds,
             has_creds,
             get_default_model,
