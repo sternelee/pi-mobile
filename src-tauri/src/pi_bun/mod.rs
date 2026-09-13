@@ -67,6 +67,41 @@ fn runtime_lock() -> &'static Mutex<Option<PiBunRuntime>> {
     RUNTIME.get_or_init(|| Mutex::new(None))
 }
 
+/// 日志文件路径（两个平台共用）。由 `agent_init` 在拿到 data_dir 后写入。
+///
+/// 为什么不能靠平台默认通道：
+/// * iOS：`println!` 进统一日志，但 `devicectl` 不转 stdout，
+///   `idevicesyslog` 在 CoreDevice 隧道占用 uSMux 后也连不上设备。
+/// * Android：Honor 等 ROM 会间歇性加密/丢弃任意 tag 的 logcat
+///   （本仓库早期就记过：tag 含连字符被加密成 HKS/HKE 块，改 `pibun`
+///   只能缓解）；而 `HOME` 在 Android 应用进程里不存在，早先回退到
+///   `/tmp` 根本不可写 —— 于是 Android 侧完全盲调。
+///
+/// 所以统一写到 **data_dir**（两端都是 app 可写的真实目录）：
+/// * iOS：`xcrun devicectl device copy from --domain-type appDataContainer \
+///      --domain-identifier <bundle-id> --source "Library/Application Support/
+///      com.sternelee.pi-mobile/pi-bun.log" --destination <本地>`
+/// * Android（debug 包）：`adb shell run-as com.sternelee.pi_mobile cat files/pi-bun.log`
+static LOG_PATH: OnceLock<String> = OnceLock::new();
+
+/// 由 `agent_init` 调用：把日志落到 data_dir 下。
+pub fn set_log_dir(data_dir: &str) {
+    let _ = LOG_PATH.set(format!("{data_dir}/pi-bun.log"));
+}
+
+/// 向日志文件追一行（两端共用；写失败不影响调用方）。
+fn log_to_file(line: &str) {
+    use std::io::Write;
+    let Some(path) = LOG_PATH.get() else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Android 上把消息打进 logcat（M1 出口条件要求 logcat 可见 bun 执行输出）。
 #[cfg(target_os = "android")]
 pub(crate) fn logcat(msg: &str) {
@@ -82,28 +117,13 @@ pub(crate) fn logcat(msg: &str) {
         let prio = if msg.starts_with("ERROR") { ERROR } else { INFO };
         __android_log_print(prio, tag.as_ptr(), text.as_ptr());
     }
+    log_to_file(&format!("[pi-bun] {msg}"));
 }
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn logcat(msg: &str) {
     println!("[pi-bun] {msg}");
-    // iOS 上 println 进的是统一日志，但 devicectl 拉不到、idevicesyslog 在
-    // CoreDevice 隧道占用 uSMux 后也连不上设备 —— 真机排障只剩文件这条路。
-    // 同时写 <HOME>/Documents/pi-bun.log，用
-    //   xcrun devicectl device copy from --domain-type appDataContainer \
-    //     --domain-identifier <bundle-id> --source Documents/pi-bun.log --destination <本地>
-    // 拉回。 （macOS 上 HOME 存在，同样有效，便于桌面端排障。）
-    use std::io::Write;
-    static LOG_PATH: OnceLock<String> = OnceLock::new();
-    let path = LOG_PATH.get_or_init(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        let docs = std::path::Path::new(&home).join("Documents");
-        let _ = std::fs::create_dir_all(&docs);
-        docs.join("pi-bun.log").to_string_lossy().into_owned()
-    });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "[pi-bun] {msg}");
-    }
+    log_to_file(&format!("[pi-bun] {msg}"));
 }
 
 /// 初始化（懒加载）：dlopen + create_runtime，失败原因显式返回。
@@ -254,6 +274,9 @@ fn run_probe(label: &str, script: &str, url: &str, slot: &str, budget: std::time
 
 /// 初始化 agent：配置注入 + bundle 加载（同步 kick，立即返回）。
 pub fn agent_init(data_dir: &str) -> Result<(), String> {
+    // 先立日志通道：真机排障只能靠文件（各平台 stdout/logcat 都不可靠，
+    // 缘由见 set_log_dir 注释）。之后的每条 logcat 都会落盘。
+    set_log_dir(data_dir);
     let port = loopback::start()?;
     init(data_dir)?;
     // 开发期自检：debug 构建才跑，且不得阻塞启动（最坏要等各步超时

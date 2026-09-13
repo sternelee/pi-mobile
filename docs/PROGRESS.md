@@ -107,8 +107,44 @@ plugins/pi-native/
 └── permissions/default.toml
 ```
 
+### Android 真机验证结果（1a）
+
+| 工具 | Android | 证据 |
+|------|---------|------|
+| `clipboard` write/read | ✅ | `hostcall native: clipboard ok (28/20 bytes)` |
+| `notify` | ✅ | `hostcall native: notify ok (39 bytes)` |
+| `location` | ❌ | `get_current_position: Location unavailable.`，且会间歇性挂死 30s |
+| `weather` | ❌（依赖定位） | 传播了上面的定位错误 |
+
+#### 定位为何在 Android 上坏掉（环境 + 插件缺陷叠加）
+- 权限与开关都正常：`ACCESS_FINE/COARSE_LOCATION: granted=true`、
+  `settings get secure location_mode` = 3。
+- 设备环境：`dumpsys location` 显示 `realProvider=AMAP_WIFI`（国内 ROM 用
+  高德代理网络定位），**GPS provider 不可用**，且唯一的上次位置是 21 小时前。
+- 插件实现：`LocationServices.getFusedLocationProviderClient(context)
+  .getCurrentLocation(prio, null)` —— **传了 null CancellationToken、无超时**
+  （插件文档也写明 Android 上 `timeout` 参数会被忽略）。国内 GMS 定位不可用
+  时拿不到 fix，回调既不 success 也不 failure → 永久挂起，最后被 JS 侧
+  30s hostcall 超时打断，报出无信息量的 `The operation timed out`。
+
+综合结论：Android 侧定位不能靠 Google fused provider，得自己用
+`LocationManager`（这个 ROM 会把它桥到高德代理）+ 真超时 + last-known 回退。
+这是 `plugins/pi-native`（1b 本就要建）的第一个 Android 实现。
+
+#### 顺带修掉：Android 侧一直是盲调
+Honor 的 logcat 又一次丢弃了 tag 输出（`logcat -s pibun` 只剩 1 行 ——
+笔记里记过这个 ROM 会加密/丢任意 tag），而文件通道在 Android 上也失效
+（`HOME` 在应用进程里不存在 → 回退到不可写的 `/tmp`）。
+现改为统一写 **data_dir/pi-bun.log**，两端都可靠：
+- iOS：`devicectl device copy from --domain-type appDataContainer`
+- Android：`adb shell run-as com.sternelee.pi_mobile cat pi-bun.log`
+注意 Android 上 `app_data_dir()` 返回的是 **data 根目录**（日志/`sessions`/
+`workspace`/`provider.json` 都在那里），不是 `files/`。
+
 ### 待办
-- [ ] 1a Android 真机验证（当前无设备连接，`adb devices` 为空）
+- [x] 1a iOS 真机验证（剪贴板/通知/定位/天气 全绿）
+- [ ] 1a Android 定位修复（→ `plugins/pi-native` 的 Kotlin 实现；
+      剪贴板/通知已验证可用）
 - [ ] 1b：日历 / 通讯录 / 照片 —— 自建 `plugins/pi-native`（骨架见上）
 - [ ] bundle 体积：`dist/agent.js` 已 2.94MB 且未 minify —— 对无 JIT 的
       iOS 解释器是每次冷启的解析成本。build.sh 的后处理依赖**未压缩**源码

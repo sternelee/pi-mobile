@@ -31,10 +31,15 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
     flush();
   }
 
-  // 只读类：应直接成功（定位可能因未授权而返回可读错误 —— 那也是正确行为）
+  // 只读类：应直接成功（定位可能因未授权/无可用来源而返回可读错误 —— 那也是正确行为）
   await step("location", { highAccuracy: false });
-  // 天气：不给坐标 → 走当前定位；定位不可用时应给出清晰错误
-  await step("weather", { days: 1 });
+  // 天气故意拆两步测：
+  //   1) 传明确坐标 —— 验证 Open-Meteo 通路与格式化（不依赖定位）
+  //   2) 不给坐标 —— 验证「走当前定位」的隐式依赖（定位挂了这步会跟着挂）
+  // 国内 ROM 上这两步会分道扬镳（定位无 fix，但天气本身没问题），
+  // 合成一步就看不出到底是哪个坏了。
+  await step("weather", { latitude: 22.5431, longitude: 114.0579, days: 1 }, "weather_coords");
+  await step("weather", { days: 1 }, "weather_via_location");
   // 剪贴板：写入 → 读回，验证两个方向
   await step("clipboard", { op: "write", text: "pi-mobile self-check" }, "clipboard_write");
   await step("clipboard", { op: "read" }, "clipboard_read");
