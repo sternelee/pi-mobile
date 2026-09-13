@@ -79,11 +79,37 @@ worker 线程，而被探测的 fetch/插件回调恰好靠该线程 tick），�
 `"started"`、结果增量写全局槽位、宿主轮询。统一收敛到
 `pi_bun::run_probe`，`#[cfg(debug_assertions)]` 下在后台线程跑（不阻塞启动）。
 
+### 1b 前置侦察：iOS 插件的 Swift 是怎么进的包（决定自建插件形态）
+排查时先看到的现象很容易误导：`project.pbxproj` 里**没有**任何 Swift Package
+引用，Podfile 也没有插件，`Sources/` 只有 `main.mm` —— 但
+`nm` 能查到 `_$s24tauri_plugin_geolocation10initPlugin…`、类名
+`GeolocationPlugin`。
+
+真相在 `tauri-plugin::Builder::try_build()` 的 `build/mobile.rs`：
+*iOS 分支*（`#[cfg(target_os = "macos")]`，即 macOS 主机交叉编译 iOS 时）
+调 `tauri_utils::build::link_apple_library(name, ios_path)`，把 `ios/` 下的
+Swift 包当作静态库**直接链进 Rust 产物**，同时把 `tauri-api` 拷进
+`ios/.tauri/`。所以 Swift 符号在 `libapp.a` 里，Xcode 工程保持干净。
+*Android 分支*则把 `android/` 的 `cargo:android_library_path` 交给 gradle。
+
+**结论（1b 怎么做）**：自建插件可以完全自包含，**不需要改 Xcode 工程**
+—— 与「改完 `project.yml` 要手跑 `xcodegen generate`」的现有流程也不冲突。
+需要的骨架（照 `tauri-plugin-geolocation` 抄）：
+```
+plugins/pi-native/
+├── Cargo.toml          # links = "pi-native"，build-dependencies tauri-plugin (features=["build"])
+├── build.rs            # Builder::new(COMMANDS).ios_path("ios").android_path("android").try_build()
+├── ios/Package.swift   # 依赖 ../.tauri/tauri-api，target path = "Sources"
+├── ios/Sources/*.swift # @objc Plugin 子类 + 各能力实现（EventKit/Contacts/Photos）
+├── android/build.gradle.kts  # namespace + implementation(project(":tauri-android"))
+├── android/src/main/AndroidManifest.xml
+├── android/src/main/java/…/*.kt  # @TauriPlugin + @Command + app.tauri.plugin.{Invoke,Plugin,JSObject}
+└── permissions/default.toml
+```
+
 ### 待办
 - [ ] 1a Android 真机验证（当前无设备连接，`adb devices` 为空）
-- [ ] 1b：日历 / 通讯录 / 照片 —— 需自建 Tauri 插件（EventKit +
-      Contacts + Photos / Kotlin CalendarContract + ContactsContract +
-      MediaStore），见下方「原生化 13 项能力」的批次划分
+- [ ] 1b：日历 / 通讯录 / 照片 —— 自建 `plugins/pi-native`（骨架见上）
 - [ ] bundle 体积：`dist/agent.js` 已 2.94MB 且未 minify —— 对无 JIT 的
       iOS 解释器是每次冷启的解析成本。build.sh 的后处理依赖**未压缩**源码
       形态（正则匹配 `import.meta.require`、`^import …`），开 minify 需先
