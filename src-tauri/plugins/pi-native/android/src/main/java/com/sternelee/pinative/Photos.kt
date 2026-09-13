@@ -93,35 +93,56 @@ object PhotosBridge {
         }
         val selection = if (selParts.isEmpty()) null else selParts.joinToString(" AND ")
 
+        // 用 getContentUri(VOLUME_EXTERNAL) 而不是已废弃的 EXTERNAL_CONTENT_URI：
+        // 后者在 Android 10+ 是被保留的兼容别名，某些 ROM 上可能解析到不含
+        // 全部卷的旧 URI，表现为「明明有照片却查到 0 行」。
+        val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+
         val items = JSArray()
-        try {
+        var totalSeen = 0
+        val cursor = try {
             activity.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection, selection, selArgs.toTypedArray(),
+                uri, projection, selection, selArgs.toTypedArray(),
                 "${MediaStore.Images.Media.DATE_ADDED} DESC",
-            )?.use { c ->
-                var n = 0
-                while (c.moveToNext() && n < limit) {
-                    val o = JSObject()
-                    o.put("id", c.getLong(0).toString())
-                    c.getString(1)?.let { o.put("filename", it) }
-                    // 秒 → 毫秒
-                    o.put("createdMs", c.getLong(2) * 1000)
-                    o.put("bytes", c.getLong(3))
-                    o.put("width", c.getInt(4))
-                    o.put("height", c.getInt(5))
-                    c.getString(6)?.let { o.put("mimeType", it) }
-                    items.put(o)
-                    n++
-                }
-            }
+            )
         } catch (e: Exception) {
             invoke.reject("photos query failed: ${e.message}")
             return
         }
+        // query() 返回 null 必须显式报错，不能静默给空数组 —— 那正是本项目
+        // 被坑过两次的「ok 但形状是错的」：模型会把「查询失败」当成
+        // 「相册里没有照片」，进而给出错误结论。
+        if (cursor == null) {
+            invoke.reject("photos query returned null cursor for ${uri} — provider unavailable?")
+            return
+        }
+        cursor.use { c ->
+            while (c.moveToNext()) {
+                totalSeen++
+                if (totalSeen > limit) continue
+                val o = JSObject()
+                o.put("id", c.getLong(0).toString())
+                c.getString(1)?.let { o.put("filename", it) }
+                // 秒 → 毫秒
+                o.put("createdMs", c.getLong(2) * 1000)
+                o.put("bytes", c.getLong(3))
+                o.put("width", c.getInt(4))
+                o.put("height", c.getInt(5))
+                c.getString(6)?.let { o.put("mimeType", it) }
+                items.put(o)
+            }
+        }
 
         val ret = JSObject()
         ret.put("photos", items)
+        // totalSeen 是诊断也是产品信息：能区分「相册为空」与「被 limit 截断」，
+        // 也便于判断「查询真的看到了行但没取出来」这类问题。
+        ret.put("totalSeen", totalSeen)
+        ret.put("source", uri.toString())
         invoke.resolve(ret)
     }
 

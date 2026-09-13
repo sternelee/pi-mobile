@@ -8,6 +8,8 @@
 // waitForPromise 会阻塞 VM worker 线程，fetch/插件回调都靠该线程 tick）。
 // 立即返回 "started"，结果增量写 globalThis.__nativeprobe，宿主轮询。
 globalThis.__nativeprobe = { state: "started", steps: {} };
+// 各步骤完整返回文本（不截断；不进日志）
+const fullText = {};
 
 (async () => {
   const steps = {};
@@ -28,6 +30,10 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
     } catch (e) {
       steps[key] = { ok: false, ms: Date.now() - t0, error: String(e) };
     }
+    // 完整文本另存一份（不进日志）：steps[].text 为了日志可读截断到 300 字符，
+    // 但后续步骤需要解析它拿 id —— 早期版本因此让 contacts_get 一直静默走
+    // skipped 分支，等于那一步根本没验证。
+    fullText[key] = steps[key].text ?? "";
     flush();
     return steps[key];
   }
@@ -62,7 +68,7 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
   // 没有（新机/未同步），那就跳过 get 而不是伪造 id 让这一步假失败。
   let firstId = null;
   try {
-    firstId = JSON.parse(searchRes?.text ?? "{}")?.contacts?.[0]?.id ?? null;
+    firstId = JSON.parse(fullText.contacts_search ?? "{}")?.contacts?.[0]?.id ?? null;
   } catch {}
   if (firstId) {
     await step("contacts", { op: "get", id: firstId }, "contacts_get");
@@ -80,9 +86,15 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
   // 先是被旧日志骗，再是被 ok-but-wrong-shape 骗）。宁可不报，也不报错的。
   if (photosRes?.ok) {
     try {
-      const ids = JSON.parse(photosRes.text ?? "{}")?.photos ?? [];
+      const full = JSON.parse(fullText.photos_list ?? "{}");
+      const ids = full.photos ?? [];
       if (ids.length === 0) {
-        steps.photos_note = { ok: true, ms: 0, text: "library is empty (or limited access)" };
+        // 带上 totalSeen/source：区分「真的没照片」与「查询没看到行」
+        steps.photos_note = {
+          ok: true,
+          ms: 0,
+          text: `empty: totalSeen=${full.totalSeen ?? "?"} source=${full.source ?? "?"}`,
+        };
         flush();
       }
     } catch (e) {

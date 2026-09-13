@@ -2,7 +2,46 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
-## 2026-09-13 — M6 1b 照片（只读）—— 双端实现完成，iOS 未授权路径已验证
+## 2026-09-13 — Android 验证：发现 photos_list 真 bug（加固未验证）
+
+### Android 真机 12 项自检（上一版构建）
+定位/天气×2/日历读+写/通讯录/照片/剪贴板×2/通知/权限态 全部 OK。
+其中**新验证到的**：
+```
+contacts_search  OK  68ms   {"displayName":"Sora Kasugano","id":"27"} 等真实联系人
+calendar_create  OK  42ms   {"id":"14169","calendarId":15,"timeZone":"Asia/Shanghai"}
+capabilities     OK         calendar.permission=granted contacts.permission=granted
+                            platform=android
+```
+
+### 【真 bug，待验证修复】Android photos_list 返回空数组
+设备上**确实有照片**（`content query content://media/external/images/media`
+作为 shell 能看到 _id=1022/1027/1031…），应用权限也**确实已授**
+（`READ_MEDIA_IMAGES: granted=true`），但 `photos_list` 返回
+`{"photos": []}`。
+
+根因未最终确定，已按两个最可疑点加固：
+1. `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` 在 Android 10+ 是兼容别名，
+   某些 ROM 上可能解析到不含全部卷的旧 URI → 改用
+   `getContentUri(VOLUME_EXTERNAL)`（API 29+）
+2. **`query()` 返回 null 时原本静默给出空数组** → 现在显式报错。这正是本项目
+   被坑过两次的「ok 但形状是错的」模式：模型会把「查询失败」当成「相册里没有
+   照片」，进而给出错误结论
+
+同时加了 `totalSeen` / `source` 两个字段：能区分「相册真的空」「被 limit 截断」
+「查询看到了行但没取出来」，也便于下次直接定位。
+
+**加固未验证** —— 构建安装后设备 USB 掉线（`device not found`），未跑成。
+注意：期间一度看到「应用未运行 + 日志文件为空」，我差点据此判定崩溃，
+实际是**掉线导致的假象**（后续 `adb shell getprop` 才暴露设备已不在）。
+
+### 顺带修掉一个验证盲区
+探针 `step()` 把返回文本截断到 300 字符便于日志可读，但后续步骤要解析它拿 id
+（contacts_get）→ 因为截断而 `JSON.parse` 失败 → **那一步一直静默走 skipped
+分支，等于从未真正验证过**。现在另开一个不截断、不进日志的 `fullText` 通道
+供步骤间传递。
+
+## 2026-09-13 — M6 1b 照片（只读）—— 双端实现完成，iOS 未授权路径已验证## 2026-09-13 — M6 1b 照片（只读）—— 双端实现完成，iOS 未授权路径已验证
 
 新增 `photos_list` / `photos_save` 两个工具（1b 第 1 批最后一项）。双端实现：
 iOS Photos.framework / Android MediaStore。
