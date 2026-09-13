@@ -15,4 +15,8 @@
          最小权限说明）。 -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+
+    <!-- 通讯录：只申请读权限。本插件不写通讯录 —— agent 修改用户联系人的
+         风险与收益严重不对称（误删不可逆），且没有产品需求。 -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 </manifest>

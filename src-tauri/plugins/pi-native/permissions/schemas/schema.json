@@ -307,6 +307,18 @@
           "markdownDescription": "Denies the calendar command without any pre-configured scope."
         },
         {
+          "description": "Enables the contacts command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-contacts",
+          "markdownDescription": "Enables the contacts command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the contacts command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-contacts",
+          "markdownDescription": "Denies the contacts command without any pre-configured scope."
+        },
+        {
           "description": "Enables the location command without any pre-configured scope.",
           "type": "string",
           "const": "allow-location",

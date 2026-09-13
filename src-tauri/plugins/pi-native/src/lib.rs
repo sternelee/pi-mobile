@@ -105,6 +105,30 @@ pub struct CalendarArgs {
     pub location: Option<String>,
 }
 
+/// `contacts` 命令的参数。
+///
+/// 只有读操作（`search` / `get`）—— 写通讯录不在范围内：agent 修改用户通讯录
+/// 的风险与收益严重不对称，且没有任何产品需求需要它。需要时再单独评估。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactsArgs {
+    /// "search" | "get"
+    pub op: String,
+    /// search: 姓名/昵称关键词（子串匹配，大小写不敏感）。缺省 = 按最近修改取前 N 条。
+    #[serde(default)]
+    pub query: Option<String>,
+    /// get: 联系人 id（search 结果里的 id）
+    #[serde(default)]
+    pub id: Option<String>,
+    /// 返回条数上限，默认 25。
+    ///
+    /// 通讯录是**最容易撑爆上下文**的数据源：一个号码可能关联十几条字段
+    /// （手机/工作/家庭/邮箱/地址…），几十个联系人就够把窗口填满。默认值刻意
+    /// 压得比日历低。
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
 /// 可主动请求授权的能力（触发系统弹窗）。
 ///
 /// 目前只有日历需要：定位/通知/剪贴板的授权走各自官方插件。
@@ -115,6 +139,7 @@ pub struct CalendarArgs {
 #[serde(rename_all = "lowercase")]
 pub enum PermissionKind {
     Calendar,
+    Contacts,
 }
 
 /// `requestPermission` 命令的参数。
@@ -154,6 +179,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             location,
             calendar,
+            contacts,
             permission_state,
             request_permission,
         ])
@@ -191,6 +217,19 @@ async fn location<R: Runtime>(
     use tauri::Manager;
     let pi_native = app.state::<PiNative<R>>();
     pi_native.location(args)
+}
+
+/// 读系统通讯录（只读：search / get）。
+///
+/// **必须 async**：权限弹窗与联系人库查询都可能等主线程做事。
+#[tauri::command]
+async fn contacts<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    args: ContactsArgs,
+) -> Result<Value> {
+    use tauri::Manager;
+    let pi_native = app.state::<PiNative<R>>();
+    pi_native.contacts(args)
 }
 
 /// 查询某项系统权限的当前状态。**同步、不弹窗** —— 供设置页展示，

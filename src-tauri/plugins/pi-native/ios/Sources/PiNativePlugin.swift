@@ -45,12 +45,20 @@ class PiNativePlugin: Plugin {
     CalendarBridge.handle(args, invoke)
   }
 
+  /// 读系统通讯录（只读：search / get）。实现见 Contacts.swift。
+  @objc public func contacts(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(ContactsArgs.self)
+    ContactsBridge.handle(args, invoke)
+  }
+
   /// 查询权限当前状态（同步、不弹窗）—— 设置页展示用。
   @objc public func permissionState(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(PermissionArgs.self)
     switch args.kind {
     case "calendar":
       invoke.resolve(["kind": "calendar", "state": CalendarAccess.currentState()])
+    case "contacts":
+      invoke.resolve(["kind": "contacts", "state": ContactsBridge.currentState()])
     default:
       invoke.reject("unknown permission kind '\(args.kind)'")
     }
@@ -63,6 +71,8 @@ class PiNativePlugin: Plugin {
     switch args.kind {
     case "calendar":
       CalendarAccess.requestFullAccess(invoke)
+    case "contacts":
+      ContactsBridge.requestAccess(invoke)
     default:
       invoke.reject("unknown permission kind '\(args.kind)'")
     }

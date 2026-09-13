@@ -49,6 +49,32 @@ Denies the calendar command without any pre-configured scope.
 <tr>
 <td>
 
+`pi-native:allow-contacts`
+
+</td>
+<td>
+
+Enables the contacts command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`pi-native:deny-contacts`
+
+</td>
+<td>
+
+Denies the contacts command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `pi-native:allow-location`
 
 </td>

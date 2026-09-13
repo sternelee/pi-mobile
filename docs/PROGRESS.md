@@ -2,6 +2,33 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 未授权路径已验证
+
+新增 `contacts` 工具（`op: search|get`），双端实现：iOS Contacts.framework /
+Android ContactsContract。
+
+**只读**：不支持写入。agent 误改/误删联系人是不可逆的社交损失，风险与收益
+严重不对称，且无产品需求。Android 侧也只申请 `READ_CONTACTS`。
+
+**iOS 未授权路径已验证**（真机）：`contacts_search` 9ms 快速失败 + 指引
+（"tap Allow for 通讯录 in Settings → Agent"），`contacts_get` 在无数据时
+正确跳过而不是伪造 id 让这一步假失败。
+
+### 与日历一致的纪律与两处特有处理
+- 工具**绝不主动弹权限框**（同日历的教训：弹窗会把 agent 调用挂到 JS 侧 30s 超时）
+- **iOS 18 的「部分授权」（.limited）如实报 `limited` 而不是 `granted`**：
+  报 granted 会让「查不到某人」被误读成「此人不在通讯录里」，进而给出错误结论。
+  向上折叠成 denied 让 UI 引导补全（对用户来说动作一致）
+- 默认 limit **25 比日历的 50 更低**：通讯录是最容易撑爆上下文的数据源，
+  一个号码可能关联十几条字段（手机/工作/家庭/邮箱/地址…）
+- **不取 `CNContactNoteKey`**：备注需要 `com.apple.developer.contacts.notes`
+  entitlement（免费账号拿不到），带上它会让整个 fetch 抛异常
+- **Android 走 Data 表两次查询**（先按 DISPLAY_NAME 查 contact id，再按 id 批量取
+  字段）——ContactsContract 的经典模型；`LIKE` 的 `%` 作为参数绑定而不是拼进
+  selection（避免注入与转义问题）
+- 只输出有值的字段：通讯录里大量字段是空的，全量输出会把上下文浪费在
+  `"givenName": ""` 这类噪声上
+
 ## 2026-09-13 — M6 1b 日历：Android 真机全绿 ✅（iOS 待验）
 
 新增 `calendar_list` / `calendar_create` 两个工具（`plugins/pi-native` 的

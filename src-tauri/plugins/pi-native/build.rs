@@ -14,6 +14,7 @@
 const COMMANDS: &[&str] = &[
     "location",
     "calendar",
+    "contacts",
     "permissionState",
     "requestPermission",
 ];

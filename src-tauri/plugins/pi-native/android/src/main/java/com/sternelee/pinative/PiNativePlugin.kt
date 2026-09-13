@@ -67,7 +67,9 @@ private const val FRESH_ENOUGH_MS = 120_000L // 2 分钟内的 last-known 视为
                 Manifest.permission.WRITE_CALENDAR
             ],
             alias = "calendar"
-        )
+        ),
+        // 只声明读权限：本插件不写通讯录（见 Contacts.kt 头注）
+        Permission(strings = [Manifest.permission.READ_CONTACTS], alias = "contacts")
     ]
 )
 class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
@@ -90,6 +92,7 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.getArgs()
         when (args.optString("kind", "")) {
             "calendar" -> requestPermissionForAlias("calendar", invoke, "permissionCallback")
+            "contacts" -> requestPermissionForAlias("contacts", invoke, "permissionCallback")
             else -> invoke.reject("unknown permission kind '${args.optString("kind", "")}'")
         }
     }
@@ -115,17 +118,35 @@ class PiNativePlugin(private val activity: Activity) : Plugin(activity) {
                 )
                 invoke.resolve(ret)
             }
+            "contacts" -> {
+                val ret = JSObject()
+                ret.put("kind", "contacts")
+                ret.put(
+                    "state",
+                    if (ContactsBridge.hasReadPermission(activity)) "granted" else "prompt"
+                )
+                invoke.resolve(ret)
+            }
             else -> invoke.reject("unknown permission kind '${args.optString("kind", "")}'")
         }
     }
 
     @PermissionCallback
     private fun permissionCallback(invoke: Invoke) {
-        val granted = getPermissionState("calendar") == PermissionState.GRANTED
+        // 回调不携带「本次请求的是哪个 alias」，但 invoke 里仍是最初的入参，
+        // 所以直接从它读 kind —— 比猜（或遍历所有 alias）都准确。
+        val kind = invoke.getArgs().optString("kind", "calendar")
+        val granted = getPermissionState(kind) == PermissionState.GRANTED
         val ret = JSObject()
-        ret.put("kind", "calendar")
+        ret.put("kind", kind)
         ret.put("granted", granted)
         invoke.resolve(ret)
+    }
+
+    /// 读系统通讯录（只读：search / get）。实现见 Contacts.kt。
+    @Command
+    fun contacts(invoke: Invoke) {
+        ContactsBridge.handle(activity, invoke.getArgs(), invoke)
     }
 
     /// 日历读/写（CalendarContract）。实现见 Calendar.kt。

@@ -29,6 +29,7 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
       steps[key] = { ok: false, ms: Date.now() - t0, error: String(e) };
     }
     flush();
+    return steps[key];
   }
 
   // 只读类：应直接成功（定位可能因未授权/无可用来源而返回可读错误 —— 那也是正确行为）
@@ -50,6 +51,23 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
     { title: "pi-mobile self-check", startMs: inAYear, endMs: inAYear + 3600_000 },
     "calendar_create",
   );
+
+  // 通讯录：搜索（顺带验证权限流程）。
+  // 只做 search 不做 get：get 需要真实 id，而设备上的联系人不可预期，
+  // 「搜到就顺手 get 第一个」能在有数据时顺便覆盖 get 路径，没数据也不失败。
+  const searchRes = await step("contacts", { op: "search", limit: 3 }, "contacts_search");
+  // get 需要真实 id —— 从 search 的返回里取第一个。设备上可能一个联系人都
+  // 没有（新机/未同步），那就跳过 get 而不是伪造 id 让这一步假失败。
+  let firstId = null;
+  try {
+    firstId = JSON.parse(searchRes?.text ?? "{}")?.contacts?.[0]?.id ?? null;
+  } catch {}
+  if (firstId) {
+    await step("contacts", { op: "get", id: firstId }, "contacts_get");
+  } else {
+    steps.contacts_get = { ok: true, ms: 0, text: "skipped: no contacts on device" };
+    flush();
+  }
 
   // 剪贴板：写入 → 读回，验证两个方向
   await step("clipboard", { op: "write", text: "pi-mobile self-check" }, "clipboard_write");

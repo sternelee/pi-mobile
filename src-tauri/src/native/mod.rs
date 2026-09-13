@@ -97,6 +97,14 @@ pub const CAPABILITIES: &[Capability] = &[
         needs_permission: true,
     },
     Capability {
+        id: "contacts",
+        title: "通讯录",
+        detail: "按名字找到联系人的电话/邮箱（只读，不会修改你的通讯录）",
+        tools: &["contacts"],
+        platforms: &["android", "ios"],
+        needs_permission: true,
+    },
+    Capability {
         id: "weather",
         title: "天气",
         detail: "查询当前天气与多日预报（数据来自 Open-Meteo，无需账号）",
@@ -175,6 +183,22 @@ fn permission_state(cap: &str) -> &'static str {
         // 报成 granted 会让用户以为能读、直到工具调用才失败。向上折叠成
         // "denied" 并让 UI 引导用户去系统设置补全访问 —— 对用户来说可操作
         // 的动作是一样的（去开权限）。
+        "contacts" => {
+            use tauri_plugin_pi_native::PiNativeExt;
+            match app.pi_native().permission_state(
+                tauri_plugin_pi_native::PermissionKind::Contacts,
+            ) {
+                Ok(st) => match st.state.as_str() {
+                    "granted" => "granted",
+                    "denied" => "denied",
+                    // iOS 18 的「部分授权」：能读但不完整，折叠成 denied 让 UI
+                    // 引导去补全（对用户来说动作一样：去开权限）。
+                    "limited" | "writeOnly" => "denied",
+                    _ => "prompt",
+                },
+                Err(_) => "unknown",
+            }
+        }
         "calendar" => {
             use tauri_plugin_pi_native::PiNativeExt;
             match app.pi_native().permission_state(
@@ -220,6 +244,12 @@ pub fn request(cap: &str) -> Result<Value, String> {
                 .request_permission(tauri_plugin_pi_native::PermissionKind::Calendar)
                 .map_err(|e| format!("calendar permission: {e}"))?;
         }
+        "contacts" => {
+            use tauri_plugin_pi_native::PiNativeExt;
+            app.pi_native()
+                .request_permission(tauri_plugin_pi_native::PermissionKind::Contacts)
+                .map_err(|e| format!("contacts permission: {e}"))?;
+        }
         other => return Err(format!("capability '{other}' has no requestable permission")),
     }
     Ok(json!({ "capability": cap, "permission": permission_state(cap) }))
@@ -237,6 +267,7 @@ pub fn tool(name: &str, args: &Value) -> Result<String, String> {
         "location" => location(args),
         "calendar_list" => calendar("list", args),
         "calendar_create" => calendar("create", args),
+        "contacts" => contacts(args),
         "weather" => weather(args),
         other => Err(format!("unknown native tool: {other}")),
     }
@@ -457,6 +488,36 @@ fn calendar(op: &str, args: &Value) -> Result<String, String> {
         .pi_native()
         .calendar(a)
         .map_err(|e| format!("calendar {op} failed: {e}"))?;
+    Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()))
+}
+
+// ── 通讯录 ────────────────────────────────────────────────────────────
+//
+// 只读（search/get）。写通讯录不支持 —— agent 误改/误删联系人是不可逆的
+// 社交损失，风险与收益严重不对称，且无产品需求。
+//
+// limit 默认 25（低于日历的 50）：通讯录是最容易撑爆上下文的数据源，
+// 一个号码可能关联十几条字段（手机/工作/家庭/邮箱/地址…）。
+fn contacts(args: &Value) -> Result<String, String> {
+    use tauri_plugin_pi_native::PiNativeExt;
+    let app = app()?;
+
+    let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("search");
+    if op != "search" && op != "get" {
+        return Err(format!("op must be search|get, got '{op}'"));
+    }
+
+    let a = tauri_plugin_pi_native::ContactsArgs {
+        op: op.to_string(),
+        query: args.get("query").and_then(|v| v.as_str()).map(String::from),
+        id: args.get("id").and_then(|v| v.as_str()).map(String::from),
+        limit: args.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
+    };
+
+    let result: Value = app
+        .pi_native()
+        .contacts(a)
+        .map_err(|e| format!("contacts {op} failed: {e}"))?;
     Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into()))
 }
 

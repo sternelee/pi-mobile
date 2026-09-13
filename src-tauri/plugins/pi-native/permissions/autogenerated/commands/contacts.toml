@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-contacts"
+description = "Enables the contacts command without any pre-configured scope."
+commands.allow = ["contacts"]
+
+[[permission]]
+identifier = "deny-contacts"
+description = "Denies the contacts command without any pre-configured scope."
+commands.deny = ["contacts"]

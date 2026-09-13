@@ -12,7 +12,7 @@ use tauri::{
     AppHandle, Runtime,
 };
 
-use crate::{CalendarArgs, Error, LocationArgs, PermissionKind, PermissionStatus};
+use crate::{CalendarArgs, ContactsArgs, Error, LocationArgs, PermissionKind, PermissionStatus};
 
 /// Android 插件类的完全限定名（包名 + 类名）。
 #[cfg(target_os = "android")]
@@ -56,6 +56,15 @@ impl<R: Runtime> PiNative<R> {
         let raw: Value = self
             .0
             .run_mobile_plugin("calendar", args)
+            .map_err(Error::PluginInvoke)?;
+        Ok(raw)
+    }
+
+    /// 读系统通讯录（只读）。
+    pub fn contacts(&self, args: ContactsArgs) -> crate::Result<Value> {
+        let raw: Value = self
+            .0
+            .run_mobile_plugin("contacts", args)
             .map_err(Error::PluginInvoke)?;
         Ok(raw)
     }

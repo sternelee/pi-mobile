@@ -315,6 +315,24 @@ const nativeTools = [
 		{ channel: "native", mutating: true },
 	),
 	hostTool(
+		"contacts",
+		"Contacts",
+		"Look up people in the user's system address book (READ-ONLY — this tool can never modify or delete contacts). op=search finds contacts by name substring (omit query to list the most recently updated); op=get fetches one contact by its id. Returns names, phone numbers with labels (mobile/home/work), emails, addresses and organisation. Args: {op: \"search\"|\"get\", query?, id?, limit?} (limit default 25)",
+		obj(
+			{
+				op: { type: "string", enum: ["search", "get"] },
+				query: { type: "string", description: "name substring, search only" },
+				id: { type: "string", description: "contact id from a previous search, get only" },
+				limit: { type: "number", description: "max contacts, default 25" },
+			},
+			["op"],
+		),
+		// 只读 → 自动放行。读通讯录虽敏感，但「每查一次联系人都要打断用户」
+		// 会让这个能力实际不可用；真正的边界是系统权限（用户一次性授权）
+		// 加上 UI 里的设备能力开关。
+		{ channel: "native" },
+	),
+	hostTool(
 		"weather",
 		"Weather",
 		"Get current weather plus a multi-day forecast in plain text (data from Open-Meteo, no account needed). Provide latitude+longitude, or omit both to use the device's current location. Args: {latitude?, longitude?, days?}",
