@@ -1350,6 +1350,17 @@ function App() {
     }
   };
 
+  // 顶栏标题：当前会话的标题（与侧栏同源：取最后一条消息文本）。
+  //
+  // 有意**不**退化到会话 id —— 顶栏原来显示的是 id 短码，对用户没有意义，
+  // 已按要求移除；没有消息时给「New chat」而不是一串乱码。
+  const currentSessionTitle = createMemo(() => {
+    const id = currentSession();
+    if (!id) return "pi-mobile";
+    const s = sessions().find((x) => x.id === id);
+    return (s?.lastMessage ?? "").trim() || "New chat";
+  });
+
   return (
     <main class="app">
       <header class="topbar">
@@ -1358,15 +1369,16 @@ function App() {
             <FiMenu size="1.05em" />
           </Button>
         </div>
-        <h1 class="topbar-title">pi-mobile</h1>
+        {/* 标题 = 会话标题；右侧只留 token 用量。
+            原来这里还有会话 id 短码与设置齿轮 —— id 对用户无意义、齿轮与
+            侧边栏底部的 Settings 入口重复，两者都已移除。 */}
+        <h1 class="topbar-title" title={currentSessionTitle()}>
+          {currentSessionTitle()}
+        </h1>
         <div class="topbar-meta">
           <Show when={sessionTokens() > 0}>
             <span class="tok-badge">{fmtTok(sessionTokens())}</span>
           </Show>
-          <Show when={currentSession()}>{currentSession()!.slice(0, 8)}</Show>
-          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={() => { void refreshConfigured(); setSettingsOpen(true); }} aria-label="settings">
-            <FiSettings size="1.05em" />
-          </Button>
         </div>
       </header>
 

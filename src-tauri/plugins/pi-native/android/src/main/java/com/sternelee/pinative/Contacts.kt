@@ -39,7 +39,7 @@ object ContactsBridge {
 
     fun handle(activity: Activity, args: JSObject, invoke: Invoke) {
         if (!hasReadPermission(activity)) {
-            invoke.reject("contacts permission not granted — ask the user to tap Allow for 通讯录 in Settings → Agent")
+            invoke.reject("contacts permission not granted — ask the user to tap Allow for Contacts in Settings → Agent")
             return
         }
         when (val op = args.optString("op", "search")) {

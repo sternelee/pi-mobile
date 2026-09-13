@@ -39,14 +39,14 @@ object CalendarBridge {
         when (op) {
             "list" -> {
                 if (!hasRead(activity)) {
-                    invoke.reject("calendar read permission not granted — enable it in 设置")
+                    invoke.reject("calendar read permission not granted — enable Calendar in Settings → Agent")
                     return
                 }
                 list(activity, args, invoke)
             }
             "create" -> {
                 if (!hasWrite(activity)) {
-                    invoke.reject("calendar write permission not granted — enable it in 设置")
+                    invoke.reject("calendar write permission not granted — enable Calendar in Settings → Agent")
                     return
                 }
                 create(activity, args, invoke)

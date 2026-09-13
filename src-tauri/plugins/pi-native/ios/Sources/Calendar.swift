@@ -50,7 +50,7 @@ enum CalendarError: Error, CustomStringConvertible {
 enum CalendarAccess {
   /// 权限未授时的统一指引（文案与其它能力保持一致，指向设置页的可操作位置）。
   private static let hint =
-    "calendar permission not granted — ask the user to tap Allow for 日历 in Settings → Agent"
+    "calendar permission not granted — ask the user to tap Allow for Calendar in Settings → Agent"
 
   /// 确保拿到完整读写权限。
   ///
@@ -72,7 +72,7 @@ enum CalendarAccess {
       case .writeOnly:
         // 只有写权限：读会失败。如实告知而不是返回空列表（空列表会让模型
         // 以为「用户这几天没安排」，那是错误结论）。
-        invoke.reject("calendar access is write-only — grant full access in Settings → Agent to read events")
+        invoke.reject("calendar access is write-only — grant full access to Calendar in Settings → Agent to read events")
       default:
         invoke.reject(hint)
       }

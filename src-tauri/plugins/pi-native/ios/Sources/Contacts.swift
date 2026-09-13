@@ -33,7 +33,7 @@ struct ContactsArgs: Decodable {
 
 enum ContactsBridge {
   private static let hint =
-    "contacts permission not granted — ask the user to tap Allow for 通讯录 in Settings → Agent"
+    "contacts permission not granted — ask the user to tap Allow for Contacts in Settings → Agent"
 
   private static let defaultLimit = 25
 

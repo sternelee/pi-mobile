@@ -55,7 +55,7 @@ object PhotosBridge {
 
     fun handle(activity: Activity, args: JSObject, invoke: Invoke) {
         if (!hasReadPermission(activity)) {
-            invoke.reject("photos permission not granted — ask the user to tap Allow for 照片 in Settings → Agent")
+            invoke.reject("photos permission not granted — ask the user to tap Allow for Photos in Settings → Agent")
             return
         }
         when (val op = args.optString("op", "list")) {

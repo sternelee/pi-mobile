@@ -142,6 +142,12 @@ button {
   font-weight: 650;
   letter-spacing: 0.02em;
   margin: 0;
+  /* 标题现在是会话内容（最后一条消息），可能很长 —— 单行省略，
+     否则会把右侧的 token 徽标挤出屏幕。 */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .topbar-meta {
@@ -961,6 +967,9 @@ button {
   border: 1px solid hsl(var(--border));
   border-radius: 14px;
   padding: 0.55rem 0.5rem 0.55rem 0.75rem;
+  /* 卡片之间留出竖向间距：原来紧贴在一起，相邻两张卡片的边框看起来像
+     一条粗线，既分不清条目也削弱了「独立卡片」的视觉。 */
+  margin: 0.4rem 0;
   cursor: pointer;
 }
 

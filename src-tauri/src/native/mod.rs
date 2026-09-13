@@ -66,56 +66,56 @@ pub struct Capability {
 pub const CAPABILITIES: &[Capability] = &[
     Capability {
         id: "clipboard",
-        title: "剪贴板",
-        detail: "读取你刚复制的内容，或把结果写回剪贴板",
+        title: "Clipboard",
+        detail: "Read what you just copied, or write a result back to the clipboard",
         tools: &["clipboard"],
         platforms: &["android", "ios", "desktop"],
         needs_permission: false, // iOS 读剪贴板会弹系统提示，但无 API 可预请求
     },
     Capability {
         id: "notification",
-        title: "通知",
-        detail: "在任务跑完或需要你决策时发系统通知（可定时）",
+        title: "Notifications",
+        detail: "Send a system notification when a task finishes or needs your decision",
         tools: &["notify"],
         platforms: &["android", "ios", "desktop"],
         needs_permission: true,
     },
     Capability {
         id: "location",
-        title: "定位",
-        detail: "获取当前经纬度，用于天气、通勤、附近信息",
+        title: "Location",
+        detail: "Get the current coordinates for weather, travel time and nearby info",
         tools: &["location"],
         platforms: &["android", "ios", "desktop"],
         needs_permission: true,
     },
     Capability {
         id: "calendar",
-        title: "日历",
-        detail: "读取你的日程安排，或把新事件写进系统日历（写入要你确认）",
+        title: "Calendar",
+        detail: "Read your schedule, or add events to the system calendar (writes need your approval)",
         tools: &["calendar_list", "calendar_create"],
         platforms: &["android", "ios"],
         needs_permission: true,
     },
     Capability {
         id: "contacts",
-        title: "通讯录",
-        detail: "按名字找到联系人的电话/邮箱（只读，不会修改你的通讯录）",
+        title: "Contacts",
+        detail: "Look up a contact's phone and email by name (read-only — never modifies your contacts)",
         tools: &["contacts"],
         platforms: &["android", "ios"],
         needs_permission: true,
     },
     Capability {
         id: "photos",
-        title: "照片",
-        detail: "按时间查看相册，并把选中的原图复制到工作区（不修改你的相册）",
+        title: "Photos",
+        detail: "Browse the library by time and copy a photo into the workspace (your library is never modified)",
         tools: &["photos_list", "photos_save"],
         platforms: &["android", "ios"],
         needs_permission: true,
     },
     Capability {
         id: "weather",
-        title: "天气",
-        detail: "查询当前天气与多日预报（数据来自 Open-Meteo，无需账号）",
+        title: "Weather",
+        detail: "Current conditions and a multi-day forecast (data from Open-Meteo, no account needed)",
         tools: &["weather"],
         platforms: &["android", "ios", "desktop"],
         needs_permission: false,
@@ -414,7 +414,7 @@ const LOCATION_TIMEOUT_MS: u64 = 12_000;
 
 /// 权限未授时统一的、可执行的提示文案（两平台共用，避免措辞漂移）。
 fn location_permission_hint() -> String {
-    "location permission not granted — ask the user to enable 定位 in 设置".into()
+    "location permission not granted — ask the user to enable Location in Settings → Agent".into()
 }
 
 #[cfg(target_os = "android")]

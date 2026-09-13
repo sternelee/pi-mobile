@@ -53,7 +53,7 @@ enum PhotosBridge {
   private static let maxSaveBytes = 20 * 1024 * 1024
 
   private static let hint =
-    "photos permission not granted — ask the user to tap Allow for 照片 in Settings → Agent"
+    "photos permission not granted — ask the user to tap Allow for Photos in Settings → Agent"
 
   static func currentState() -> String {
     switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
