@@ -52,12 +52,21 @@ Swift 输出（这次打印了具体行号）。
   「library is empty」，把「没授权」伪装成「相册是空的」。这类误导文案已坑过两次
   （先被旧日志骗、再被 ok-but-wrong-shape 骗），现在只在成功时才补备注。
 
-### iOS 真机（未授权状态）
+### iOS 真机 12 项全绿（授权后）
 ```
-photos_list   FAIL  13ms  photos permission not granted — ask the user to tap
-                          Allow for 照片 in Settings → Agent
+photos_list  OK  138ms  {"photos":[{"createdMs":1784262224000,
+                          "filename":"B8EABA85-…-AF543AB5D0FE.JPG","favorite":false,…}]}
 ```
-其余 11 项全绿。授权后的真实读取待验证。
+（未授权时是 13ms 快速失败 + 可执行指引。）
+
+### ✅ M6 1b 第 1 批完成 —— 最初列的 7 项全部落地
+剪贴板 · 通知 · 定位 · 天气 · 日历 · 通讯录 · 照片，**双端实现 + iOS 真机验证**。
+
+剩余：**1b 之外的批次**
+- 批次 2（iOS 专属，免费账号可验）：提醒事项（EventKit，可复用日历骨架）、蓝牙（CoreBluetooth）
+- 批次 3（需付费开发者账号）：HealthKit / HomeKit / NFC
+- 批次 4：Android 无障碍自动化
+- 欠账：Android 的 permissionState / contacts / photos 尚未上机验证
 
 ## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 真机全绿## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 真机全绿
 
