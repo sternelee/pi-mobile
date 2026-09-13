@@ -2,6 +2,66 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-13 — ⏸ 已知问题：Android photos_list 读不到相册（已记录，暂停排查）
+
+**状态**：iOS 侧 `photos_list` / `photos_save` 真机验证通过（138ms 返回真实
+照片元数据）。**Android 侧读不到照片**，根因未确定，按用户决定暂停并记录。
+当前 Android 行为：快速返回 `{"photos": [], "totalSeen": 0, "source": "..."}`
+（**不挂起** —— 中途一版改动会让它挂到 JS 侧 30s 超时，已回退）。
+
+### 已收集的证据（决定性，复现时直接用）
+
+环境：Honor MEY-AN00（`A22CVB5B14008470`），**Android 16 / API 36**。
+
+| 观测 | 结果 |
+|------|------|
+| shell 查 `content://media/external/images/media` | 能看到 **10+ 行**，`is_trashed=0`，在 `DCIM/Camera/`、`DCIM/Alipay/` |
+| 应用权限 `READ_MEDIA_IMAGES` | `granted=true` |
+| appops `READ_MEDIA_IMAGES` | `allow` |
+| 清单里另存在 `READ_MEDIA_VISUAL_USER_SELECTED` | 也是 `granted=true`（**我并未声明它**，是清单合并进来的 —— 且它是 Android 14+「部分照片访问」的权限，值得怀疑） |
+| 应用查同一 URI | **0 行**，且**不抛异常**（`totalSeen: 0`） |
+| 用户手动改成「允许访问所有照片」后重测 | **仍然 0 行** |
+
+关键机制：**MediaStore 在访问受限时是静默返回空游标，不抛 SecurityException**
+—— 所以「查得到 0 行」无法区分「真的没照片」与「被过滤」，必须靠对照实验。
+
+### 已试过且无效/有害的改动（复现时别再走一遍）
+1. `EXTERNAL_CONTENT_URI` → `getContentUri(VOLUME_EXTERNAL)`：**URI 字符串完全
+   相同**（`content://media/external/images/media`），无效
+2. `query()` 返回 null 时显式报错：有价值（防「ok 但内容错」），但本问题里
+   cursor **非 null**，只是 0 行，故不解决问题
+3. **试过 `VOLUME_EXTERNAL_PRIMARY` 并加 5 条诊断查询（含
+   `MediaStore.Files` 全表）→ 调用挂到 JS 侧 30s 超时，比原问题更糟，已回退**
+   - 教训：**诊断查询也必须是有界的**，否则诊断本身成为故障源
+
+### 下一步的候选假设（按可能性排序，复现时一次只动一个变量）
+1. **合并卷 vs 个体卷**：`VOLUME_EXTERNAL`（合并视图）在部分 ROM 上对普通应用
+   不返回行 → 试 `VOLUME_EXTERNAL_PRIMARY`，但**只做一条有界查询**
+   （`projection = arrayOf(_ID)`、`selection = null`、**不排序**），不要在同一个
+   版本里堆多条查询
+2. **`MediaStore.getExternalVolumeNames()`**：先枚举真实卷名，再针对每个卷查，
+   能直接看出「卷选择」还是「权限过滤」
+3. **Honor ROM 的额外媒体门控**：`appops` 与 `dumpsys package` 都显示已授权，
+   但国产 ROM 可能在 MediaProvider 层做额外过滤（本次 `READ_MEDIA_VISUAL_USER_SELECTED`
+   的存在很可疑 —— 应用可能被平台当成「仅选中照片」模式，而用户从未选过任何照片）
+4. **投影列**：`WIDTH`/`HEIGHT`/`DATE_ADDED` 在 API 36 上的可用性
+
+### 产品层面的欠账（与根因无关，恢复时必须一并修）
+现在 Android 上「读不到」表现为**静默返回空列表** —— 模型会据此得出「用户相册
+里没有照片」这个**错误结论**（用户实际有照片）。这与 iOS 侧已实现的 `.limited`
+如实上报是同一类问题。恢复时应当：
+- 无法确定是否读到全部时，返回明确的 `limited`/`unavailable` 标记 + 说明，
+  **而不是空列表**
+- 参考 iOS：`photos_list` 在受限时带 `limited: true` + note
+
+### 顺带修好的东西（已提交，与本问题无关）
+探针 `step()` 的 `fullText` 通道原先存的是**已截断**的值，导致 `contacts_get`
+永远解析失败并静默走 skipped —— **那一步等于从未验证过**。改为截断前先留原文。
+修复后 Android 真机首次真正验证到 `contacts_get`：
+```
+contacts_get  OK  11ms  {"contact":{"displayName":"Sora Kasugano","id":"27"}}
+```
+
 ## 2026-09-13 — Android 验证：发现 photos_list 真 bug（加固未验证）
 
 ### Android 真机 12 项自检（上一版构建）

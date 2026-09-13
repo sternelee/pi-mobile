@@ -24,16 +24,17 @@ const fullText = {};
     const t0 = Date.now();
     try {
       const r = await hostcall("native", { name, args });
+      // 先留原文再截断 —— 早期版本把**已截断**的值存进 fullText，导致依赖它的
+      // 后续步骤（contacts_get）永远解析失败并静默走 skipped，等于没验证。
+      const raw = String(r.text ?? "");
+      fullText[key] = raw;
       steps[key] = r.error
         ? { ok: false, ms: Date.now() - t0, error: String(r.error) }
-        : { ok: true, ms: Date.now() - t0, text: String(r.text ?? "").slice(0, 300) };
+        : { ok: true, ms: Date.now() - t0, text: raw.slice(0, 300) };
     } catch (e) {
       steps[key] = { ok: false, ms: Date.now() - t0, error: String(e) };
+      fullText[key] = "";
     }
-    // 完整文本另存一份（不进日志）：steps[].text 为了日志可读截断到 300 字符，
-    // 但后续步骤需要解析它拿 id —— 早期版本因此让 contacts_get 一直静默走
-    // skipped 分支，等于那一步根本没验证。
-    fullText[key] = steps[key].text ?? "";
     flush();
     return steps[key];
   }
