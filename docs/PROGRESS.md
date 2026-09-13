@@ -2,7 +2,51 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
-## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 未授权路径已验证
+## 2026-09-13 — M6 1b 通讯录（只读）✅ iOS 真机全绿
+
+**踩坑（值得单独记）：未取 formatter 所需 key → ObjC 异常 → 整个 app 崩溃**
+
+真机表现极具误导性：`contacts` 调用后日志停在 args 行，**既无成功也无失败，
+连 JS 侧 30s 超时都不触发** —— 看起来像「挂死」。
+
+排查过程与结论：
+1. 先怀疑日志被截断 → 加「日志是否真的增长」校验（发现上一轮我读的是**旧
+   记录**：数值逐字节相同。这个校验以后每次都要做）
+2. 再怀疑 Swift 没编进去 → `nm` 查 `ContactsBridge` 符号（7 个，在），排除
+3. 查系统崩溃日志目录 → 发现**多个 pi-mobile 崩溃报告**，且进程已不在运行
+   → 真相是**崩溃**不是挂起（进程已死，所以 JS 超时永不触发）
+
+崩溃栈（决定性证据）：
+```
+-[CNContactFormatter fullNameForContact:attributes:style:]
+  → -[CNContact contactType] → NSException → std::terminate → SIGTRAP
+```
+`CNContactFormatter.string(from:)` 会读 `contactType` 与姓名前后缀/拼音等
+字段，而**我手写的 keysToFetch 列表里没有** → Contacts 抛 ObjC 异常。
+**Swift 的 try/catch 抓不到 ObjC 异常**，于是穿透到 `std::terminate` 把整个
+app 带崩。
+
+修法：用官方 `CNContactFormatter.descriptorForRequiredKeys(for: .fullName)`
+（框架自己维护所需 key 集），并显式加 `CNContactTypeKey`。
+
+**这条与 keepalive.rs 的教训同源**：原生代码里的失败会杀死宿主进程，而不是
+变成可处理的错误。区别是 keepalive 那次是 Rust panic 杀线程，这次是 ObjC
+异常杀进程。防法也一样 —— 只用框架文档化的 API（descriptor / 明确的 key 集），
+不要手写看起来「差不多够」的字段列表。
+
+**修复后 iOS 真机 11 项全绿**：
+```
+contacts_search  OK  41ms  {"displayName":"啊连","id":"2CC8F90B-...","phones":[...]}
+capabilities     OK   calendar.permission=granted contacts.permission=granted
+```
+
+**已知小缺口**：探针 `step()` 把返回文本截断到 300 字符，导致 `contacts_get`
+那一步 `JSON.parse` 失败而走了 skipped 分支（产品功能没问题，是探针的限制）。
+
+### 其它实现取舍（首轮已记）
+> 以下为首次提交时记录的取舍，保留于此便于回溯。
+
+
 
 新增 `contacts` 工具（`op: search|get`），双端实现：iOS Contacts.framework /
 Android ContactsContract。

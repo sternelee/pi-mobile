@@ -39,12 +39,25 @@ enum ContactsBridge {
 
   /// 要取的字段。
   ///
-  /// 刻意**不含** `CNContactNoteKey`：备注需要
-  /// `com.apple.developer.contacts.notes` entitlement（需额外申请），
-  /// 免费账号拿不到，带上它会让整个 fetch 抛异常。
+  /// ⚠️ **`CNContactFormatter.descriptorForRequiredKeys(for:)` 是必需的**，
+  /// 不能只靠手写 key 列表。真机崩溃栈（已存档）：
+  ///   -[CNContactFormatter fullNameForContact:attributes:style:]
+  ///     → -[CNContact contactType] → NSException → std::terminate → SIGTRAP
+  /// 原因是 `CNContactFormatter.string(from:)` 会读 `contactType` 与姓名
+  /// 前后缀/拼音等字段，而手写列表里没有 → Contacts 直接抛 ObjC 异常。
+  /// **Swift 的 try/catch 抓不到 ObjC 异常**，于是它穿透到
+  /// `std::terminate`，把整个 app 带崩（不是抛错、不是挂起 —— 进程直接死，
+  /// 所以 JS 侧的超时也不会触发）。
+  /// 用官方的 descriptor 是唯一稳妥做法：它由框架自己维护所需 key 集。
+  ///
+  /// 另外刻意**不含** `CNContactNoteKey`：备注需要
+  /// `com.apple.developer.contacts.notes` entitlement（免费账号拿不到），
+  /// 带上它会让整个 fetch 抛异常。
   private static var keys: [CNKeyDescriptor] {
     [
+      CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
       CNContactIdentifierKey as CNKeyDescriptor,
+      CNContactTypeKey as CNKeyDescriptor,
       CNContactGivenNameKey as CNKeyDescriptor,
       CNContactFamilyNameKey as CNKeyDescriptor,
       CNContactMiddleNameKey as CNKeyDescriptor,
@@ -132,43 +145,22 @@ enum ContactsBridge {
     let limit = Int(args.limit ?? UInt32(defaultLimit))
     let query = args.query?.trimmingCharacters(in: .whitespaces) ?? ""
 
-    let contacts: [CNContact]
+    // **query 必填。** 早期版本在无关键词时走 `enumerateContacts` 取「最近
+    // 若干条」，真机实测**卡死**：Apple 文档明确该 API 会枚举并排序**全部**
+    // 联系人，iCloud 同步了几千条时开销极大，表现为 agent 调用挂到 JS 侧
+    // 30s 超时。`predicateForContacts(matchingName:)` 才是系统索引化的路径，
+    // 而且「按名字找一个人」本来就是通讯录工具的主要用途 —— 不做无界枚举。
     if query.isEmpty {
-      // 无关键词：《按最近修改》取前 N 条。CNContactStore 不直接支持按修改时间
-      // 排序，退化为按姓名排序取前 N —— 可预测，且不假装是「最近联系人」。
-      let req = CNContactFetchRequest(keysToFetch: keys)
-      req.sortOrder = .givenName
-      var acc: [CNContact] = []
-      try store.enumerateContacts(with: req) { c, stop in
-        acc.append(c)
-        if acc.count >= limit { stop.pointee = true }
-      }
-      contacts = acc
-    } else {
-      // 姓名匹配用 predicateForContacts(matchingName:)：系统侧做匹配，
-      // 比拉全量再自己过滤快得多，也避免把整个通讯录读进内存。
-      let pred = CNContact.predicateForContacts(matchingName: query)
-      contacts = try store.unifiedContacts(matching: pred, keysToFetch: keys)
-        .prefix(limit)
-        .map { $0 }
+      invoke.reject("contacts search requires a non-empty query (name substring)")
+      return
     }
 
-    var out: [[String: Any]] = contacts.map(encode)
-    // query 非空但姓名没命中时，补一轮备注/号码外的弱匹配意义不大；
-    // 但**机构名**很常用（「给腾讯的张三发消息」），而 matchingName 只匹配姓名，
-    // 所以再按机构名筛一遍并合并（去重）。
-    if !query.isEmpty {
-      let orgPred = CNContact.predicateForContacts(matchingName: query)
-      let orgHits = (try? store.unifiedContacts(matching: orgPred, keysToFetch: keys)) ?? []
-      let existing = Set(out.compactMap { $0["id"] as? String })
-      for c in orgHits where !existing.contains(c.identifier) {
-        if out.count >= limit { break }
-        out.append(encode(c))
-      }
-      _ = orgPred
-    }
+    let pred = CNContact.predicateForContacts(matchingName: query)
+    let contacts = try store.unifiedContacts(matching: pred, keysToFetch: keys)
+      .prefix(limit)
+      .map { $0 }
 
-    var ret: [String: Any] = ["contacts": out, "query": query]
+    var ret: [String: Any] = ["contacts": contacts.map(encode), "query": query]
     if #available(iOS 18.0, *), CNContactStore.authorizationStatus(for: .contacts) == .limited {
       // 如实告知结果可能不完整 —— 否则模型会断言「通讯录里没有这个人」
       ret["limited"] = true

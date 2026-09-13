@@ -53,6 +53,14 @@ object ContactsBridge {
         val limit = if (args.has("limit")) args.optInt("limit", DEFAULT_LIMIT) else DEFAULT_LIMIT
         val query = args.optString("query", "").trim()
 
+        // query 必填 —— 与 iOS 侧同一份契约。iOS 那边无关键词要走
+        // `enumerateContacts`（枚举全部联系人）会卡死，故废掉无界分支；
+        // Android 的无关键词排序虽然便宜，但两端行为不一致会让模型困惑。
+        if (query.isEmpty()) {
+            invoke.reject("contacts search requires a non-empty query (name substring)")
+            return
+        }
+
         val ids = ArrayList<String>()
         val names = HashMap<String, String>()
 
@@ -62,17 +70,10 @@ object ContactsBridge {
             ContactsContract.Contacts._ID,
             ContactsContract.Contacts.DISPLAY_NAME_PRIMARY,
         )
-        val (selection, selArgs) = if (query.isEmpty()) {
-            null to null
-        } else {
-            // LIKE 的 % 必须作为参数绑定，不能拼进 selection（避免注入与转义问题）
-            "${ContactsContract.Contacts.DISPLAY_NAME_PRIMARY} LIKE ?" to arrayOf("%$query%")
-        }
-        val order = if (query.isEmpty()) {
-            "${ContactsContract.Contacts.CONTACT_LAST_UPDATED_TIMESTAMP} DESC"
-        } else {
-            "${ContactsContract.Contacts.DISPLAY_NAME_PRIMARY} ASC"
-        }
+        // LIKE 的 % 必须作为参数绑定，不能拼进 selection（避免注入与转义问题）
+        val selection = "${ContactsContract.Contacts.DISPLAY_NAME_PRIMARY} LIKE ?"
+        val selArgs = arrayOf("%$query%")
+        val order = "${ContactsContract.Contacts.DISPLAY_NAME_PRIMARY} ASC"
 
         try {
             activity.contentResolver.query(uri, projection, selection, selArgs, order)?.use { c ->

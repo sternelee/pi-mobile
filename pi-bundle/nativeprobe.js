@@ -55,7 +55,9 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
   // 通讯录：搜索（顺带验证权限流程）。
   // 只做 search 不做 get：get 需要真实 id，而设备上的联系人不可预期，
   // 「搜到就顺手 get 第一个」能在有数据时顺便覆盖 get 路径，没数据也不失败。
-  const searchRes = await step("contacts", { op: "search", limit: 3 }, "contacts_search");
+  // 用一个几乎必然存在的单字关键词（中文姓氏/英文名首字母）。找不到人也是
+  // 成功（返回空数组），只有权限/参数错误才算失败。
+  const searchRes = await step("contacts", { op: "search", query: "a", limit: 3 }, "contacts_search");
   // get 需要真实 id —— 从 search 的返回里取第一个。设备上可能一个联系人都
   // 没有（新机/未同步），那就跳过 get 而不是伪造 id 让这一步假失败。
   let firstId = null;
@@ -83,11 +85,15 @@ globalThis.__nativeprobe = { state: "started", steps: {} };
   // 永远显示 Allow，用户授权后看不到状态更新。
   try {
     const caps = await hostcall("native_capabilities", {});
-    const cal = (caps.capabilities || []).find((c) => c.id === "calendar");
+    const byId = (id) => (caps.capabilities || []).find((c) => c.id === id);
+    const cal = byId("calendar");
+    const con = byId("contacts");
     steps.capabilities = {
-      ok: !!cal,
+      ok: !!cal && !!con,
       ms: 0,
-      text: `calendar.permission=${cal ? cal.permission : "?"} platform=${caps.platform}`,
+      text:
+        `calendar.permission=${cal ? cal.permission : "?"} ` +
+        `contacts.permission=${con ? con.permission : "?"} platform=${caps.platform}`,
     };
   } catch (e) {
     steps.capabilities = { ok: false, ms: 0, error: String(e) };
