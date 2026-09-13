@@ -249,8 +249,11 @@ fn run_netprobe() {
 pub fn agent_init(data_dir: &str) -> Result<(), String> {
     let port = loopback::start()?;
     init(data_dir)?;
+    // 网络探测是排障工具，不能在启动路径上阻塞：它最坏要等 4 步超时
+    // （5+8+8+8≈29s）+ 真实外网请求。丢到后台线程跑，日志照样进
+    // <HOME>/Documents/pi-bun.log。
     #[cfg(target_os = "ios")]
-    run_netprobe();
+    std::thread::spawn(run_netprobe);
 
     let workspace = format!("{data_dir}/workspace");
     std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace: {e}"))?;

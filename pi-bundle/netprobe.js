@@ -34,8 +34,12 @@ globalThis.__netprobe = { state: "started", steps: {} };
   });
 
   // 2) loopback —— 宿主 Rust 的 HTTP 桥（验证 bun 的 HTTP 客户端 + 服务端）
+  //    注意：本探测跑在后台线程，可能早于 agent_init 里的
+  //    loopback::configure()，那时 __pi_config 还没注入 → 显式报
+  //    skipped，不要让一个假失败掩盖真问题（早期版本就这么误导过）。
   await step("loopback", async () => {
     const port = globalThis.__pi_config?.port;
+    if (!port) return { skipped: "__pi_config.port not set yet (configure 未跑)" };
     const res = await fetch(`http://127.0.0.1:${port}/hostcall`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -54,6 +58,7 @@ globalThis.__netprobe = { state: "started", steps: {} };
   });
 
   // 4) 外网 HTTPS（IP → 绕过 DNS，只考 TCP + TLS + 证书）
+  //    国内网络对 1.1.1.1 常屏蔽，超时不一定意味着我们有问题。
   await step("https_ip", async () => {
     const res = await fetch("https://1.1.1.1/", {
       signal: AbortSignal.timeout(8000),
