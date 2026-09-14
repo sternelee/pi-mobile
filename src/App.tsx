@@ -96,6 +96,9 @@ type Approval = {
   tool: string;
   path: string;
   diff: string;
+  /** D14 脚本执行：用户要批准的就是这份能力清单（id）。人话说明从 Rust 的
+   *  script_capabilities 取，不在 TS 另抄一份——审批卡的意义是「所见即所授」。 */
+  capabilities?: string[];
 };
 
 type AskOption = { title: string; description?: string };
@@ -220,6 +223,25 @@ function App() {
   const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [approval, setApproval] = createSignal<Approval | null>(null);
+
+  // D14：脚本审批卡上的能力说明。**单一真源在 Rust 的 `script.rs`** —— 这里
+  // 只缓存 id → 说明的映射，绝不在 TS 另写一份说明文字：两份一旦不一致，
+  // 用户看到的就是与实际授权集不同的东西，而审批卡的全部意义是「所见即所授」。
+  const [capCatalog, setCapCatalog] = createSignal<Record<string, string>>({});
+  const loadCapCatalog = async () => {
+    if (Object.keys(capCatalog()).length) return;
+    try {
+      const c = await invoke<{ grantable: { id: string; desc: string }[] }>(
+        "script_capabilities",
+      );
+      const map: Record<string, string> = {};
+      for (const g of c.grantable ?? []) map[g.id] = g.desc;
+      setCapCatalog(map);
+    } catch {
+      // 取不到就退回显示 id：卡片仍可用 —— 绝不因为文案缺失而挡住审批。
+    }
+  };
+  const capLabel = (id: string) => capCatalog()[id] ?? id;
   const [ask, setAsk] = createSignal<AskRequest | null>(null);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
   const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
@@ -519,11 +541,13 @@ function App() {
           push({ role: "status", text: `session persist error: ${ev.error}` });
           break;
         case "approval_required":
+          void loadCapCatalog();
           setApproval({
             requestId: ev.requestId,
             tool: ev.tool,
             path: ev.path,
             diff: ev.diff ?? "",
+            capabilities: ev.capabilities ?? [],
           });
           break;
         case "ask_user":
@@ -1565,8 +1589,32 @@ function App() {
           <div class="approval">
             <div class="approval-title">
               <FiAlertTriangle size="0.95em" style={{ "vertical-align": "-0.12em" }} />{" "}
-              {a().tool} «{a().path}» — approve?
+              {/* 脚本没有 path，硬拼 «» 会变成 run_js «» —— 与之前修过的
+                  `approvalTarget` 是同一类文案 bug。脚本走单独标题。 */}
+              {a().tool === "run_js" ? "run_js — run this script?" : `${a().tool} «${a().path}» — approve?`}
             </div>
+            <Show when={(a().capabilities?.length ?? 0) > 0}>
+              <div class="cap-list">
+                <div class="cap-list-head">
+                  This script will be able to:
+                </div>
+                <For each={a().capabilities}>
+                  {(id) => (
+                    <div class="cap-row">
+                      <span class="cap-dot">•</span>
+                      <span class="cap-desc">{capLabel(id)}</span>
+                      <span class="cap-id">{id}</span>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <Show when={a().tool === "run_js" && !(a().capabilities?.length ?? 0)}>
+              {/* 空清单必须明说：否则用户会以为「卡上没写就是没风险」 */}
+              <div class="cap-list-head">
+                This script requests no device or file access.
+              </div>
+            </Show>
             <Show when={a().diff}>
               <div class="diff">
                 {a().diff.split("\n").map((line) => (
@@ -1588,9 +1636,14 @@ function App() {
               <Button variant="destructive" onClick={() => decide("deny")}>
                 Deny
               </Button>
-              <Button variant="secondary" onClick={() => decide("always")}>
-                Always
-              </Button>
+              {/* 脚本不提供 Always：D14 规定脚本的 always 只对本次生效、不降
+                  全局基线。把一个点了之后不再生效的按钮摆在那里会骗人 ——
+                  用户会以为「以后这类脚本都行」，而实际每次都会再问。 */}
+              <Show when={a().tool !== "run_js"}>
+                <Button variant="secondary" onClick={() => decide("always")}>
+                  Always
+                </Button>
+              </Show>
               <Button
                 class="bg-success text-success-foreground hover:bg-success/90"
                 onClick={() => decide("allow")}

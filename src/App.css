@@ -422,6 +422,49 @@ button {
   color: var(--text-faint);
 }
 
+/* D14 脚本审批卡的能力清单。
+   视觉上要一眼能数清「中了几项」——这是用户批准的东西本身，不是补充信息，
+   所以比 diff 更醒目（正常字号而非 mono 小字），但不用告警色（不是错误）。 */
+.cap-list {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--surface-2);
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+}
+
+.cap-list-head {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim, hsl(var(--muted-foreground)));
+  margin-bottom: 0.35rem;
+}
+
+.cap-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.cap-dot {
+  color: var(--amber);
+}
+
+.cap-desc {
+  flex: 1;
+}
+
+/* id 放右边小字：机器可核对（审计时直接对照 CONTRACTS §2.2 的清单），
+   但不抢人话说明的位置。 */
+.cap-id {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--text-faint);
+}
+
 .approval-actions {
   display: flex;
   gap: 0.5rem;

@@ -272,6 +272,18 @@ async fn native_capabilities() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("join: {e}"))
 }
 
+/// 脚本能力目录（D14）。
+///
+/// UI 用它把审批卡上的能力 id 翻成人话——**说明文字只在 `script.rs` 里写一份**。
+/// 在 TS 里另拄一张表就是「分头写」，按 D14 的说法必然漂移：那两份一旦不一，
+/// 用户看到的就是与实际授权集不同的东西，而审批卡的全部意义就在「所见即所授」。
+#[tauri::command]
+async fn script_capabilities() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(crate::script::catalog)
+        .await
+        .map_err(|e| format!("join: {e}"))
+}
+
 /// 请求某项能力的系统权限（弹系统窗，用户作答前一直挂着）。
 #[tauri::command]
 async fn native_request_permission(capability: String) -> Result<serde_json::Value, String> {
@@ -431,6 +443,7 @@ pub fn run() {
             agent_history,
             native_capabilities,
             native_request_permission,
+            script_capabilities,
             set_creds,
             has_creds,
             get_default_model,
