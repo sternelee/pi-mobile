@@ -764,6 +764,11 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// 已启动的 loopback 端口（D14：脚本 VM 要拿它去发 hostcall）。
+pub fn port() -> Option<u16> {
+    PORT.get().copied()
+}
+
 /// hostcall 入口：先做**主体判定 + 边界强制**，再进 `dispatch_inner`。
 ///
 /// D14 的第三条支撑——“边界强制在 Rust 侧”——就落在这个函数里。为什么
@@ -948,6 +953,52 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
             None => serde_json::json!({ "skills": [] }),
         },
         "http" => crate::http_tool::run(payload),
+        // D14 脚本执行（**agent 主体专用**：它不在 script.rs 的白名单里，
+        // 所以脚本自己调它会被自动拒）。走的是「授权 → 跑 → 撒销」三步，
+        // 撒销放在成败之外——漏了就是 token 泄漏给下一次运行复用。
+        "script_run" => {
+            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+            if code.is_empty() {
+                return serde_json::json!({ "error": "script_run: empty code" });
+            }
+            let wall_ms = args
+                .get("wallMs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5_000)
+                .min(60_000) as u32;
+            let needs: Vec<String> = args
+                .get("needs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // 再校一次（审批时已校过，但那是展示用的那一份；这里是真正下发前
+            // 的一道，不能依赖「UI 已经校过了」）。
+            let valid = match crate::script::validate_needs(&needs) {
+                Ok(v) => v,
+                Err(e) => return serde_json::json!({ "error": e }),
+            };
+
+            let g = crate::script::grant(&valid, Some(wall_ms as u64));
+            let out = crate::pi_bun::run_script(&g.token, code, wall_ms);
+            // 无论如何都要撒销
+            crate::script::revoke(&g.token);
+
+            match out {
+                // 结构化失败（超时/配额）也在 text 里，让模型看得见 kind
+                Ok((text, _is_error)) => serde_json::json!({
+                    "text": text,
+                    "runId": g.run_id,
+                    "capabilities": g.capabilities,
+                }),
+                Err(e) => serde_json::json!({ "error": e }),
+            }
+        }
         "agent_event" => {
             if let Some(sink) = EVENT_SINK.get() {
                 sink(&payload.to_string());

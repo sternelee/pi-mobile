@@ -377,7 +377,50 @@ const nativeTools = [
 	),
 ];
 
-const extensionTools = [askUserTool];
+// ---- D14 脚本执行：agent 自己写 JS 并运行 ----
+//
+// 定位：这是本项目**唯一的 exec 面**，所以它的授权不是「按工具名」而是「按能力
+// 集」——审批卡上展示的 capabilities 就是用户批准的东西，也是唯一被允许的授权集。
+//
+// 为什么 needs 的合法取值**不**在这里列一份清单：`script.rs::GRANTABLE` 是唯一
+// 真源（D14）。模型填错时 Rust 的 validate_needs 会把**完整合法清单**回在错误里，
+// 所以「错误信息」就是模型获取 id 的来源——在 JS 里另拄一份就是分头写，必然漂移。
+const runScriptTool = hostTool(
+	"run_js",
+	"Run JS",
+	"Run a short JavaScript snippet in an isolated sandbox and get its return value as JSON. Use this to replace many tool round-trips with one computation (parse or transform data you already fetched, date math, aggregating results). " +
+		"CAPABILITIES: the script gets NO access unless you declare it in `needs`, and every id you declare is shown to the user for approval — that approved list is the script's entire authority, so declare the minimum. " +
+		"Valid ids are deliberately not listed here (single source of truth); if you pass an unknown one the error reply lists every valid id. " +
+		"The script reaches the host only through `__pi_hostcall(method, payload)`; it has no network, no filesystem, and no access to your own tools or globals. " +
+		"Hard wall-clock limit (default 5000ms, max 60000ms): a CPU-bound loop is stopped by the engine watchdog, and a blocked I/O or never-settling promise is stopped by the wall clock — both come back as a structured {ok:false,kind} result instead of hanging. " +
+		"The return value must be JSON-serializable; bounded console output is returned alongside. " +
+		"Args: {code, needs, wallMs?}",
+	obj(
+		{
+			code: {
+				type: "string",
+				description:
+					"JavaScript to run. Its return value (or the resolved value of a returned promise) is JSON-serialized back to you.",
+			},
+			needs: {
+				type: "array",
+				items: { type: "string" },
+				description:
+					"Capability ids this script needs, shown to the user for approval (empty array = no device/file/network access).",
+			},
+			wallMs: {
+				type: "number",
+				description: "Wall-clock limit in ms (default 5000, max 60000).",
+			},
+		},
+		["code", "needs"],
+	),
+	// mutating: 让通用包装先发 approval_request（Rust 侧 SCRIPT_TOOLS 会带上
+	// capabilities 与 code 一起出卡）；channel 指向 Rust 的 script_run 通路。
+	{ channel: "script_run", mutating: true },
+);
+
+const extensionTools = [askUserTool, runScriptTool];
 
 const tools = [...coreTools, fetchTool, ...nativeTools, ...extensionTools];
 

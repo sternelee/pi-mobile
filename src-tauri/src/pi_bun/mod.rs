@@ -49,6 +49,19 @@ mod abi {
         out_is_error: *mut c_int,
     );
     pub type FreeString = unsafe extern "C" fn(s: *mut c_char);
+    /// D14：隔离脚本 runner。签名与 `patches/pi_entry.zig` 的
+    /// `pibun_run_script` 一致（用现有 free_string 释放 out_result）。
+    pub type RunScript = unsafe extern "C" fn(
+        token: *const u8,
+        token_len: usize,
+        port: u16,
+        code: *const u8,
+        code_len: usize,
+        wall_ms: u32,
+        out_result: *mut *mut u8,
+        out_result_len: *mut usize,
+        out_is_error: *mut c_int,
+    ) -> c_int;
     pub type WasReused = unsafe extern "C" fn() -> c_int;
 }
 
@@ -58,6 +71,8 @@ struct PiBunRuntime {
     handle: SkalHandle,
     evaluate: abi::Evaluate,
     free_string: abi::FreeString,
+    /// 软绑定：老产物没有这个符号时为 None（脚本能力不可用，其余功能照常）。
+    run_script: Option<abi::RunScript>,
 }
 
 static RUNTIME: OnceLock<Mutex<Option<PiBunRuntime>>> = OnceLock::new();
@@ -161,6 +176,15 @@ fn init(data_dir: &str) -> Result<(), String> {
         *lib.get(b"skal_runtime_was_reused")
             .map_err(|e| format!("symbol skal_runtime_was_reused missing: {e}"))?
     };
+    // D14 脚本执行。**软绑定**：老产物的 .o 里没有这个符号（iOS 的
+    // ios-release 对象就是旧入口编的，实测 0 次），缺了不该让整个 agent 起不来
+    // —— 只把脚本能力置为不可用，其余功能照常。
+    let run_script: Option<abi::RunScript> = unsafe {
+        lib.get(b"pibun_run_script").ok().map(|s| *s)
+    };
+    if run_script.is_none() {
+        logcat("WARN pibun_run_script missing — script execution disabled (stale build?)");
+    }
 
     // dir 非 NUL 结尾、显式传长度（skal.h 契约）
     let handle = unsafe { create(data_dir.as_ptr().cast(), data_dir.len()) };
@@ -177,8 +201,54 @@ fn init(data_dir: &str) -> Result<(), String> {
         handle,
         evaluate,
         free_string,
+        run_script,
     });
     Ok(())
+}
+
+/// D14：在隔离 VM 里跑一段 agent 自写的 JS。
+///
+/// **阻塞**到脚本结束（至多 `wall_ms` + 启动开销），不要在 Tauri 主线程调；
+/// 当前只从 loopback 的 per-connection 线程进（`thread::spawn` 出来的）。
+///
+/// 返回 `(结果 JSON, is_error)`。超时/配额这类失败由 runner 以**结构化 JSON**
+/// 回在结果里（`{"ok":false,"kind":"wall-clock-timeout",...}`），不是 Err ——
+/// 这样模型能看见失败是什么并自己改，而不是拿到一句“工具报错了”。
+pub fn run_script(token: &str, code: &str, wall_ms: u32) -> Result<(String, bool), String> {
+    let port = loopback::port().ok_or("loopback not started")?;
+    let guard = runtime_lock().lock().unwrap();
+    let rt = guard.as_ref().ok_or("runtime not initialized")?;
+    let call = rt
+        .run_script
+        .ok_or("script execution unavailable (pibun_run_script missing in this build)")?;
+
+    let mut out_result: *mut u8 = std::ptr::null_mut();
+    let mut out_len: usize = 0;
+    let mut out_is_error: c_int = 0;
+
+    let rc = unsafe {
+        call(
+            token.as_ptr(),
+            token.len(),
+            port,
+            code.as_ptr(),
+            code.len(),
+            wall_ms,
+            &mut out_result,
+            &mut out_len,
+            &mut out_is_error,
+        )
+    };
+    if rc != 0 {
+        return Err(format!("pibun_run_script failed to start (rc={rc})"));
+    }
+    if out_result.is_null() {
+        return Err("pibun_run_script returned null result".into());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(out_result, out_len) };
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    unsafe { (rt.free_string)(out_result.cast::<c_char>()) };
+    Ok((text, out_is_error != 0))
 }
 
 /// 同步求值一段 JS（在调用线程阻塞直至 JS worker 返回——必须 off main thread 调用）。

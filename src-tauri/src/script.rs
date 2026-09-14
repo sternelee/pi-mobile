@@ -43,7 +43,7 @@ pub const HOST_TOKEN_FIELD: &str = "__hostToken";
 
 /// 是否强制 host token。见模块头「一个必须靠 host token 才能堵的洞」。
 /// **Phase 3 翻成 true 之前，必须先把 bundle 的 hostcall wrapper 改好。**
-pub const REQUIRE_HOST_TOKEN: bool = false;
+pub const REQUIRE_HOST_TOKEN: bool = true;
 
 const DEFAULT_CALLS: u32 = 200;
 const DEFAULT_WALL_MS: u64 = 5_000;
