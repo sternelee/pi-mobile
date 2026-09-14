@@ -105,17 +105,20 @@ fn unified_diff(path: &str, old: &str, new: &str) -> String {
         .context_radius(2)
         .header(&format!("--- {path}"), &format!("+++ {path}"))
         .to_string();
+    truncate_card_text(&out)
+}
 
-    if out.len() > MAX_DIFF_BYTES {
-        // UTF-8 边界安全截断（中文内容几乎必然落在多字节字符中间）
-        let mut cut = MAX_DIFF_BYTES;
-        while cut > 0 && !out.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.truncate(cut);
-        out.push_str("\n… (diff truncated)");
+/// 审批卡片文本的截断上限。UTF-8 边界安全：中文内容几乎必然落在多字节
+/// 字符中间，直接 truncate 会 panic。
+fn truncate_card_text(text: &str) -> String {
+    if text.len() <= MAX_DIFF_BYTES {
+        return text.to_string();
     }
-    out
+    let mut cut = MAX_DIFF_BYTES;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n… (truncated)", &text[..cut])
 }
 
 /// 审批请求入口（loopback dispatch 调用）。非阻塞：ask 时 emit 事件并立即
@@ -142,9 +145,10 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     // 绝不会执行的事（永不可授予的能力），既白花它的注意力，又给了「批了却
     // 不生效」的错误预期。校验失败直接把可执行指引回给模型。
     let mut capabilities: Vec<String> = Vec::new();
+    let mut script_code = String::new();
     if is_script {
-        let needs: Vec<String> = payload
-            .get("args")
+        let args = payload.get("args");
+        let needs: Vec<String> = args
             .and_then(|a| a.get("needs"))
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -156,6 +160,11 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
         match crate::script::validate_needs(&needs) {
             Ok(valid) => capabilities = valid,
             Err(e) => return serde_json::json!({ "decision": "deny", "reason": e }),
+        }
+        // 审批「一个脚本」却不给看代码是没意义的——用户批的就是这段代码。
+        // 与 diff 同额截断（都是移动端卡片展示，不能让超大文本拖垮事件流）。
+        if let Some(src) = args.and_then(|a| a.get("code")).and_then(|v| v.as_str()) {
+            script_code = truncate_card_text(src);
         }
     }
 
@@ -218,9 +227,18 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
             "tool": tool,
             "path": path,
             "diff": diff,
-            // 脚本：审批卡要展示的**就是这份清单** —— 它就是用户批准的东西，
-            // 也是边界强制时唯一认的授权集（同一份数据，不分头生成）。
+            // 脚本：审批卡要展示的**就是这份清单**（id 数组）。
+            //
+            // 说明文案由 UI 经 `script_capabilities` 命令从 `script.rs::GRANTABLE`
+            // 取（单一真源）——所以这里**只发 id**，不把 desc 再嵌一份：
+            // 同一个概念两种拼法，两份一旦不一，用户看到的就是与实际授权集
+            // 不同的东西，而审批卡的全部意义就在「所见即所授」。
             "capabilities": capabilities,
+            // 脚本源码：审一个看不见的脚本没意义，用户批的就是这段代码。
+            "code": script_code,
+            // 显式标志，不让前端去硬编码工具名「run_js」（那是把
+            // SCRIPT_TOOLS 复制一份，两处必然漂移）。
+            "script": is_script,
         })
         .to_string(),
     );
@@ -387,6 +405,9 @@ mod tests {
                 .map(|v| v.as_str().unwrap())
                 .collect();
             assert_eq!(caps, vec!["fs:read", "net"]);
+            // 代码也要给用户看（审一个看不见的脚本没意义），并带 script 标志
+            assert_eq!(ev["code"], "x");
+            assert_eq!(ev["script"], true);
         }
 
         // (c) 即使基线是 auto，run_js 也必须走审批（不能因为 write 都放行了

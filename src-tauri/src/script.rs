@@ -265,6 +265,25 @@ fn deny(reason: &str, hint: &str) -> serde_json::Value {
     })
 }
 
+/// 把能力 id 展开成 `{id, desc}`。
+///
+/// ⚠️ **当前无调用方**（仅单测）：审批事件的 `capabilities` 只发 id 数组，
+/// 说明文案由 UI 经 `script_capabilities` 命令从 `GRANTABLE` 取
+/// （见 CONTRACTS §2.2）。留在这个函数是为了万一以后要把 desc 嵌进事件时，
+/// **在这里展开而不是在前端 TS 里另拄一张表** —— 两个拼法必然漂移。
+pub fn describe(caps: &[String]) -> Vec<serde_json::Value> {
+    caps.iter()
+        .map(|id| {
+            let desc = GRANTABLE
+                .iter()
+                .find(|(gid, _)| gid == id)
+                .map(|(_, d)| *d)
+                .unwrap_or("");
+            serde_json::json!({ "id": id, "desc": desc })
+        })
+        .collect()
+}
+
 /// hostcall → 所需能力。**白名单**：表里没有的一律拒绝。
 ///
 /// 用白名单而不是「先放行再排除」的原因：dispatch 每加一个 method，白名单会
@@ -532,6 +551,21 @@ mod tests {
         same_len.pop();
         same_len.push(if t.ends_with('a') { 'b' } else { 'a' });
         assert!(!host_token_valid(&same_len));
+    }
+
+    /// 展开函数本身仍要从 `GRANTABLE` 取文案（单一真源）。
+    ///
+    /// 注意：它当前只被本测试用 —— 审批事件已改为只发 id 数组，说明文案由 UI
+    /// 经 `script_capabilities` 命令取。这里同时锁住「未知 id 不 panic」：宁可
+    /// 在卡上留空，也不能因为一个拼错的能力名把整个审批流程炸掉。
+    #[test]
+    fn describe_pulls_labels_from_the_single_source() {
+        let d = describe(&["native:contacts".to_string(), "net".to_string()]);
+        assert_eq!(d[0]["id"], "native:contacts");
+        assert_eq!(d[0]["desc"], "读取通讯录");
+        assert_eq!(d[1]["desc"], "访问网络");
+        // 未知 id 不 panic（宁可在卡上留空也不炸开审批流程）
+        assert_eq!(describe(&["nope".to_string()])[0]["desc"], "");
     }
 
     #[test]

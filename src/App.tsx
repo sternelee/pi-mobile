@@ -99,6 +99,11 @@ type Approval = {
   /** D14 脚本执行：用户要批准的就是这份能力清单（id）。人话说明从 Rust 的
    *  script_capabilities 取，不在 TS 另抄一份——审批卡的意义是「所见即所授」。 */
   capabilities?: string[];
+  /** 脚本源码：审一个看不见的脚本没意义，用户批的就是这段代码。 */
+  code?: string;
+  /** 显式脚本标志：不在 TS 里硬编码工具名「run_js」（那是把 Rust 的
+   *  SCRIPT_TOOLS 另抄一份）。 */
+  script?: boolean;
 };
 
 type AskOption = { title: string; description?: string };
@@ -548,6 +553,8 @@ function App() {
             path: ev.path,
             diff: ev.diff ?? "",
             capabilities: ev.capabilities ?? [],
+            code: ev.code ?? "",
+            script: ev.script === true,
           });
           break;
         case "ask_user":
@@ -1591,7 +1598,7 @@ function App() {
               <FiAlertTriangle size="0.95em" style={{ "vertical-align": "-0.12em" }} />{" "}
               {/* 脚本没有 path，硬拼 «» 会变成 run_js «» —— 与之前修过的
                   `approvalTarget` 是同一类文案 bug。脚本走单独标题。 */}
-              {a().tool === "run_js" ? "run_js — run this script?" : `${a().tool} «${a().path}» — approve?`}
+              {a().script ? "run a script — approve?" : `${a().tool} «${a().path}» — approve?`}
             </div>
             <Show when={(a().capabilities?.length ?? 0) > 0}>
               <div class="cap-list">
@@ -1609,11 +1616,16 @@ function App() {
                 </For>
               </div>
             </Show>
-            <Show when={a().tool === "run_js" && !(a().capabilities?.length ?? 0)}>
+            <Show when={a().script && !(a().capabilities?.length ?? 0)}>
               {/* 空清单必须明说：否则用户会以为「卡上没写就是没风险」 */}
               <div class="cap-list-head">
                 This script requests no device or file access.
               </div>
+            </Show>
+            {/* D14 / §2.2 要求：用户批的是「这份能力清单 + 这段代码」，两者都
+                必须可见 —— 否则「批准」就成了一个不知道批了什么的动作。 */}
+            <Show when={a().code}>
+              <pre class="script-code">{a().code}</pre>
             </Show>
             <Show when={a().diff}>
               <div class="diff">
@@ -1639,7 +1651,7 @@ function App() {
               {/* 脚本不提供 Always：D14 规定脚本的 always 只对本次生效、不降
                   全局基线。把一个点了之后不再生效的按钮摆在那里会骗人 ——
                   用户会以为「以后这类脚本都行」，而实际每次都会再问。 */}
-              <Show when={a().tool !== "run_js"}>
+              <Show when={!a().script}>
                 <Button variant="secondary" onClick={() => decide("always")}>
                   Always
                 </Button>
