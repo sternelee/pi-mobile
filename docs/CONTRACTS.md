@@ -93,6 +93,20 @@
 **无权限 API 可预请求的能力**（如剪贴板）在 `CAPABILITIES` 里标 `needs_permission: false`；
 UI 侧的命令：`native_capabilities`（能力清单+权限态）、`native_request_permission`。
 
+**主体与授权（D14，2026-09-14 新增）**：hostcall 请求体可选带两个字段，用于区分两种**互斥**的主体——
+
+| 字段 | 主体 | 行为 |
+|------|------|------|
+| `__scriptToken` | 脚本（agent 自写的 JS，跑在独立 VM） | 走 `script::authorize` 能力表强制 |
+| `__hostToken` | agent | 校验是否本进程签发 |
+| 都不带 | —— | **现暂按 agent 处理**；`REQUIRE_HOST_TOKEN` 翻 true 后拒（见下） |
+
+**⚠️ 为什么 `/hostcall` 端点自身必须认证**：脚本 VM 是**完整 bun VM**，自带原生 `fetch`——它的 `__pi_hostcall` 不可达（spike 已证），但它可以不带 token 直接 POST 到 loopback，而 dispatch 会把「无 token」当作 agent 主体，整套授权就被绕过了。
+
+**分阶段落地**：`script.rs::REQUIRE_HOST_TOKEN` 现为 `false`（bundle 侧尚未带 `__hostToken`，现在打开会立刻打断现有 agent/probe）。**Phase 3 翻 flag 时必须与 bundle wrapper 改动同一次落地**；在那之前脚本 runner 也不存在，故此洞当前不可利用。
+
+**脚本能力清单（唯一真源：`script.rs::GRANTABLE` / `NEVER_GRANTABLE`）**：可授予 `fs:read` `fs:write` `net` `native:{contacts,photos,photos:write,calendar:read,calendar:write,location,clipboard,clipboard:write,notify,weather}`；**永不可授予**（拿到即能冒充 agent 或窃取凭证）`agent_event` `approval_request` `ask_user_register` `creds_*` `oauth_*` `mcp_config` `goal_get` `skills_config` `native_capabilities`，另加 `ping`/`log`（脚本无正当理由）。映射用**白名单**：表外的 method 自动被拒在脚本之外。
+
 ### 2.3 事件（Rust → bun，`pibun_post_event`）
 
 | type | Payload | 说明 |
