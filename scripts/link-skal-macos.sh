@@ -42,18 +42,14 @@ awk '
   > "${INPUTS_FILE}"
 echo "    $(wc -l < "${INPUTS_FILE}" | tr -d ' ') 个输入"
 
-echo "===> 2/3 导出符号表（4 个 skal_* + spike 符号）"
+echo "===> 2/3 导出符号表（4 个 skal_* + 脚本 runner）"
 SYMS="${OUT_DIR}/skal-exports.txt"
 cat > "${SYMS}" <<'EOF'
 _skal_create_runtime
 _skal_evaluate
 _skal_free_string
 _skal_runtime_was_reused
-_pibun_spike_second_vm
-_pibun_spike_time_limit
-_pibun_spike_all
-_pibun_spike_main_time_limit
-_pibun_spike_main_clear_limit
+_pibun_run_script
 EOF
 
 echo "===> 3/3 链接 dynamiclib"
@@ -65,8 +61,8 @@ SDK="$(xcrun --show-sdk-path)"
 UNSTRIPPED="${OUT_DIR}/libskal.unstripped.dylib"
 OUT="${OUT_DIR}/libskal.dylib"
 cd "${BUN_BUILD}"
-# 不加 -dead_strip：spike 符号没有内部引用者，被 strip 掉就白搭；
-# 宿主 dylib 体积大点无所谓（本地 spike 用）。
+# 不加 -dead_strip：pibun_run_script 没有内部引用者，被 strip 掉就白搭；
+# 宿主 dylib 体积大点无所谓（本地验证用）。
 "${CXX}" "@${INPUTS_FILE}" \
   -dynamiclib \
   -isysroot "${SDK}" \
@@ -76,14 +72,11 @@ cd "${BUN_BUILD}"
   -Wl,-u,_skal_evaluate \
   -Wl,-u,_skal_free_string \
   -Wl,-u,_skal_runtime_was_reused \
-  -Wl,-u,_pibun_spike_second_vm \
-  -Wl,-u,_pibun_spike_time_limit \
-  -Wl,-u,_pibun_spike_main_time_limit \
-  -Wl,-u,_pibun_spike_main_clear_limit \
+  -Wl,-u,_pibun_run_script \
   -licucore -lresolv \
   -o "${OUT}"
 
 echo "OK: ${OUT}"
 ls -la "${OUT}"
 file "${OUT}"
-nm -gU "${OUT}" | grep -E "spike|skal_" | head -12
+nm -gU "${OUT}" | grep -E "pibun_run_script|skal_" | head -12

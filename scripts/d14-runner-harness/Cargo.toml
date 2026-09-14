@@ -1,0 +1,12 @@
+[package]
+name = "d14-runner-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "d14-runner-harness"
+path = "src/main.rs"
