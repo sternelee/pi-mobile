@@ -42,8 +42,12 @@ pub const TOKEN_FIELD: &str = "__scriptToken";
 pub const HOST_TOKEN_FIELD: &str = "__hostToken";
 
 /// 是否强制 host token。见模块头「一个必须靠 host token 才能堵的洞」。
-/// **Phase 3 翻成 true 之前，必须先把 bundle 的 hostcall wrapper 改好。**
-pub const REQUIRE_HOST_TOKEN: bool = true;
+///
+/// **当前回到 `false`**：翻 true 后在真机上 agent 的 hostcall 全被拒
+/// （一次启动 23 次 `deny (bad host token)`），说明 token 没送到或对不上。
+/// 先回双路径把 app 恢复可用，靠 `dispatch` 的诊断日志定位真因。
+/// **翻 true 的前置条件：真机上诊断日志完全静默**（静默 = token 有效）。
+pub const REQUIRE_HOST_TOKEN: bool = false;
 
 const DEFAULT_CALLS: u32 = 200;
 const DEFAULT_WALL_MS: u64 = 5_000;

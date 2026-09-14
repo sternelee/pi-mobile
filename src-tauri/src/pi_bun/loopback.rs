@@ -839,17 +839,19 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             ));
             return denied;
         }
-    } else if crate::script::REQUIRE_HOST_TOKEN {
-        let ok = payload
+    } else {
+        // D14 诊断（临时）：记录 agent 请求里 host token 的状态。
+        //
+        // 判读方式：**没有日志 = token 有效对得上**。只有出问题时才会打。
+        // 为什么要分「没带」与「不匹配」：前者是 wrapper 的事（没发送），
+        // 后者是签发/传递的事（发了但对不上）——两者修法完全不同。
+        match payload
             .get(crate::script::HOST_TOKEN_FIELD)
             .and_then(|v| v.as_str())
-            .is_some_and(crate::script::host_token_valid);
-        if !ok {
-            logcat(&format!("hostcall deny (bad host token): {method}"));
-            return serde_json::json!({
-                "error": "missing or invalid host token",
-                "denied": true,
-            });
+        {
+            Some(t) if crate::script::host_token_valid(t) => {}
+            Some(_) => logcat(&format!("host token MISMATCH: {method}")),
+            None => logcat(&format!("host token ABSENT: {method}")),
         }
     }
 
