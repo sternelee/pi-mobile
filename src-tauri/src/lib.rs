@@ -10,6 +10,7 @@ mod mcp;
 mod native;
 mod pi_bun;
 mod sessions;
+mod script;
 mod skills;
 
 #[tauri::command]

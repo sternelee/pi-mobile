@@ -20,6 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 走审批的工具集（D6：Android bash 暂未注册，保持集合完整以便后续）。
 const ASK_TOOLS: &[&str] = &["write", "edit", "mkdir", "bash"];
+/// 脚本执行工具（D14）。单独一档：它**永不参与 always 全局降级**，且每次都要
+/// 把能力清单展示给用户。
+const SCRIPT_TOOLS: &[&str] = &["run_js"];
 /// diff 回传 UI 的长度上限（移动端卡片展示，防超大文件拖垮事件流）。
 const MAX_DIFF_BYTES: usize = 16 * 1024;
 
@@ -123,7 +126,9 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     // 影响（per-server 降 auto 见 D11 完整版）；ASK_TOOLS 里的宿主工具
     // （write/edit/mkdir/bash）仍走 policy 状态机。
     let is_mcp = tool.starts_with("mcp__");
+    let is_script = SCRIPT_TOOLS.contains(&tool);
     let needs_ask = is_mcp
+        || is_script
         || (ASK_TOOLS.contains(&tool)
             && POLICY
                 .get()
@@ -131,6 +136,27 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
                 .unwrap_or(true));
     if !needs_ask {
         return serde_json::json!({ "decision": "allow", "policy": "auto" });
+    }
+
+    // D14：`needs` 必须在**给用户看审批卡之前**校验。让用户去批准一件我们
+    // 绝不会执行的事（永不可授予的能力），既白花它的注意力，又给了「批了却
+    // 不生效」的错误预期。校验失败直接把可执行指引回给模型。
+    let mut capabilities: Vec<String> = Vec::new();
+    if is_script {
+        let needs: Vec<String> = payload
+            .get("args")
+            .and_then(|a| a.get("needs"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        match crate::script::validate_needs(&needs) {
+            Ok(valid) => capabilities = valid,
+            Err(e) => return serde_json::json!({ "decision": "deny", "reason": e }),
+        }
     }
 
     // write/edit：算 diff 随审批卡一起给 UI
@@ -192,6 +218,9 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
             "tool": tool,
             "path": path,
             "diff": diff,
+            // 脚本：审批卡要展示的**就是这份清单** —— 它就是用户批准的东西，
+            // 也是边界强制时唯一认的授权集（同一份数据，不分头生成）。
+            "capabilities": capabilities,
         })
         .to_string(),
     );
@@ -219,6 +248,10 @@ pub fn respond(request_id: &str, decision: &str) -> Result<(), String> {
     if decision == "always" {
         if tool.starts_with("mcp__") {
             // MCP 工具：放行本次，但不降 write 基线（per-server 粒度见 D11 完整版）
+            effective = "allow".into();
+        } else if SCRIPT_TOOLS.contains(&tool.as_str()) {
+            // D14：脚本的 always **只对本次生效**，不降全局基线。脚本的授权
+            // 语义是「这份能力清单」；把它降成基线等于永久交出任意能力。
             effective = "allow".into();
         } else {
             // “总是允许” = write 基线降为 auto 并持久化（M3 基线粒度）
@@ -315,6 +348,74 @@ mod tests {
 
         // 重复 respond 同一 id → 已消费，报错
         assert!(respond(&id, "allow").is_err());
+
+        // ── D14：脚本执行（run_js）的审批语义 ──────────────────────────
+        //
+        // 这几条断言必须**复用上面这份 harness**（configure / event_sink /
+        // resolver 全是 OnceLock，另起一个 #[test] 去抢全局单例会与本用例互踩，
+        // 表现为随机失败）。
+
+        // 前面的用例已把基线降成 auto；先显式归位——否则下面的「run_js 的
+        // always 不改动基线」就恒真了，等于没测。
+        policy_set("ask").unwrap();
+
+        // (a) needs 里带永不可授予的能力 → 必须在展示审批卡之前就拒
+        let before = seen.lock().unwrap().len();
+        let r = request(&json!({
+            "tool": "run_js",
+            "args": { "code": "x", "needs": ["native:contacts", "creds_get"] }
+        }));
+        assert_eq!(r["decision"], "deny");
+        assert!(r["reason"].as_str().unwrap().contains("can never be granted"));
+        assert_eq!(seen.lock().unwrap().len(), before, "不该弹卡");
+
+        // (b) 合法 needs → 弹卡，卡上带着**用户实际要批准的那份清单**
+        let r = request(&json!({
+            "tool": "run_js",
+            "args": { "code": "x", "needs": ["fs:read", "net"] }
+        }));
+        assert_eq!(r["pending"], true);
+        let sid = r["requestId"].as_str().unwrap().to_string();
+        {
+            let events = seen.lock().unwrap();
+            assert!(events.len() > before, "应发出 approval_required");
+            let ev: serde_json::Value = serde_json::from_str(events.last().unwrap()).unwrap();
+            let caps: Vec<&str> = ev["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert_eq!(caps, vec!["fs:read", "net"]);
+        }
+
+        // (c) 即使基线是 auto，run_js 也必须走审批（不能因为 write 都放行了
+        //     就顺带把「跑任意脚本」也放行）
+        policy_set("auto").unwrap();
+        let r = request(&json!({
+            "tool": "run_js",
+            "args": { "code": "y", "needs": [] }
+        }));
+        assert_eq!(r["pending"], true, "基线 auto 时 run_js 仍应弹卡");
+        if let Some(i) = r["requestId"].as_str() {
+            let _ = respond(i, "deny");
+        }
+
+        // (d) 关键：脚本的 always **不得**降全局基线。脚本的授权语义是「这份
+        //     能力清单」，降成基线等于永久交出任意能力。
+        policy_set("ask").unwrap();
+        respond(&sid, "always").unwrap();
+        assert_eq!(
+            POLICY.get().unwrap().lock().unwrap().write,
+            "ask",
+            "run_js 的 always 不得降全局基线"
+        );
+        // 而普通 write 仍按基线行事
+        let r = request(&json!({ "tool": "write", "args": { "path": "z", "content": "z" } }));
+        assert_eq!(r["pending"], true, "write 应仍走 ask");
+        if let Some(i) = r["requestId"].as_str() {
+            let _ = respond(i, "deny");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -733,6 +733,9 @@ pub fn start() -> Result<u16, String> {
     }
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|e| format!("loopback bind: {e}"))?;
+    // 进程级 host token：agent 主体的身份凭证。脚本 VM 拿不到它（不同 VM），
+    // 所以即便脚本自带 fetch 也无法冒充 agent（见 script.rs 模块头）。
+    crate::script::init_host_token();
     let port = listener
         .local_addr()
         .map_err(|e| format!("loopback addr: {e}"))?
@@ -761,8 +764,59 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// hostcall 分发：method → JSON 应答。M2 逐步扩充（creds_get 等）。
+/// hostcall 入口：先做**主体判定 + 边界强制**，再进 `dispatch_inner`。
+///
+/// D14 的第三条支撑——“边界强制在 Rust 侧”——就落在这个函数里。为什么
+/// 不能只在 JS 侧拦：脚本可以自己包一层 fetch 再发请求（它的 VM 是完整 bun VM，
+/// **自带原生 fetch**），唯一可信的判定点是真正持有权限的这一侧。
+///
+/// 两种主体互斥，且**认不出就拒绝**（fail-closed）：
+/// * 带 `__scriptToken` → 脚本主体，走能力表强制
+/// * 带 `__hostToken` → agent 主体（`REQUIRE_HOST_TOKEN` 打开后强制校验）
+/// * 都不带 → 暂按 agent 处理（bundle 尚未带 token）——**Phase 3 翻 flag 后
+///   这种请求会被拒**，与 bundle wrapper 改动同一次落地；在那之前脚本
+///   runner 也不存在，所以此洞当前不可利用（详见 `script.rs` 模块头）。
 fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
+    let script_token = payload
+        .get(crate::script::TOKEN_FIELD)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    if let Some(token) = &script_token {
+        if let Err(denied) = crate::script::authorize(token, method, payload) {
+            logcat(&format!(
+                "script deny: {method} {}",
+                denied.get("error").and_then(|v| v.as_str()).unwrap_or("")
+            ));
+            return denied;
+        }
+    } else if crate::script::REQUIRE_HOST_TOKEN {
+        let ok = payload
+            .get(crate::script::HOST_TOKEN_FIELD)
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::script::host_token_valid);
+        if !ok {
+            logcat(&format!("hostcall deny (bad host token): {method}"));
+            return serde_json::json!({
+                "error": "missing or invalid host token",
+                "denied": true,
+            });
+        }
+    }
+
+    let response = dispatch_inner(method, payload);
+
+    // 应答体积记账：大块数据不该把事件流/内存冲垮。
+    if let Some(token) = &script_token {
+        if let Err(denied) = crate::script::record_response(token, &response) {
+            return denied;
+        }
+    }
+    response
+}
+
+/// hostcall 分发：method → JSON 应答。M2 逐步扩充（creds_get 等）。
+fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Value {
     match method {
         "ping" => serde_json::json!({
             "pong": true,
