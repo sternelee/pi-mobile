@@ -34,11 +34,20 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 
 const LOOPBACK = `http://127.0.0.1:${globalThis.__PI_CONFIG?.port ?? 19999}`;
 
+// D14：agent 主体的身份凭证。`/hostcall` 端点自身必须认证——脚本 VM 是完整
+// bun VM、**自带原生 fetch**，可以不带任何 token 直接 POST 到 loopback；若
+// dispatch 把「无 token」当作 agent 主体，整套授权就被绕过。
+//
+// 为什么在这里读是安全的：脚本 VM 拿不到 `__PI_CONFIG`（隔离测试已证其
+// `typeof __PI_CONFIG === "undefined"`）。**绝不要**把这个值挂到任何脚本
+// 够得着的全局上——那等于把 agent 身份交给脚本。
+const HOST_TOKEN = globalThis.__PI_CONFIG?.hostToken ?? null;
+
 async function hostcall(method, payload, opts = {}) {
 	const res = await fetch(LOOPBACK + "/hostcall", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ method, payload }),
+		body: JSON.stringify({ method, payload, __hostToken: HOST_TOKEN }),
 		signal: opts.noTimeout ? undefined : AbortSignal.timeout(30_000),
 	});
 	if (!res.ok) throw new Error(`hostcall ${method}: HTTP ${res.status}`);

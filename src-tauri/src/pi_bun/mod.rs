@@ -342,6 +342,15 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     };
 
     let mut cfg = serde_json::json!({ "port": port, "dataDir": data_dir });
+    // D14：agent 主体的身份凭证。`/hostcall` 端点自身必须认证 —— 脚本 VM 是
+    // 完整 bun VM、**自带原生 fetch**，不带 token 直接 POST 就会被 dispatch
+    // 当成 agent 主体，整套授权被绕过。
+    //
+    // 安全性来源：脚本 VM 拿不到 `__PI_CONFIG`（隔离测试已证其
+    // `typeof __PI_CONFIG === "undefined"`）。**绝不要**把这个值挂到别的
+    // 全局上——那等于把 agent 身份交给脚本。
+    // init 幂等（OnceLock）：loopback::start 已调过一次，这里取的是同一个值。
+    cfg["hostToken"] = serde_json::Value::String(crate::script::init_host_token());
     // 上次保存的默认模型选择：bundle 用 pi-ai 目录解析 (provider, modelId)
     // 为完整模型对象（无选择或目录缺模型时 bundle 落回兜底模型）。
     if let Ok(raw) = std::fs::read_to_string(

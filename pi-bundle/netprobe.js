@@ -38,12 +38,20 @@ globalThis.__netprobe = { state: "started", steps: {} };
   //    loopback::configure()，那时 __pi_config 还没注入 → 显式报
   //    skipped，不要让一个假失败掩盖真问题（早期版本就这么误导过）。
   await step("loopback", async () => {
-    const port = globalThis.__pi_config?.port;
-    if (!port) return { skipped: "__pi_config.port not set yet (configure 未跑)" };
+    // 修：原本读的是 `__pi_config`（小写），而真实全局是 `__PI_CONFIG` ——
+    // 于是这一步一直在静默 skipped，从没真正测过 loopback。启动自检里的
+    // 「全绿」因此漏掉了这一项。
+    const cfg = globalThis.__PI_CONFIG;
+    const port = cfg?.port;
+    if (!port) return { skipped: "__PI_CONFIG.port not set yet" };
     const res = await fetch(`http://127.0.0.1:${port}/hostcall`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ method: "ping", payload: { from: "netprobe" } }),
+      body: JSON.stringify({
+        method: "ping",
+        payload: { from: "netprobe" },
+        __hostToken: cfg?.hostToken ?? null,
+      }),
       signal: AbortSignal.timeout(5000),
     });
     return { status: res.status };
