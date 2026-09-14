@@ -90,7 +90,9 @@ pub fn policy_set(policy: &str) -> Result<(), String> {
     if !matches!(policy, "ask" | "auto") {
         return Err(format!("invalid policy: {policy}"));
     }
-    let p = POLICY.get().ok_or_else(|| "approval not configured".to_string())?;
+    let p = POLICY
+        .get()
+        .ok_or_else(|| "approval not configured".to_string())?;
     let mut g = p.lock().unwrap();
     g.write = policy.to_string();
     save_policy(&g);
@@ -172,7 +174,11 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     let mut diff = String::new();
     let mut path = String::new();
     if let Some(args) = payload.get("args") {
-        path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").into();
+        path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into();
         let old = crate::pi_bun::loopback::read_workspace_rel(&path);
         match payload.get("tool").and_then(|v| v.as_str()) {
             Some("write") => {
@@ -190,9 +196,12 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if let Some(content) = old {
-                        if let Ok(updated) =
-                            crate::pi_bun::loopback::apply_edit(&content, old_text, new_text, replace_all)
-                        {
+                        if let Ok(updated) = crate::pi_bun::loopback::apply_edit(
+                            &content,
+                            old_text,
+                            new_text,
+                            replace_all,
+                        ) {
                             diff = unified_diff(&path, &content, &updated);
                         }
                     }
@@ -384,7 +393,10 @@ mod tests {
             "args": { "code": "x", "needs": ["native:contacts", "creds_get"] }
         }));
         assert_eq!(r["decision"], "deny");
-        assert!(r["reason"].as_str().unwrap().contains("can never be granted"));
+        assert!(r["reason"]
+            .as_str()
+            .unwrap()
+            .contains("can never be granted"));
         assert_eq!(seen.lock().unwrap().len(), before, "不该弹卡");
 
         // (b) 合法 needs → 弹卡，卡上带着**用户实际要批准的那份清单**
@@ -443,11 +455,7 @@ mod tests {
 
     #[test]
     fn unified_diff_shows_add_and_remove() {
-        let d = unified_diff(
-            "t.txt",
-            "line1\nline2\n",
-            "line1\nchanged\nline3\n",
-        );
+        let d = unified_diff("t.txt", "line1\nline2\n", "line1\nchanged\nline3\n");
         assert!(d.contains("-line2"));
         assert!(d.contains("+changed"));
         assert!(d.contains("+line3"));

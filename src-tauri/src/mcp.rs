@@ -100,10 +100,14 @@ mod tests {
         assert!(super::add(dir_s, "demo", "https://x", None, None).is_err()); // 重名
         assert!(super::add(dir_s, "bad", "ftp://x", None, None).is_err()); // 非 http(s)
         assert!(super::add(dir_s, "zero", "https://x", Some(0), None).is_err()); // 非法超时
-        assert!(
-            super::add(dir_s, "badhdr", "https://x", None, Some(serde_json::json!({"a": 1})))
-                .is_err()
-        ); // 头值必须字符串
+        assert!(super::add(
+            dir_s,
+            "badhdr",
+            "https://x",
+            None,
+            Some(serde_json::json!({"a": 1}))
+        )
+        .is_err()); // 头值必须字符串
         super::add(
             dir_s,
             "authed",

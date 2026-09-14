@@ -33,9 +33,7 @@ pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
 
 /// 路径越狱防护：限制在 workspace 内，拒绝绝对路径与 `..`。
 pub(crate) fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
-    let root = WORKSPACE_DIR
-        .get()
-        .ok_or("workspace not configured")?;
+    let root = WORKSPACE_DIR.get().ok_or("workspace not configured")?;
     if p.starts_with('/') || p.split('/').any(|seg| seg == "..") || p.contains('\\') {
         return Err(format!("path outside workspace: {p}"));
     }
@@ -90,7 +88,9 @@ fn backup_name(rel: &str, millis: u128) -> String {
 }
 
 fn backup_dir() -> Option<std::path::PathBuf> {
-    DATA_DIR.get().map(|d| std::path::Path::new(d).join("backups"))
+    DATA_DIR
+        .get()
+        .map(|d| std::path::Path::new(d).join("backups"))
 }
 
 /// 覆盖写入前保存旧内容（best-effort：备份失败不阻塞写入）。
@@ -98,7 +98,10 @@ fn backup_existing(real: &std::path::Path) {
     let (Some(dir), Some(ws)) = (backup_dir(), WORKSPACE_DIR.get()) else {
         return;
     };
-    let Ok(rel) = real.strip_prefix(ws).map(|p| p.to_string_lossy().into_owned()) else {
+    let Ok(rel) = real
+        .strip_prefix(ws)
+        .map(|p| p.to_string_lossy().into_owned())
+    else {
         return;
     };
     let millis = SystemTime::now()
@@ -114,18 +117,15 @@ fn backup_existing(real: &std::path::Path) {
 pub fn workspace_tree() -> Result<String, String> {
     let root = WORKSPACE_DIR.get().ok_or("workspace not configured")?;
     let mut out: Vec<serde_json::Value> = Vec::new();
-    fn walk(
-        dir: &std::path::Path,
-        rel: &str,
-        depth: usize,
-        out: &mut Vec<serde_json::Value>,
-    ) {
+    fn walk(dir: &std::path::Path, rel: &str, depth: usize, out: &mut Vec<serde_json::Value>) {
         const MAX_DEPTH: usize = 6;
         const MAX_ENTRIES: usize = 500;
         if depth > MAX_DEPTH || out.len() >= MAX_ENTRIES {
             return;
         }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         let mut entries: Vec<_> = rd.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
@@ -133,7 +133,11 @@ pub fn workspace_tree() -> Result<String, String> {
                 return;
             }
             let name = e.file_name().to_string_lossy().into_owned();
-            let child_rel = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
             let Ok(meta) = e.metadata() else { continue };
             let mtime = meta
                 .modified()
@@ -173,7 +177,8 @@ pub fn workspace_read(rel: &str) -> Result<String, String> {
 }
 
 /// 指定 workspace 相对路径的最新备份时间戳（无备份 → None）。
-pub fn latest_backup_millis(rel: &str) -> Option<u128> {    let dir = backup_dir()?;
+pub fn latest_backup_millis(rel: &str) -> Option<u128> {
+    let dir = backup_dir()?;
     let suffix = format!("__{}", rel.replace('/', "__"));
     let mut latest: Option<u128> = None;
     for e in std::fs::read_dir(&dir).ok()?.flatten() {
@@ -196,7 +201,10 @@ pub fn revert_workspace_file(rel: &str) -> Result<u64, String> {
     let dir = backup_dir().ok_or("backups not configured")?;
     let suffix = format!("__{}", rel.replace('/', "__"));
     let mut latest: Option<(u128, std::path::PathBuf)> = None;
-    for e in std::fs::read_dir(&dir).map_err(|e| format!("backups: {e}"))?.flatten() {
+    for e in std::fs::read_dir(&dir)
+        .map_err(|e| format!("backups: {e}"))?
+        .flatten()
+    {
         let name = e.file_name().to_string_lossy().into_owned();
         if let Some(stem) = name.strip_suffix(&suffix) {
             if let Ok(millis) = stem.trim_end_matches('_').parse::<u128>() {
@@ -257,9 +265,17 @@ mod tests {
         assert_eq!(std::fs::read_to_string(ws.join("t.txt")).unwrap(), "v1");
 
         // edit：oldText 未找到 / 多处出现须 replaceAll
-        assert!(run_tool("edit", &json!({ "path": "t.txt", "oldText": "zzz", "newText": "x" })).is_err());
+        assert!(run_tool(
+            "edit",
+            &json!({ "path": "t.txt", "oldText": "zzz", "newText": "x" })
+        )
+        .is_err());
         run_tool("write", &json!({ "path": "dup.txt", "content": "aa" })).unwrap();
-        assert!(run_tool("edit", &json!({ "path": "dup.txt", "oldText": "a", "newText": "b" })).is_err());
+        assert!(run_tool(
+            "edit",
+            &json!({ "path": "dup.txt", "oldText": "a", "newText": "b" })
+        )
+        .is_err());
         run_tool(
             "edit",
             &json!({ "path": "dup.txt", "oldText": "a", "newText": "b", "replaceAll": true }),
@@ -318,17 +334,30 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
         }
         "write" => {
             let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
-            let content = args.get("content").and_then(|v| v.as_str()).ok_or("content?")?;
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or("content?")?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
             }
             write_with_backup(&path, content)?;
-            Ok(format!("wrote {} bytes to {}", content.len(), display_rel(&path)))
+            Ok(format!(
+                "wrote {} bytes to {}",
+                content.len(),
+                display_rel(&path)
+            ))
         }
         "edit" => {
             let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
-            let old = args.get("oldText").and_then(|v| v.as_str()).ok_or("oldText?")?;
-            let new = args.get("newText").and_then(|v| v.as_str()).ok_or("newText?")?;
+            let old = args
+                .get("oldText")
+                .and_then(|v| v.as_str())
+                .ok_or("oldText?")?;
+            let new = args
+                .get("newText")
+                .and_then(|v| v.as_str())
+                .ok_or("newText?")?;
             let replace_all = args
                 .get("replaceAll")
                 .and_then(|v| v.as_bool())
@@ -358,7 +387,11 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                     e.file_name().to_string_lossy()
                 ));
             }
-            Ok(if out.is_empty() { "(empty)".to_string() } else { out.join("\n") })
+            Ok(if out.is_empty() {
+                "(empty)".to_string()
+            } else {
+                out.join("\n")
+            })
         }
         "mkdir" => {
             let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
@@ -369,7 +402,10 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             Ok(format!("created directory {}", display_rel(&path)))
         }
         "grep" => {
-            let pattern = args.get("pattern").and_then(|v| v.as_str()).ok_or("pattern?")?;
+            let pattern = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .ok_or("pattern?")?;
             let re = regex::Regex::new(pattern).map_err(|e| format!("regex: {e}"))?;
             let base = jail_path(args.get("path").and_then(|v| v.as_str()).unwrap_or("."))?;
             let mut hits = Vec::new();
@@ -382,13 +418,27 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 if depth > 8 || hits.len() >= 200 {
                     return;
                 }
-                let Ok(rd) = std::fs::read_dir(dir) else { return };
+                let Ok(rd) = std::fs::read_dir(dir) else {
+                    return;
+                };
                 for e in rd.flatten() {
                     let p = e.path();
                     if p.is_dir() {
                         walk(&p, re, hits, depth + 1);
                     } else if p.extension().is_some_and(|x| {
-                        matches!(x.to_str(), Some("js" | "ts" | "rs" | "md" | "json" | "toml" | "txt" | "html" | "css"))
+                        matches!(
+                            x.to_str(),
+                            Some(
+                                "js" | "ts"
+                                    | "rs"
+                                    | "md"
+                                    | "json"
+                                    | "toml"
+                                    | "txt"
+                                    | "html"
+                                    | "css"
+                            )
+                        )
                     }) {
                         if let Ok(s) = std::fs::read_to_string(&p) {
                             for (i, line) in s.lines().enumerate() {
@@ -409,7 +459,11 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 }
             }
             walk(&base, &re, &mut hits, 0);
-            Ok(if hits.is_empty() { "(no matches)".into() } else { hits.join("\n") })
+            Ok(if hits.is_empty() {
+                "(no matches)".into()
+            } else {
+                hits.join("\n")
+            })
         }
         other => Err(format!("unknown tool: {other}")),
     }
@@ -522,22 +576,19 @@ fn fs_file_info(rel: &str, path: &std::path::Path, meta: std::fs::Metadata) -> s
 
 fn fs_op(payload: &serde_json::Value) -> serde_json::Value {
     let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("");
-    let path_arg =
-        |p: &serde_json::Value| -> Result<String, serde_json::Value> {
-            p.get("path")
-                .and_then(|v| v.as_str())
-                .map(strip_virtual_root)
-                .ok_or_else(|| fs_err("invalid", "path?".into()))
-        };
+    let path_arg = |p: &serde_json::Value| -> Result<String, serde_json::Value> {
+        p.get("path")
+            .and_then(|v| v.as_str())
+            .map(strip_virtual_root)
+            .ok_or_else(|| fs_err("invalid", "path?".into()))
+    };
     match op {
         "readTextFile" => {
             let rel = match path_arg(payload) {
                 Ok(r) => r,
                 Err(e) => return e,
             };
-            match fs_jail(&rel).and_then(|p| {
-                std::fs::read_to_string(&p).map_err(fs_io_err)
-            }) {
+            match fs_jail(&rel).and_then(|p| std::fs::read_to_string(&p).map_err(fs_io_err)) {
                 Ok(s) => fs_ok(serde_json::json!(s)),
                 Err(e) => e,
             }
@@ -552,9 +603,7 @@ fn fs_op(payload: &serde_json::Value) -> serde_json::Value {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(u64::MAX) as usize;
             match fs_jail(&rel).and_then(|p| std::fs::read_to_string(&p).map_err(fs_io_err)) {
-                Ok(s) => fs_ok(serde_json::json!(
-                    s.lines().take(max).collect::<Vec<_>>()
-                )),
+                Ok(s) => fs_ok(serde_json::json!(s.lines().take(max).collect::<Vec<_>>())),
                 Err(e) => e,
             }
         }
@@ -566,9 +615,7 @@ fn fs_op(payload: &serde_json::Value) -> serde_json::Value {
             let Some(content) = payload.get("content").and_then(|v| v.as_str()) else {
                 return fs_err("invalid", "content? (string)".into());
             };
-            match fs_jail(&rel)
-                .and_then(|p| std::fs::write(&p, content).map_err(fs_io_err))
-            {
+            match fs_jail(&rel).and_then(|p| std::fs::write(&p, content).map_err(fs_io_err)) {
                 Ok(()) => fs_ok(serde_json::json!(null)),
                 Err(e) => e,
             }
@@ -604,8 +651,7 @@ fn fs_op(payload: &serde_json::Value) -> serde_json::Value {
             };
             let dest = strip_virtual_root(dest);
             match fs_jail(&rel).and_then(|p| {
-                fs_jail(&dest)
-                    .and_then(|d| std::fs::rename(&p, &d).map_err(fs_io_err))
+                fs_jail(&dest).and_then(|d| std::fs::rename(&p, &d).map_err(fs_io_err))
             }) {
                 Ok(()) => fs_ok(serde_json::json!(null)),
                 Err(e) => e,
@@ -725,14 +771,12 @@ fn strip_virtual_root(p: &str) -> String {
     }
 }
 
-
 /// 启动（幂等）。返回 loopback 端口（随机，避免固定端口冲突）。
 pub fn start() -> Result<u16, String> {
     if let Some(p) = PORT.get() {
         return Ok(*p);
     }
-    let listener =
-        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("loopback bind: {e}"))?;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("loopback bind: {e}"))?;
     // 进程级 host token：agent 主体的身份凭证。脚本 VM 拿不到它（不同 VM），
     // 所以即便脚本自带 fetch 也无法冒充 agent（见 script.rs 模块头）。
     crate::script::init_host_token();
@@ -837,7 +881,10 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
         }
         "tool" => {
             let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let args = payload
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             logcat(&format!("hostcall tool: {name} args={}", args));
             match run_tool(name, &args) {
                 Ok(text) => {
@@ -855,11 +902,17 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
         // （位置、剪贴板），两套信任模型不混。
         "native" => {
             let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let args = payload
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             logcat(&format!("hostcall native: {name} args={}", args));
             match crate::native::tool(name, &args) {
                 Ok(text) => {
-                    logcat(&format!("hostcall native: {name} ok ({} bytes)", text.len()));
+                    logcat(&format!(
+                        "hostcall native: {name} ok ({} bytes)",
+                        text.len()
+                    ));
                     serde_json::json!({ "text": text })
                 }
                 Err(e) => {
@@ -873,14 +926,22 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
         // 才能自动验证「授权后状态真的更新了」。
         "native_capabilities" => crate::native::status(),
         "creds_get" => {
-            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = payload
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             match creds_get(provider) {
                 Ok(k) if !k.is_empty() => serde_json::json!({ "apiKey": k }),
-                _ => serde_json::json!({ "error": format!("no credential for provider '{provider}' — set it in the app") }),
+                _ => {
+                    serde_json::json!({ "error": format!("no credential for provider '{provider}' — set it in the app") })
+                }
             }
         }
         "creds_set" => {
-            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = payload
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let api_key = payload.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
             match creds_set(provider, api_key) {
                 Ok(()) => serde_json::json!({ "ok": true }),
@@ -915,7 +976,10 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
                             let _ = crate::oauth::wait(listener, &path, |url| {
                                 let url_j =
                                     serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into());
-                                let _ = crate::pi_bun::call_string_global("__pi_oauth_callback", &url_j);
+                                let _ = crate::pi_bun::call_string_global(
+                                    "__pi_oauth_callback",
+                                    &url_j,
+                                );
                             });
                         });
                     serde_json::json!({ "ok": true, "port": bound })
@@ -924,11 +988,17 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
             }
         }
         "creds_json_get" => {
-            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = payload
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             creds_json_get(provider)
         }
         "creds_json_set" => {
-            let provider = payload.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+            let provider = payload
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let json = payload.get("json").and_then(|v| v.as_str()).unwrap_or("");
             match creds_json_set(provider, json) {
                 Ok(()) => serde_json::json!({ "ok": true }),
@@ -945,7 +1015,9 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
             None => serde_json::json!({ "servers": [] }),
         },
         "goal_get" => match DATA_DIR.get() {
-            Some(dir) => serde_json::json!({ "objective": serde_json::from_str::<serde_json::Value>(&crate::goal::get(dir).unwrap_or_else(|_| "null".into())).unwrap_or(serde_json::Value::Null) }),
+            Some(dir) => {
+                serde_json::json!({ "objective": serde_json::from_str::<serde_json::Value>(&crate::goal::get(dir).unwrap_or_else(|_| "null".into())).unwrap_or(serde_json::Value::Null) })
+            }
             None => serde_json::json!({ "objective": null }),
         },
         "skills_config" => match DATA_DIR.get() {
@@ -957,7 +1029,10 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
         // 所以脚本自己调它会被自动拒）。走的是「授权 → 跑 → 撒销」三步，
         // 撒销放在成败之外——漏了就是 token 泄漏给下一次运行复用。
         "script_run" => {
-            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let args = payload
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
             if code.is_empty() {
                 return serde_json::json!({ "error": "script_run: empty code" });
@@ -1065,7 +1140,8 @@ fn handle_conn(mut stream: TcpStream) {
     // 但 JS 侧可被模型影响——纵深防御）
     const MAX_BODY: usize = 8 * 1024 * 1024;
     if content_length > MAX_BODY {
-        let resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let resp =
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         stream.write_all(resp.as_bytes()).ok();
         return;
     }

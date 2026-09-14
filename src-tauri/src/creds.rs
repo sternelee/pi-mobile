@@ -105,7 +105,8 @@ pub fn get_json(data_dir: &str, provider: &str) -> Option<String> {
 }
 
 pub fn set_json(data_dir: &str, provider: &str, json: &str) -> Result<(), String> {
-    serde_json::from_str::<serde_json::Value>(json).map_err(|e| format!("invalid credential json: {e}"))?;
+    serde_json::from_str::<serde_json::Value>(json)
+        .map_err(|e| format!("invalid credential json: {e}"))?;
     imp::set(data_dir, &format!("{provider}#oauth"), json)
 }
 

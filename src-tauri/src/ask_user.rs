@@ -121,7 +121,9 @@ mod tests {
                 .push((id.to_string(), answer.to_string()));
         });
 
-        let r = register(&json!({ "question": "pick one", "options": [{"title": "A"}, {"title": "B"}] }));
+        let r = register(
+            &json!({ "question": "pick one", "options": [{"title": "A"}, {"title": "B"}] }),
+        );
         assert_eq!(r["state"], "pending");
         let id = r["id"].as_str().unwrap().to_string();
 
@@ -132,7 +134,8 @@ mod tests {
         assert_eq!(ev["question"], "pick one");
         drop(events);
 
-        let answer = json!({ "response": { "kind": "selection", "selections": ["B"] } }).to_string();
+        let answer =
+            json!({ "response": { "kind": "selection", "selections": ["B"] } }).to_string();
         respond(&id, &answer).unwrap();
         {
             let injected = injected.lock().unwrap();

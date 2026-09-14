@@ -41,7 +41,8 @@ fn b64url(bytes: &[u8]) -> String {
 /// 真实端口，OS 分配 port=0 场景），`wait` 在后台线程等回调并经 `sink` 回传
 /// （成功/失败都给浏览器回一个可关闭的 HTML 页，返回前 server 关停）。
 pub fn bind(port: u16) -> Result<(TcpListener, u16), String> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind {port}: {e}"))?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind {port}: {e}"))?;
     let bound = listener
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?
@@ -86,17 +87,13 @@ pub fn wait(listener: TcpListener, path: &str, sink: impl FnOnce(String)) -> Res
             }
             // "GET /callback?code=..&state=.. HTTP/1.1"
             let raw = request_line.split_whitespace().nth(1).unwrap_or("");
-            let is_match = raw.starts_with(path)
-                || raw.starts_with(&format!("/{path}"))
-                || path.is_empty();
+            let is_match =
+                raw.starts_with(path) || raw.starts_with(&format!("/{path}")) || path.is_empty();
             if !is_match {
                 respond(&mut stream, 404, "Not found");
                 continue;
             }
-            let port = listener
-                .local_addr()
-                .map(|a| a.port())
-                .unwrap_or(0);
+            let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
             let url = format!("http://127.0.0.1:{port}{raw}");
             let has_code = raw.contains("code=");
             let has_error = raw.contains("error=");
@@ -122,7 +119,11 @@ pub fn wait(listener: TcpListener, path: &str, sink: impl FnOnce(String)) -> Res
 }
 
 /// 便捷封装：绑定 + 后台等待，返回绑定端口。
-pub fn listen(port: u16, path: &str, sink: impl FnOnce(String) + Send + 'static) -> Result<u16, String> {
+pub fn listen(
+    port: u16,
+    path: &str,
+    sink: impl FnOnce(String) + Send + 'static,
+) -> Result<u16, String> {
     let (listener, bound) = bind(port)?;
     let path = path.to_string();
     std::thread::spawn(move || {

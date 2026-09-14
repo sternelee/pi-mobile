@@ -193,9 +193,10 @@ fn permission_state(cap: &str) -> &'static str {
         // 的动作是一样的（去开权限）。
         "photos" => {
             use tauri_plugin_pi_native::PiNativeExt;
-            match app.pi_native().permission_state(
-                tauri_plugin_pi_native::PermissionKind::Photos,
-            ) {
+            match app
+                .pi_native()
+                .permission_state(tauri_plugin_pi_native::PermissionKind::Photos)
+            {
                 Ok(st) => match st.state.as_str() {
                     "granted" => "granted",
                     // iOS 14+ 的「受限访问」：能读但不完整。折叠成 denied 让 UI
@@ -209,9 +210,10 @@ fn permission_state(cap: &str) -> &'static str {
         }
         "contacts" => {
             use tauri_plugin_pi_native::PiNativeExt;
-            match app.pi_native().permission_state(
-                tauri_plugin_pi_native::PermissionKind::Contacts,
-            ) {
+            match app
+                .pi_native()
+                .permission_state(tauri_plugin_pi_native::PermissionKind::Contacts)
+            {
                 Ok(st) => match st.state.as_str() {
                     "granted" => "granted",
                     "denied" => "denied",
@@ -225,9 +227,10 @@ fn permission_state(cap: &str) -> &'static str {
         }
         "calendar" => {
             use tauri_plugin_pi_native::PiNativeExt;
-            match app.pi_native().permission_state(
-                tauri_plugin_pi_native::PermissionKind::Calendar,
-            ) {
+            match app
+                .pi_native()
+                .permission_state(tauri_plugin_pi_native::PermissionKind::Calendar)
+            {
                 Ok(st) => match st.state.as_str() {
                     "granted" => "granted",
                     "denied" => "denied",
@@ -280,7 +283,11 @@ pub fn request(cap: &str) -> Result<Value, String> {
                 .request_permission(tauri_plugin_pi_native::PermissionKind::Photos)
                 .map_err(|e| format!("photos permission: {e}"))?;
         }
-        other => return Err(format!("capability '{other}' has no requestable permission")),
+        other => {
+            return Err(format!(
+                "capability '{other}' has no requestable permission"
+            ))
+        }
     }
     Ok(json!({ "capability": cap, "permission": permission_state(cap) }))
 }
@@ -348,7 +355,10 @@ fn clipboard(args: &Value) -> Result<String, String> {
             app.clipboard()
                 .write_text(text)
                 .map_err(|e| format!("clipboard write: {e}"))?;
-            Ok(format!("copied {} chars to clipboard", text.chars().count()))
+            Ok(format!(
+                "copied {} chars to clipboard",
+                text.chars().count()
+            ))
         }
         "clear" => {
             app.clipboard()
@@ -356,7 +366,9 @@ fn clipboard(args: &Value) -> Result<String, String> {
                 .map_err(|e| format!("clipboard clear: {e}"))?;
             Ok("clipboard cleared".into())
         }
-        other => Err(format!("clipboard op must be read|write|clear, got '{other}'")),
+        other => Err(format!(
+            "clipboard op must be read|write|clear, got '{other}'"
+        )),
     }
 }
 
@@ -513,7 +525,10 @@ fn calendar(op: &str, args: &Value) -> Result<String, String> {
         end_ms: args.get("endMs").and_then(|v| v.as_i64()),
         all_day: args.get("allDay").and_then(|v| v.as_bool()),
         notes: args.get("notes").and_then(|v| v.as_str()).map(String::from),
-        location: args.get("location").and_then(|v| v.as_str()).map(String::from),
+        location: args
+            .get("location")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
     let result: Value = app
@@ -585,18 +600,14 @@ fn photos(op: &str, args: &Value) -> Result<String, String> {
         let abs = crate::pi_bun::loopback::jail_path(&dest_rel)?;
         // 原生侧写文件不会自动建父目录，这里显式建（仍在校验过的路径内）
         if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create dir for photo: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("create dir for photo: {e}"))?;
         }
         Some(abs)
     } else {
         None
     };
 
-    let op_id = args
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let op_id = args.get("id").and_then(|v| v.as_str()).map(String::from);
 
     // **必须给 id**：save 没有 id 无从取图，list 无 id 是正常的。
     if op == "save" && op_id.is_none() {
@@ -609,9 +620,7 @@ fn photos(op: &str, args: &Value) -> Result<String, String> {
         to_ms: args.get("toMs").and_then(|v| v.as_i64()),
         limit: args.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32),
         id: op_id,
-        dest_path: dest_abs
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned()),
+        dest_path: dest_abs.as_ref().map(|p| p.to_string_lossy().into_owned()),
     };
 
     let result: Value = app
@@ -642,7 +651,8 @@ fn weather(args: &Value) -> Result<String, String> {
         (Some(a), Some(b)) => (a, b),
         (None, None) => {
             let loc = location(&json!({}))?;
-            let v: Value = serde_json::from_str(&loc).map_err(|e| format!("parse location: {e}"))?;
+            let v: Value =
+                serde_json::from_str(&loc).map_err(|e| format!("parse location: {e}"))?;
             (
                 v["latitude"].as_f64().ok_or("location has no latitude")?,
                 v["longitude"].as_f64().ok_or("location has no longitude")?,

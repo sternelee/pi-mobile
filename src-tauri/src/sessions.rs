@@ -254,8 +254,8 @@ mod tests {
         );
         std::fs::write(sub.join("400_l.jsonl"), content2).unwrap();
 
-        let v: Vec<serde_json::Value> = serde_json::from_str(&list(dir.to_str().unwrap()).unwrap())
-            .unwrap();
+        let v: Vec<serde_json::Value> =
+            serde_json::from_str(&list(dir.to_str().unwrap()).unwrap()).unwrap();
         // modifiedAt 相同排序不稳定——按 id 找
         let title = v.iter().find(|s| s["id"] == "s-title").unwrap();
         assert_eq!(title["entries"], 3);

@@ -5,12 +5,12 @@ mod creds;
 mod goal;
 mod http_tool;
 mod keepalive;
-mod oauth;
 mod mcp;
 mod native;
+mod oauth;
 mod pi_bun;
-mod sessions;
 mod script;
+mod sessions;
 mod skills;
 
 #[tauri::command]
@@ -104,8 +104,7 @@ fn set_creds(app: tauri::AppHandle, provider: String, api_key: String) -> Result
 #[tauri::command]
 fn has_creds(app: tauri::AppHandle, provider: String) -> Result<bool, String> {
     let dir = app_data_dir(&app)?;
-    Ok(creds::get(&dir, &provider).is_some()
-        || creds::get_json(&dir, &provider).is_some())
+    Ok(creds::get(&dir, &provider).is_some() || creds::get_json(&dir, &provider).is_some())
 }
 
 /// provider.json —— 用户选择的默认模型（provider + modelId）。
@@ -120,7 +119,8 @@ fn get_default_model(app: tauri::AppHandle) -> Result<String, String> {
     let dir = app_data_dir(&app)?;
     match std::fs::read_to_string(default_model_path(&dir)) {
         Ok(raw) => {
-            let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
             Ok(v.to_string())
         }
         Err(_) => Ok("null".into()),

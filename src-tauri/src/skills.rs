@@ -110,9 +110,7 @@ fn extract_from_zip(zip_bytes: &[u8]) -> Result<(String, String, Vec<(String, Ve
     // 找最浅的 SKILL.md
     let mut candidates: Vec<(usize, String)> = Vec::new();
     for i in 0..archive.len() {
-        let file = archive
-            .by_index(i)
-            .map_err(|e| format!("zip entry: {e}"))?;
+        let file = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
         let name = file.name().to_string();
         if name.ends_with("/SKILL.md") || name == "SKILL.md" {
             let depth = name.matches('/').count();
@@ -128,18 +126,12 @@ fn extract_from_zip(zip_bytes: &[u8]) -> Result<(String, String, Vec<(String, Ve
         .to_string();
     // github zipball 根目录形如 "repo-ref/"；若 SKILL.md 在根，base 为 "repo-ref"，
     // 技能 id 用 frontmatter name，无需从目录名推断 —— 这里仅用于无 name 兜底。
-    let dir_fallback = base
-        .rsplit('/')
-        .next()
-        .unwrap_or("skill")
-        .to_string();
+    let dir_fallback = base.rsplit('/').next().unwrap_or("skill").to_string();
 
     let mut skill_md = String::new();
     let mut resources: Vec<(String, Vec<u8>)> = Vec::new();
     for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| format!("zip entry: {e}"))?;
+        let mut file = archive.by_index(i).map_err(|e| format!("zip entry: {e}"))?;
         let name = file.name().to_string();
         let in_scope = if base.is_empty() {
             !name.contains('/')
@@ -162,7 +154,11 @@ fn extract_from_zip(zip_bytes: &[u8]) -> Result<(String, String, Vec<(String, Ve
             continue;
         }
         let mut buf = Vec::new();
-        if file.read_to_end(&mut buf).map_err(|e| format!("read entry: {e}"))? > MAX_SKILL_BYTES {
+        if file
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read entry: {e}"))?
+            > MAX_SKILL_BYTES
+        {
             return Err(format!("skill file too large: {rel}"));
         }
         if rel == "SKILL.md" {
@@ -190,7 +186,8 @@ fn install_from_bytes(
         extract_from_zip(bytes)?
     } else {
         // 直链必须是带 frontmatter 的 SKILL.md 原文
-        let text = String::from_utf8(bytes.to_vec()).map_err(|_| "skill file is not utf-8".to_string())?;
+        let text =
+            String::from_utf8(bytes.to_vec()).map_err(|_| "skill file is not utf-8".to_string())?;
         (String::new(), text, Vec::new())
     };
 
@@ -201,7 +198,9 @@ fn install_from_bytes(
         return Err("cannot derive skill id".into());
     }
     if skill_md.len() > MAX_SKILL_BYTES {
-        return Err(format!("SKILL.md too large (limit {MAX_SKILL_BYTES} bytes)"));
+        return Err(format!(
+            "SKILL.md too large (limit {MAX_SKILL_BYTES} bytes)"
+        ));
     }
 
     let dir = skills_dir(data_dir).join(&id);
@@ -295,7 +294,9 @@ pub fn install(data_dir: &str, url: &str) -> Result<serde_json::Value, String> {
     resp.read_to_end(&mut bytes)
         .map_err(|e| format!("download read: {e}"))?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
-        return Err(format!("download too large (limit {MAX_DOWNLOAD_BYTES} bytes)"));
+        return Err(format!(
+            "download too large (limit {MAX_DOWNLOAD_BYTES} bytes)"
+        ));
     }
     install_from_bytes(data_dir, url, &version_ref, &bytes)
 }
@@ -341,8 +342,12 @@ pub fn enabled_for_injection(data_dir: &str) -> serde_json::Value {
         }
         let Some(id) = e["id"].as_str() else { continue };
         let path = skills_dir(data_dir).join(id).join("SKILL.md");
-        let Ok(text) = std::fs::read_to_string(path) else { continue };
-        let Some((name, description, command, body)) = parse_skill_md(&text) else { continue };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Some((name, description, command, body)) = parse_skill_md(&text) else {
+            continue;
+        };
         let mut clipped = body;
         if clipped.len() > MAX_SKILL_BYTES {
             clipped.truncate(MAX_SKILL_BYTES);

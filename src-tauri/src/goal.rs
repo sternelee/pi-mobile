@@ -30,7 +30,10 @@ pub fn set(data_dir: &str, objective: &str) -> Result<(), String> {
     if objective.trim().is_empty() {
         return Err("objective must not be empty".into());
     }
-    save(data_dir, &serde_json::json!({ "objective": objective.trim() }))
+    save(
+        data_dir,
+        &serde_json::json!({ "objective": objective.trim() }),
+    )
 }
 
 pub fn clear(data_dir: &str) -> Result<(), String> {

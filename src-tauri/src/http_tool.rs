@@ -46,7 +46,12 @@ pub fn validate_url(url: &str) -> Result<(), String> {
                 v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
             }
             // IPv6：环回/链路本地/唯一本地(fc00::/7)/未指定
-            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80,
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80
+            }
         };
         if private {
             return Err(format!("blocked private address: {ip}"));
@@ -115,75 +120,78 @@ pub fn run(payload: &serde_json::Value) -> serde_json::Value {
 
 fn run_inner(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let url = payload
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or("missing url")?;
-        validate_url(url)?;
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("missing url")?;
+    validate_url(url)?;
 
-        let method = payload
-            .get("method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("GET")
-            .to_ascii_uppercase();
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| format!("invalid method: {e}"))?;
+    let method = payload
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_ascii_uppercase();
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| format!("invalid method: {e}"))?;
 
-        let client = reqwest::blocking::Client::builder()
-            .timeout(TIMEOUT)
-            .user_agent("pi-mobile-agent/0.1")
-            .build()
-            .map_err(|e| format!("client: {e}"))?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(TIMEOUT)
+        .user_agent("pi-mobile-agent/0.1")
+        .build()
+        .map_err(|e| format!("client: {e}"))?;
 
-        let mut req = client.request(method, url);
-        if let Some(headers) = payload.get("headers").and_then(|v| v.as_object()) {
-            for (k, v) in headers {
-                if let (Some(key), Some(val)) = (reqwest::header::HeaderName::try_from(k.as_str()).ok(), v.as_str()) {
-                    req = req.header(key, val);
-                }
+    let mut req = client.request(method, url);
+    if let Some(headers) = payload.get("headers").and_then(|v| v.as_object()) {
+        for (k, v) in headers {
+            if let (Some(key), Some(val)) = (
+                reqwest::header::HeaderName::try_from(k.as_str()).ok(),
+                v.as_str(),
+            ) {
+                req = req.header(key, val);
             }
         }
-        let body = payload.get("body").and_then(|v| v.as_str());
-        if let Some(b) = body {
-            req = req.body(b.to_string());
-        }
+    }
+    let body = payload.get("body").and_then(|v| v.as_str());
+    if let Some(b) = body {
+        req = req.body(b.to_string());
+    }
 
-        let mut resp = req.send().map_err(|e| format!("request failed: {e}"))?;
-        let status = resp.status().as_u16();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+    let mut resp = req.send().map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
-        // 尺寸上限：多读 1 字节判定截断
-        let mut bytes = Vec::new();
-        resp.take((MAX_BODY + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("read body: {e}"))?;
-        let truncated = bytes.len() > MAX_BODY;
-        bytes.truncate(MAX_BODY);
+    // 尺寸上限：多读 1 字节判定截断
+    let mut bytes = Vec::new();
+    resp.take((MAX_BODY + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read body: {e}"))?;
+    let truncated = bytes.len() > MAX_BODY;
+    bytes.truncate(MAX_BODY);
 
-        let text = String::from_utf8_lossy(&bytes);
-        let body_text = if content_type.starts_with("text/html") {
-            html_to_text(&text)
-        } else {
-            text.into_owned()
-        };
+    let text = String::from_utf8_lossy(&bytes);
+    let body_text = if content_type.starts_with("text/html") {
+        html_to_text(&text)
+    } else {
+        text.into_owned()
+    };
 
-        crate::pi_bun::logcat(&format!(
-            "http: {status} {} ({} bytes{})",
-            content_type,
-            body_text.len(),
-            if truncated { ", truncated" } else { "" }
-        ));
+    crate::pi_bun::logcat(&format!(
+        "http: {status} {} ({} bytes{})",
+        content_type,
+        body_text.len(),
+        if truncated { ", truncated" } else { "" }
+    ));
 
-        Ok(serde_json::json!({
-            "status": status,
-            "contentType": content_type,
-            "body": body_text,
-            "truncated": truncated,
-        }))
+    Ok(serde_json::json!({
+        "status": status,
+        "contentType": content_type,
+        "body": body_text,
+        "truncated": truncated,
+    }))
 }
 
 #[cfg(test)]

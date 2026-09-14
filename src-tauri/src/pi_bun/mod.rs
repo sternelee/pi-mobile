@@ -36,8 +36,7 @@ type SkalHandle = i64;
 mod abi {
     use std::ffi::{c_char, c_int};
 
-    pub type CreateRuntime =
-        unsafe extern "C" fn(dir: *const c_char, dir_len: usize) -> i64;
+    pub type CreateRuntime = unsafe extern "C" fn(dir: *const c_char, dir_len: usize) -> i64;
     pub type Evaluate = unsafe extern "C" fn(
         handle: i64,
         source: *const c_char,
@@ -129,7 +128,11 @@ pub(crate) fn logcat(msg: &str) {
     let tag = CString::new("pibun").unwrap();
     let text = CString::new(msg.replace('\0', " ")).unwrap();
     unsafe {
-        let prio = if msg.starts_with("ERROR") { ERROR } else { INFO };
+        let prio = if msg.starts_with("ERROR") {
+            ERROR
+        } else {
+            INFO
+        };
         __android_log_print(prio, tag.as_ptr(), text.as_ptr());
     }
     log_to_file(&format!("[pi-bun] {msg}"));
@@ -156,8 +159,8 @@ fn init(data_dir: &str) -> Result<(), String> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let lib_name = "libskal.so";
 
-    let lib = unsafe { Library::new(lib_name) }
-        .map_err(|e| format!("dlopen {lib_name} failed: {e}"))?;
+    let lib =
+        unsafe { Library::new(lib_name) }.map_err(|e| format!("dlopen {lib_name} failed: {e}"))?;
 
     // libloading::Symbol 解引用为裸函数指针后即可长期保存（库句柄由 PiBunRuntime 持有）
     let create: abi::CreateRuntime = unsafe {
@@ -179,9 +182,8 @@ fn init(data_dir: &str) -> Result<(), String> {
     // D14 脚本执行。**软绑定**：老产物的 .o 里没有这个符号（iOS 的
     // ios-release 对象就是旧入口编的，实测 0 次），缺了不该让整个 agent 起不来
     // —— 只把脚本能力置为不可用，其余功能照常。
-    let run_script: Option<abi::RunScript> = unsafe {
-        lib.get(b"pibun_run_script").ok().map(|s| *s)
-    };
+    let run_script: Option<abi::RunScript> =
+        unsafe { lib.get(b"pibun_run_script").ok().map(|s| *s) };
     if run_script.is_none() {
         logcat("WARN pibun_run_script missing — script execution disabled (stale build?)");
     }
@@ -423,9 +425,7 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     cfg["hostToken"] = serde_json::Value::String(crate::script::init_host_token());
     // 上次保存的默认模型选择：bundle 用 pi-ai 目录解析 (provider, modelId)
     // 为完整模型对象（无选择或目录缺模型时 bundle 落回兜底模型）。
-    if let Ok(raw) = std::fs::read_to_string(
-        std::path::Path::new(data_dir).join("provider.json"),
-    ) {
+    if let Ok(raw) = std::fs::read_to_string(std::path::Path::new(data_dir).join("provider.json")) {
         if let Ok(sel) = serde_json::from_str::<serde_json::Value>(&raw) {
             if sel.get("provider").and_then(|v| v.as_str()).is_some()
                 && sel.get("modelId").and_then(|v| v.as_str()).is_some()
@@ -455,9 +455,12 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
             Ok((r, false)) if r.trim() == "true" => break,
             attempt => {
                 if std::time::Instant::now() > deadline {
-                    let boot = evaluate_blocking("String(globalThis.__pi_boot_error ?? '')", "pi:boot-err")
-                        .map(|(s, _)| s)
-                        .unwrap_or_default();
+                    let boot = evaluate_blocking(
+                        "String(globalThis.__pi_boot_error ?? '')",
+                        "pi:boot-err",
+                    )
+                    .map(|(s, _)| s)
+                    .unwrap_or_default();
                     return Err(format!(
                         "agent not ready after 20s: last={attempt:?} boot_error={boot}"
                     ));
@@ -487,10 +490,7 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
 /// 向 agent 提交一条 prompt（kick；结果经 agent_event 异步流回）。
 pub fn agent_prompt(text: &str) -> Result<String, String> {
     let arg = serde_json::to_string(text).map_err(|e| format!("serialize: {e}"))?;
-    let (r, err) = evaluate_blocking(
-        &format!("globalThis.__pi_prompt({arg})"),
-        "pi:prompt",
-    )?;
+    let (r, err) = evaluate_blocking(&format!("globalThis.__pi_prompt({arg})"), "pi:prompt")?;
     if err {
         return Err(format!("prompt eval threw: {r}"));
     }
