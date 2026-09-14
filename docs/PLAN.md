@@ -273,6 +273,25 @@ pi-mobile/
 - **键空间入契约**：store 的全部 key 在 `docs/CONTRACTS.md` 登记（如 `settings.theme`、`settings.defaultModel`、`policy.default.*`），与 IPC schema 同等对待，防键名漂移；`src/state/settings.ts` 做类型安全封装，UI 只读 signal，写经统一 setter。
 - **迁移**：key 结构变更走版本字段（`settings.version`），Rust/TS 两侧共用迁移表。
 
+### D14：脚本执行（agent 自写 JS 并运行）——显式能力授予
+
+- **定位**：这是本项目**唯一的 exec 面**，是 D6「无 exec」的定向例外。价值不在「能跑代码」，而在**一次脚本替代 N 次工具往返**——移动端的瓶颈是 LLM 往返延迟，不是解释器速度，故 iOS 无 JIT 在此可接受。**不引入子进程**：`fork`/`exec` 在 iOS 被禁，脚本跑在**进程内独立 JS context**。
+- **核心安全不变式**：*脚本永远不能做超出「用户在审批卡上看到的那份能力清单」的事。* 三条支撑缺一不可：
+  1. **隔离**——脚本跑独立 context/VM，agent 的 global 与工具包装函数**不可达**。这条是承载性的：若脚本能调 agent 的工具，它就继承了 agent 的全部授权，门等于没装。
+  2. **不可伪造的主体**——Rust 每次运行发 per-run token；脚本侧 hostcall 包装带该 token；Rust 由 token 反解身份与授权表 → 脚本无法冒充 agent。
+  3. **边界强制**——判定发生在 **Rust 侧 hostcall dispatch**，不在 JS 侧。JS 侧的检查只算 UX，不算安全。
+- **能力清单**（`needs` 字段，**默认全拒**）：`fs:read` / `fs:write`（workspace jail 内）、`native:contacts` / `native:photos` / `native:calendar:read` / `native:calendar:write` / `native:location` / `native:clipboard` / `native:clipboard:write` / `native:notify` / `native:weather` / `net`。
+- **永不可授予**（脚本拿到即可冒充 agent 或窃取凭证）：`agent_event`、`approval_request`（否则能自问自答绕过人）、`ask_user_register`、`creds_get`/`creds_set`/`creds_json_*`、`oauth_*`、`mcp_config`/`goal_get`/`skills_config`。**列清「永不可授予」与列清「可授予」同等重要**——只写后者等于默认其余可给。
+- **`needs` 由模型声明，不做推断**（静态读字段）。漏报的后果是脚本**运行时报错**（fail-safe 方向）而非越权；但报错信息必须明说「用了未声明的能力”，否则模型只会反复重试（同 CONTRACTS §2.2 权限指引纪律：给可执行指引而非空结果）。
+- **审批粒度**：脚本**不参与 `always` 全局降级**。现有 `always` 会把 `policy.json` 的 `write` 降成 `auto`，用在脚本上等于永久交出任意能力 → v1 只有 allow once / deny。
+- **资源上界**（全部 Rust 侧，防 DoS）：`JSContextGroupSetExecutionTimeLimit` 硬超时（默认 5s）；hostcall 次数上限与单次响应字节上限；返回值 + console 捕获的字节上限。
+- **验收以负向测试为准**：正向「脚本跑通」极易假绿，必须逐条验证——越权 hostcall 被拒、伪造 token 无效、`while(1){}` 到点被终止且 app 不冻、agent 全局对象不可达、`needs` 漏报时明确报错。
+- **实施依赖（C 是 B 的超集）**：隔离与超时是 C 的前置而非可选项。**两个未知已由读 fork 源码基本解决**（2026-09-13 spike）：
+  - ① **VM 是 per-thread 的**：`src/jsc/VirtualMachine.zig:327` 为 `pub threadlocal var vm: ?*VirtualMachine = null` → **一线程一 VM**。所以隔离 = **起一条专用线程 + 在那里 init 新 VM**，agent 的 `globalThis` 是另一个 `JSGlobalObject`，结构性不可达（不靠「约定」）。同进程多 VM 在 bun 内有现成先例：`src/js_parser_jsc/Macro.zig`、`src/jsc/Debugger.zig`、`src/cli/repl_command.zig` 都各自 `VirtualMachine.init`。
+  - ② **超时用 bun 自己的包装，不要裸调 JSC**：`src/jsc/VM.zig` 已封装 `hasExecutionTimeLimit` / `setExecutionTimeLimit(vm, f64)` / `clearExecutionTimeLimit`（底层即 `JSC__VM__*ExecutionTimeLimit`），且 `src/runtime/api/bun/js_bun_spawn_bindings.zig:561` 已有使用先例 → 属 bun **支持的**机制，无「与 bun 内部 watchdog 冲突」之障。仍遵守「能用框架 API 就不碰底层」纪律，不直接调 `JSContextGroupSetExecutionTimeLimit`。
+  - 仍待**实跑**确认的只剩工程细节：第二个 VM 在嵌入环境下的事件循环 tick、`bun.jsc.initialize` 进程一次初始化对第二个 VM 是否充分、以及 iOS 关 JIT 后看门狗是否照常生效。
+- **spike 跑在哪**：这两个问题是 bun/JSC 语义问题而非平台问题 → 先在 **macOS 宿主**验证（`bun --cwd vendor/bun scripts/build.ts --profile=<host> --build-dir=…` 产出宿主 dylib + 小 harness dlopen 调用），避开了 iOS 真机当前的两个障碍（设备掉线 + 免费账号签名已过期）。
+
 ---
 
 ## 6. 里程碑路线图（方案 C 形态：libpi-bun 为关键路径）
