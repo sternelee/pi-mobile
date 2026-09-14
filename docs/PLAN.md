@@ -289,8 +289,16 @@ pi-mobile/
 - **实施依赖（C 是 B 的超集）**：隔离与超时是 C 的前置而非可选项。**两个未知已由读 fork 源码基本解决**（2026-09-13 spike）：
   - ① **VM 是 per-thread 的**：`src/jsc/VirtualMachine.zig:327` 为 `pub threadlocal var vm: ?*VirtualMachine = null` → **一线程一 VM**。所以隔离 = **起一条专用线程 + 在那里 init 新 VM**，agent 的 `globalThis` 是另一个 `JSGlobalObject`，结构性不可达（不靠「约定」）。同进程多 VM 在 bun 内有现成先例：`src/js_parser_jsc/Macro.zig`、`src/jsc/Debugger.zig`、`src/cli/repl_command.zig` 都各自 `VirtualMachine.init`。
   - ② **超时用 bun 自己的包装，不要裸调 JSC**：`src/jsc/VM.zig` 已封装 `hasExecutionTimeLimit` / `setExecutionTimeLimit(vm, f64)` / `clearExecutionTimeLimit`（底层即 `JSC__VM__*ExecutionTimeLimit`），且 `src/runtime/api/bun/js_bun_spawn_bindings.zig:561` 已有使用先例 → 属 bun **支持的**机制，无「与 bun 内部 watchdog 冲突」之障。仍遵守「能用框架 API 就不碰底层」纪律，不直接调 `JSContextGroupSetExecutionTimeLimit`。
-  - 仍待**实跑**确认的只剩工程细节：第二个 VM 在嵌入环境下的事件循环 tick、`bun.jsc.initialize` 进程一次初始化对第二个 VM 是否充分、以及 iOS 关 JIT 后看门狗是否照常生效。
-- **spike 跑在哪**：这两个问题是 bun/JSC 语义问题而非平台问题 → 先在 **macOS 宿主**验证（`bun --cwd vendor/bun scripts/build.ts --profile=<host> --build-dir=…` 产出宿主 dylib + 小 harness dlopen 调用），避开了 iOS 真机当前的两个障碍（设备掉线 + 免费账号签名已过期）。
+  - **spike 已验证（2026-09-14，macOS 宿主）**，两个前置都成立，并带回四条会改设计的发现：
+    - **Q1 第二 VM 可行**：起线程后 init 仅 2ms。**隔离是结构性的**：第二 VM 里 `typeof globalThis.__pi_hostcall` / `typeof globalThis.__PI_CONFIG` 均为 `undefined` —— agent 的 hostcall 与配置不可达，这正是本决策的承载性前提。
+    - **⚠️ 陷阱：第二 VM 必须 `is_main_thread = false`**。`VMHolder.main_thread_vm`（`VirtualMachine.zig:329`）**不是** threadlocal，传 `true` 会覆盖真正的 agent VM 指针（bun 内部按它做判断的地方全错），并给这个一次性 VM 装上 `ParentDeathWatchdog`。
+    - **Q2 执行时限可行，且 VM 可复用**：1500ms 限时在 **1505ms** 触发，进程存活；`clearExecutionTimeLimit()` 后同一 VM 继续正常 eval（`recovered:2`）→ 「一次运行一个 VM」不是被迫的。
+    - **超时回传形态（实现依据）**：`out_is_error=1` + `out_result="JavaScript execution terminated."`（32 字节）。但**不要**用 `JSValue.isTerminationException` 判别——`Bun__REPL__evaluate` 已把终止转成普通 Error（实测 `isTerminationException=false`）。要么认这条文案，要么用「elapsed ≈ limit」自己记账。
+    - **⚠️ 看门狗是 CPU 计费的（超出原设计）**：`Watchdog::shouldTerminate` 除墙钟还比对 `CPUTime::forCurrentThread()` 与 `m_cpuDeadline`。CPU 打满的死循环准时触发，但**脚本阻塞在 I/O（`await fetch` 永不返回）不消耗 CPU → 看门狗不响**。→ **仍需在 hostcall 层加一条墙钟/空闲看护**，不能只靠它。
+    - **⚠️ `setExecutionTimeLimit` 在 bun 内零调用点**（只有 `hasExecutionTimeLimit()` 被 spawnSync 快速路径用作守卫）→ 这条通路**没被 bun 自己压测过**，我们是第一个真实使用者。好处：不会与内部 watchdog 打架；坏处：无前例背书。
+    - 其他实现细节：时限是 per-VM（`vm->watchdog()`）；新线程上**必须先 `bun.Output.Source.setInit(...)`**（threadlocal；漏了会在 VM init 的 `console.init` 读未初始化 threadlocal 时带走承载进程，这是从 `workerMain` 照搬的教训）；`bun.jsc.initialize(false)` **不需要**再调（进程一次，agent 线程已做）。
+- **spike 跑在哪**：宿主（darwin-aarch64 / Release / 预构建 WebKit），`scripts/link-skal-macos.sh` + `scripts/spike-harness.c` 可复现。**iOS 真机仍验不了**（设备掉线 + profile 过期）→ 「iOS 关 JIT 下看门狗是否照常生效」仍未证（看门狗是独立线程、不需 JIT，理论上无碍）。Android 未跑（同引擎路径；`PI_SPIKE=1` 自动触发钩子已留在 `skal_create_runtime` 尾部备用）。
+- **清理义务**：spike 脚手架（`patches/pi_entry.zig` 新增 239 行）**会随 fork 进 iOS dylib**。默认惰性（`PI_SPIKE` 未设时不触发），但**上线前必须删除**；D14 真实 runner 落地时会自然取代它。
 
 ---
 

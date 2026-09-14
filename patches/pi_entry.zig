@@ -594,6 +594,8 @@ export fn skal_create_runtime(dir: [*]const u8, dir_len: usize) callconv(.c) i64
     };
     global_runtime = rt;
     global_reused = false;
+    // spike 自动触发（仅 PI_SPIKE=1；Android 无 harness 时的通道）
+    spikeMaybeAutoRun();
     return @intCast(@intFromPtr(rt));
 }
 
@@ -712,3 +714,240 @@ export fn pibun_evaluate(
 
 
 
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// spike —— D14（脚本执行）的前置技术验证。**不是产品功能**，验证完可整段删。
+//
+// 只回答两个问题：
+//   Q1 同进程另一条线程上能否再 init 一个 VirtualMachine 并在其中 eval？
+//   Q2 VM.setExecutionTimeLimit 能否让 `while(true){}` 到点被终止、且进程存活？
+//
+// Q2 刻意跑在**第二个 VM** 上而非当前 VM：给当前（agent）VM 设时限后跑死循环
+// 会连带废掉 agent 主循环，破坏「不改现有启动路径」的前提；而 D14 的设计本来
+// 就是「脚本跑在自己的 VM 里、时限设在那上面」，第二个 VM 才是有意义的观测对象。
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 第二 VM 的时限（毫秒）；Q2 用。0 = 不设。
+var spike_limit_ms: u32 = 3000;
+
+fn spikeLog(comptime fmt: []const u8, args: anytype) void {
+    // stderr：宿主（macOS harness）直接可见
+    std.debug.print("spike: " ++ fmt ++ "\n", args);
+    // 文件：Android/iOS 真机唯一可靠通道（见 trace 注释）
+    trace("spike: " ++ fmt, args);
+}
+
+/// 探测报告：新线程写、调用线程 join 后读（join 建立 happens-before，无需原子）。
+const SpikeReport = struct {
+    vm_init_ok: bool = false,
+    q1_eval_ok: bool = false,
+    limit_set: bool = false,
+    q2_terminated: bool = false,
+    q2_is_termination_exception: bool = false,
+    q2_exec_forbidden: bool = false,
+    q2_can_still_eval: bool = false,
+    elapsed_ms: i64 = 0,
+};
+
+const SpikeEval = struct {
+    text: []u8,
+    is_error: bool,
+    is_termination: bool,
+};
+
+/// 在给定 VM 上同步求值。用 Bun__REPL__evaluate（与产品实际跑脚本同一条路径），
+/// 不用裸 JSC C API —— 观测到的行为才是将来会发生的。
+fn spikeEval(vm: *jsc.VirtualMachine, src: []const u8, url: []const u8) ?SpikeEval {
+    var exception: jsc.JSValue = .js_undefined;
+    const result = Bun__REPL__evaluate(
+        vm.global,
+        src.ptr,
+        src.len,
+        url.ptr,
+        url.len,
+        &exception,
+    );
+    var final = result;
+    var is_error = false;
+    var is_termination = false;
+    if (exception != .js_undefined) {
+        is_error = true;
+        final = exception;
+        // 超时终止的判别方式 —— 决定 D14 怎么把它变成结构化错误
+        is_termination = exception.isTerminationException();
+    } else if (result.asAnyPromise()) |promise| {
+        vm.eventLoop().waitForPromise(promise);
+        final = promise.result(vm.global.vm());
+        if (promise.status() == .rejected) is_error = true;
+    }
+    const text = final.toUTF8Bytes(vm.global, std.heap.c_allocator) catch return null;
+    return .{ .text = text, .is_error = is_error, .is_termination = is_termination };
+}
+
+fn spikeSecondVmThread(rep: *SpikeReport) void {
+    const t0 = std.time.milliTimestamp();
+
+    // Output.Source 是 threadlocal（见 workerMain 注释）：新线程必须自己
+    // setInit，否则 VM init 里的 console.init(Output.rawWriter()...) 会读
+    // 未初始化的 threadlocal，把承载进程带走。
+    bun.Output.Source.setInit(
+        bun.sys.File.from(std.fs.File.stdout()),
+        bun.sys.File.from(std.fs.File.stderr()),
+    );
+
+    // is_main_thread = false 是刻意的（实测语义，见报告）：
+    //   * true 会写进程级 VMHolder.main_thread_vm（非 threadlocal）—— 把真正的
+    //     主 VM 指针覆盖成这个一次性 VM，bun 内部按它做判断的地方会全错；
+    //   * 还会 bun.ParentDeathWatchdog.installOnEventLoop()，给一次性 VM 装上
+    //     父进程死亡看门狗。
+    // 只用它来换 initial_script_execution_context_identifier=1（inspector 用），
+    // 对脚本 VM 无价值。
+    const args = std.mem.zeroes(bun.schema.api.TransformOptions);
+    const vm = jsc.VirtualMachine.init(.{
+        .allocator = std.heap.c_allocator,
+        .args = args,
+        .smol = true,
+        .is_main_thread = false,
+    }) catch |e| {
+        spikeLog("Q1 second VM init FAILED: {s}", .{@errorName(e)});
+        rep.elapsed_ms = std.time.milliTimestamp() - t0;
+        return;
+    };
+    rep.vm_init_ok = true;
+    spikeLog("Q1 second VM init ok ({d} ms)", .{std.time.milliTimestamp() - t0});
+
+    // Q1 主体：第二个 VM 真能跑代码（init 成功 ≠ 能用）
+    if (spikeEval(vm, "6*7", "spike:q1")) |r0| {
+        const ok = !r0.is_error and std.mem.eql(u8, r0.text, "42");
+        rep.q1_eval_ok = ok;
+        spikeLog("Q1 eval 6*7 -> '{s}' err={} ok={}", .{ r0.text, r0.is_error, ok });
+        std.heap.c_allocator.free(r0.text);
+    } else {
+        spikeLog("Q1 eval produced no text (toUTF8Bytes failed)", .{});
+    }
+
+    // 顺手确认隔离：第二个 VM 里不该看见 agent 主 VM 的全局。
+    // （__pi_hostcall / __PI_CONFIG 由主 VM 的 installPiGlobals / Rust 注入）
+    if (spikeEval(vm, "typeof globalThis.__pi_hostcall + ',' + typeof globalThis.__PI_CONFIG", "spike:q1-iso")) |ri| {
+        spikeLog("Q1 isolation probe: {s}  (期望 'undefined,undefined')", .{ri.text});
+        std.heap.c_allocator.free(ri.text);
+    }
+
+    // ── Q2：执行时限 ─────────────────────────────────────────────────
+    // bun 的 VM.setExecutionTimeLimit 是 JSC::Watchdog 的薄包装
+    // （vendor/bun/src/jsc/bindings/bindings.cpp:4875：ensureWatchdog() +
+    //  setTimeLimit(WTF::Seconds{limit})）。文档要求「在执行任何脚本之前设置
+    //  才保证生效」——这里刻意排在 sanity eval 之后再设，是更严的测法。
+    const limit_s: f64 = @as(f64, @floatFromInt(spike_limit_ms)) / 1000.0;
+    vm.jsc_vm.setExecutionTimeLimit(limit_s);
+    rep.limit_set = vm.jsc_vm.hasExecutionTimeLimit();
+    spikeLog("Q2 setExecutionTimeLimit({d} ms) -> hasExecutionTimeLimit={}", .{ spike_limit_ms, rep.limit_set });
+
+    const t1 = std.time.milliTimestamp();
+    if (spikeEval(vm, "while (true) {} 'unreachable'", "spike:q2")) |r1| {
+        const wall = std.time.milliTimestamp() - t1;
+        rep.q2_terminated = wall < 30_000; // 终止 = 循环没跑满「无限」
+        rep.q2_is_termination_exception = r1.is_termination;
+        rep.q2_exec_forbidden = vm.jsc_vm.executionForbidden();
+        spikeLog(
+            "Q2 deadloop returned after {d} ms: text='{s}' err={} isTerminationException={} executionForbidden={}",
+            .{ wall, r1.text, r1.is_error, r1.is_termination, rep.q2_exec_forbidden },
+        );
+        std.heap.c_allocator.free(r1.text);
+    } else {
+        spikeLog("Q2 deadloop produced no text (toUTF8Bytes failed) —— 可能未被终止", .{});
+    }
+
+    // 终止后这个 VM 还能不能用？决定「一次运行一个 VM」还是「VM 可复用」。
+    vm.jsc_vm.clearExecutionTimeLimit();
+    if (spikeEval(vm, "'still-alive:' + (1+1)", "spike:q2-after")) |r2| {
+        rep.q2_can_still_eval = !r2.is_error and std.mem.eql(u8, r2.text, "still-alive:2");
+        spikeLog("Q2 post-termination eval -> '{s}' err={} usable={}", .{ r2.text, r2.is_error, rep.q2_can_still_eval });
+        std.heap.c_allocator.free(r2.text);
+    } else {
+        spikeLog("Q2 post-termination eval produced no text", .{});
+    }
+
+    rep.elapsed_ms = std.time.milliTimestamp() - t0;
+    spikeLog("spike thread done in {d} ms", .{rep.elapsed_ms});
+}
+
+/// 跑一次完整探测（同步 join），返回报告。
+fn spikeRun() ?SpikeReport {
+    const rep = std.heap.c_allocator.create(SpikeReport) catch return null;
+    defer std.heap.c_allocator.destroy(rep);
+    rep.* = .{};
+    const th = std.Thread.spawn(.{}, spikeSecondVmThread, .{rep}) catch {
+        spikeLog("spawn spike thread failed", .{});
+        return null;
+    };
+    th.join();
+    return rep.*;
+}
+
+/// pibun_spike_second_vm() → 1 = 第二个 VM init 且 eval 正确（Q1 通过）。
+export fn pibun_spike_second_vm() callconv(.c) i32 {
+    const rep = spikeRun() orelse return -1;
+    return if (rep.vm_init_ok and rep.q1_eval_ok) 1 else 0;
+}
+
+/// pibun_spike_time_limit(ms) → 1 = 死循环被终止（Q2 通过）。
+/// 同时记录终止后 VM 是否仍可用（决定 VM 复用策略）。
+export fn pibun_spike_time_limit(ms: u32) callconv(.c) i32 {
+    spike_limit_ms = ms;
+    const rep = spikeRun() orelse return -1;
+    spikeLog("Q2 summary: terminated={} termExc={} execForbidden={} vmReusable={}",
+        .{ rep.q2_terminated, rep.q2_is_termination_exception, rep.q2_exec_forbidden, rep.q2_can_still_eval });
+    return if (rep.q2_terminated) 1 else 0;
+}
+
+/// 一次性跑两项（harness 只调一个符号时用）。
+export fn pibun_spike_all() callconv(.c) i32 {
+    const a = pibun_spike_second_vm();
+    const b = pibun_spike_time_limit(3000);
+    spikeLog("spike all: q1={d} q2={d}", .{ a, b });
+    return if (a == 1 and b == 1) 1 else 0;
+}
+
+/// env PI_SPIKE=1 时，由 skal_create_runtime 尾部触发（Android 无 harness 用；
+/// macOS harness 直接调符号）。
+fn spikeMaybeAutoRun() void {
+    const v = getenv("PI_SPIKE") orelse return;
+    if (v[0] == '0' or v[0] == 0) return;
+    _ = pibun_spike_all();
+}
+
+// ── spike 第二半：主 VM 上的时限触发时，skal_evaluate 怎么回传？──────────
+//
+// D14 要把「脚本超时」包成结构化错误返回给模型，就必须知道超时发生时
+// skal_evaluate 的 out_is_error / out_result 各是什么（错误字符串？空？），
+// 以及 clearExecutionTimeLimit 之后同一个 VM 能否继续跑。
+//
+// 这两个只在 harness / 真机手动探测时调用，**产品路径永不调用**：给 agent
+// 主 VM 设时限本身就是危险动作（见函数注释）。
+// 危险点：时限会在主 VM 上生效，若不 clear，后续所有 eval 都在时限内。
+export fn pibun_spike_main_time_limit(ms: u32) callconv(.c) i32 {
+    global_mutex.lock();
+    const rt_opt = global_runtime;
+    global_mutex.unlock();
+    const rt = rt_opt orelse return PIBUN_E_STATE;
+    const limit_s: f64 = @as(f64, @floatFromInt(ms)) / 1000.0;
+    rt.vm.jsc_vm.setExecutionTimeLimit(limit_s);
+    const has = rt.vm.jsc_vm.hasExecutionTimeLimit();
+    spikeLog("main VM setExecutionTimeLimit({d} ms) -> hasExecutionTimeLimit={}", .{ ms, has });
+    return if (has) 1 else 0;
+}
+
+/// 清掉主 VM 的时限（Q2 恢复性测试的第一步）。
+export fn pibun_spike_main_clear_limit() callconv(.c) i32 {
+    global_mutex.lock();
+    const rt_opt = global_runtime;
+    global_mutex.unlock();
+    const rt = rt_opt orelse return PIBUN_E_STATE;
+    rt.vm.jsc_vm.clearExecutionTimeLimit();
+    const still = rt.vm.jsc_vm.hasExecutionTimeLimit();
+    const forbidden = rt.vm.jsc_vm.executionForbidden();
+    spikeLog("main VM clearExecutionTimeLimit -> has={} executionForbidden={}", .{ still, forbidden });
+    return if (still) 0 else 1;
+}
