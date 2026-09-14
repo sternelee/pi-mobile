@@ -38,16 +38,22 @@ const LOOPBACK = `http://127.0.0.1:${globalThis.__PI_CONFIG?.port ?? 19999}`;
 // bun VM、**自带原生 fetch**，可以不带任何 token 直接 POST 到 loopback；若
 // dispatch 把「无 token」当作 agent 主体，整套授权就被绕过。
 //
-// 为什么在这里读是安全的：脚本 VM 拿不到 `__PI_CONFIG`（隔离测试已证其
+// **必须调用时读取，不要在模块顶层捕获**：顶层 `const HOST_TOKEN = ...` 在
+// 真机实测会拿到 null（当时 `__PI_CONFIG` 尚未就绪或求值顺序早于插件模块），
+// 于是所有 hostcall 都成了「无 token」。调用时读，顺序问题就不存在。
+//
+// 安全性来源：脚本 VM 拿不到 `__PI_CONFIG`（隔离测试已证其
 // `typeof __PI_CONFIG === "undefined"`）。**绝不要**把这个值挂到任何脚本
 // 够得着的全局上——那等于把 agent 身份交给脚本。
-const HOST_TOKEN = globalThis.__PI_CONFIG?.hostToken ?? null;
+function hostToken() {
+	return globalThis.__PI_CONFIG?.hostToken ?? null;
+}
 
 async function hostcall(method, payload, opts = {}) {
 	const res = await fetch(LOOPBACK + "/hostcall", {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ method, payload, __hostToken: HOST_TOKEN }),
+		body: JSON.stringify({ method, payload, __hostToken: hostToken() }),
 		signal: opts.noTimeout ? undefined : AbortSignal.timeout(30_000),
 	});
 	if (!res.ok) throw new Error(`hostcall ${method}: HTTP ${res.status}`);
