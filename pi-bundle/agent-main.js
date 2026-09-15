@@ -440,8 +440,9 @@ const previewTool = hostTool(
 	"Preview",
 	"Open the preview panel on a file in the workspace so the user can see and interact with it. " +
 		"Use this after writing an HTML page (with its CSS/JS) so the user does not have to hunt for it. " +
-		"The page is served from a real local HTTP origin, so relative paths work: `./style.css`, `./app.js`, images and ES module imports all load normally — write a normal multi-file page. " +
-		"Scripts run. The page cannot reach your tools or any host credential. " +
+		"The page is served from a real local HTTP origin, so relative paths work: `./style.css`, `./app.js`, images and ES module imports all load normally — write a normal multi-file page. `fetch('./data.json')` and XHR also work. " +
+		"SANDBOX LIMITS (the page runs in a sandboxed frame — these fail SILENTLY, so avoid designing around them): `alert`/`confirm`/`prompt` show nothing; `localStorage`/`sessionStorage` throw; `window.open` is blocked; a link without `target=` does nothing. Use on-page UI instead of alert(), and keep state in memory. " +
+		"The page cannot reach your tools or any host credential. Also avoid unbounded synchronous loops — a parked main thread freezes the preview. " +
 		"Call preview again after you edit the files to reload it. " +
 		"Args: {path}",
 	obj(
