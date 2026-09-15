@@ -38,10 +38,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 static PORT: OnceLock<u16> = OnceLock::new();
@@ -62,19 +63,28 @@ pub fn start() -> Result<u16, String> {
         .local_addr()
         .map_err(|e| format!("preview addr: {e}"))?
         .port();
-    PORT.set(port).ok();
 
-    // 转成 tokio listener 必须在运行时上下文里做 —— 所以整段放进 async 任务，
-    // 而不是在 start() 的调用点（那里是 spawn_blocking 线程）。
+    // ⚠️ 端口**只在服务真的就绪后**才进 PORT（修 A2）。
+    //
+    // 初版是 bind 完立刻 `PORT.set(port)`，而 `set_nonblocking`/`from_std`/
+    // `axum::serve` 都在 spawn 出去的异步任务里 —— 任一步失败就会出现「端口已
+    // 缓存、服务并不在听」：`start()` 永远返回 Ok，UI 拼出一个指向死服务的
+    // iframe，而且**永不重试**。那是一个全静默的失败面。
+    //
+    // 于是用一条就绪信道：只有 listener 注册进 reactor（from_std 成功）后才回
+    // 报 Ok，失败把原因带回同步侧。`from_std` 必须在运行时上下文里做，所以
+    // 这一步不能提到 `start()` 外面（hostcall 那条路径跑在普通 std 线程上，
+    // 在那里调会 panic：there is no reactor running）。
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = listener.set_nonblocking(true) {
-            log(&format!("ERROR set_nonblocking: {e}"));
+            let _ = tx.send(Err(format!("preview set_nonblocking: {e}")));
             return;
         }
         let l = match tokio::net::TcpListener::from_std(listener) {
             Ok(l) => l,
             Err(e) => {
-                log(&format!("ERROR from_std: {e}"));
+                let _ = tx.send(Err(format!("preview from_std: {e}")));
                 return;
             }
         };
@@ -82,13 +92,21 @@ pub fn start() -> Result<u16, String> {
         let canon = tokio::fs::canonicalize(&root)
             .await
             .unwrap_or_else(|_| PathBuf::from(&root));
-        let app = router(PathBuf::from(root), canon);
-        log(&format!("preview up: port={port}"));
-        if let Err(e) = axum::serve(l, app).await {
+        let _ = tx.send(Ok(())); // 就绪
+        if let Err(e) = axum::serve(l, router(PathBuf::from(root), canon)).await {
             log(&format!("preview serve ended: {e}"));
         }
     });
-    Ok(port)
+
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(())) => {
+            PORT.set(port).ok();
+            log(&format!("preview up: port={port}"));
+            Ok(port)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("preview: server did not become ready in 3s".into()),
+    }
 }
 
 pub fn port() -> Option<u16> {
@@ -110,6 +128,20 @@ fn router(root: PathBuf, canon: PathBuf) -> Router {
                 .append_index_html_on_directories(true),
         )
         .layer(middleware::from_fn_with_state(state, deny_escape))
+        // CORS（修 A1）：iframe 是 `sandbox` 且**不给 allow-same-origin**，所以
+        // 预览页是 **opaque origin** —— 它向自己那个源发 `fetch()` 会被判为跨源
+        // （`Origin: null`），服务端不发 CORS 头就**会被浏览器挡掉**。
+        // `<script src>`/`<link>`/`<img>` 不受影响，但 fetch/XHR 会失败，而模型
+        // 写的游戏常把数据放 JSON 里 fetch 进来。
+        //
+        // 只放行 `Origin: null`（而不是 `*`）：普通网页发的是真实 origin，于是
+        // 读不到这个工作区；沙箱预览恰好发的就是 null。读只读静态服务在最小授权
+        // 下已经够用，没必要顺手把 `*` 开出去。
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::exact(HeaderValue::from_static("null")))
+                .allow_methods([Method::GET, Method::HEAD]),
+        )
 }
 
 /// 逃逸防护：拒绝 `..`，并把**解析过符号链接之后**的路径限制在 root 内。
@@ -356,6 +388,69 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&bait);
+    }
+
+    /// A1：沙箱预览页（opaque origin）发的是 `Origin: null`，必须收到
+    /// `Access-Control-Allow-Origin`，否则它的 fetch/XHR 会被浏览器挡掉
+    /// 而页面自己不会有任何可见报错（模型只会看到“点了没反应”）。
+    #[tokio::test]
+    async fn allows_opaque_origin_but_not_the_whole_web() {
+        let root = fixture("cors");
+        let res = app_for(&root)
+            .oneshot(
+                Request::builder()
+                    .uri("/app/index.html")
+                    .header("origin", "null")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let acao = res
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(acao, "null", "沙箱预览页拿不到 ACAO 就会 fetch 失败");
+
+        // 普通网页（真实 origin）**不该**被放行 —— 否则任意网页都能读这个工作区
+        let res = app_for(&root)
+            .oneshot(
+                Request::builder()
+                    .uri("/app/index.html")
+                    .header("origin", "https://example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let acao = res
+            .headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .unwrap_or_default();
+        assert!(
+            acao.is_empty() || acao == "null",
+            "不该给真实 origin 发 ACAO: {acao}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A2：`start()` 不能在服务就绪前把端口缓存下来 —— 否则一次失败会被永久
+    /// 当成成功（UI 拼出指向死服务的 iframe 且永不重试）。
+    ///
+    /// 这里验的是可直接观测的那一半：**workspace 未配置时不能留下缓存端口**，
+    /// 也就是失败路径不会污染 PORT。强制 `from_std` 失败很难构造，故那半边靠
+    /// 代码结构与注释保证（就绪信号只在注册进 reactor 之后才发）。
+    #[test]
+    fn failed_start_does_not_poison_the_port_cache() {
+        // 另一个测试可能已 configure 过（OnceLock 先到先得），所以两种结果都要
+        // 能接受，只断言「失败时没有缓存」这一条性质。
+        match start() {
+            Ok(p) => assert!(p > 0, "成功时端口必须有效"),
+            Err(_) => assert!(port().is_none(), "失败时不该留下缓存端口"),
+        }
     }
 
     #[test]

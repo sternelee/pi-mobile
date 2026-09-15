@@ -47,7 +47,7 @@ tauri-plugin-pi-native = { path = "plugins/pi-native" }
 # 成本很低：hyper/tower/tower-http 已由 tauri 传递引入（见 Cargo.lock），
 # 这里只新增 axum 本身；tokio 只多要 `net`/`fs` feature。
 axum = "0.8"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { version = "1", features = ["net", "fs"] }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
