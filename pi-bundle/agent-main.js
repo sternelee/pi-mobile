@@ -426,7 +426,38 @@ const runScriptTool = hostTool(
 	{ channel: "script_run", mutating: true },
 );
 
-const extensionTools = [askUserTool, runScriptTool];
+// ---- D15 预览：agent 自己把面板打开 ----
+//
+// 用户的流程是「让 pi 写一个五子棋 → pi 写 html/js/css → 调预览工具」。所以
+// 工具是必需的（不能只有抽屉里那个用户侧入口）。
+//
+// 不标 mutating：它不改变任何东西（只展示工作区里已有的文件），而且用户当场
+// 就看到它发生 —— 让用户去批准「看一眼自己的文件」是无意义的摩擦。
+// Rust 侧会校验路径存在并把「工作区里现有哪些 html」写在错误里，所以填错时
+// 模型能自己纠正，不会反复重试。
+const previewTool = hostTool(
+	"preview",
+	"Preview",
+	"Open the preview panel on a file in the workspace so the user can see and interact with it. " +
+		"Use this after writing an HTML page (with its CSS/JS) so the user does not have to hunt for it. " +
+		"The page is served from a real local HTTP origin, so relative paths work: `./style.css`, `./app.js`, images and ES module imports all load normally — write a normal multi-file page. " +
+		"Scripts run. The page cannot reach your tools or any host credential. " +
+		"Call preview again after you edit the files to reload it. " +
+		"Args: {path}",
+	obj(
+		{
+			path: {
+				type: "string",
+				description:
+					"Workspace-relative path to the HTML entry point (e.g. `gomoku/index.html`). Must already exist — write it first.",
+			},
+		},
+		["path"],
+	),
+	{ channel: "preview_open" },
+);
+
+const extensionTools = [askUserTool, runScriptTool, previewTool];
 
 const tools = [...coreTools, fetchTool, ...nativeTools, ...extensionTools];
 

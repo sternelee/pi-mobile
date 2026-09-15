@@ -1057,6 +1057,44 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
             None => serde_json::json!({ "skills": [] }),
         },
         "http" => crate::http_tool::run(payload),
+        // D15：agent 自己把预览面板打开（用户的流程是「让它写个五子棋 → 它调
+        // 预览工具」，所以工具是必需的，不能只有用户侧入口）。
+        //
+        // **agent 主体专用**：它不在 script.rs 的白名单里，所以脚本自己调会被
+        // 自动拒 —— 预览是 UI 动作，不该由一段脚本触发。
+        //
+        // 不需要审批：它不改变任何东西（只展示工作区里已有的文件），而且用户
+        // 当场就看到它发生。
+        "preview_open" => {
+            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            match crate::preview::resolve_target(path) {
+                Err(e) => serde_json::json!({ "error": e }),
+                Ok(rel) => {
+                    // 端口在此处确保存在（幂等），这样 UI 收到事件时能直接拼 URL。
+                    let port = match crate::preview::start() {
+                        Ok(p) => p,
+                        Err(e) => return serde_json::json!({ "error": format!("preview: {e}") }),
+                    };
+                    if let Some(sink) = EVENT_SINK.get() {
+                        sink(
+                            &serde_json::json!({
+                                "type": "preview_open",
+                                "path": rel,
+                                "port": port,
+                            })
+                            .to_string(),
+                        );
+                    }
+                    serde_json::json!({
+                        "text": format!(
+                            "preview open on {rel}. The user can now see and interact with it. \
+                             If you change the files, call preview again to reload it."
+                        )
+                    })
+                }
+            }
+        }
         // D14 脚本执行（**agent 主体专用**：它不在 script.rs 的白名单里，
         // 所以脚本自己调它会被自动拒）。走的是「授权 → 跑 → 撒销」三步，
         // 撒销放在成败之外——漏了就是 token 泄漏给下一次运行复用。

@@ -144,6 +144,39 @@ async fn deny_escape(
     next.run(req).await
 }
 
+/// 校验一个 workspace 相对路径是否是**可预览的目标**（D15）。
+///
+/// 为什么必须校验「存在」：不校验的话，agent 调错路径时 UI 会打开一个空白面板，
+/// 而模型从返回值看到 ok 就以为成功了 —— 接下来它会在这个错误前提上继续调试。
+/// 宁可当场把「工作区里到底有哪些 html」告诉它（错误信息可执行，同 CONTRACTS
+/// §2.2 的纪律）。
+pub fn resolve_target(path: &str) -> Result<String, String> {
+    let root = crate::pi_bun::loopback::workspace_dir().ok_or("workspace not configured")?;
+    resolve_in(Path::new(&root), path)
+}
+
+/// 纯函数版（不碰全局）—— 测试能用临时目录直接验，避免与 `configure` 的
+/// OnceLock 互相干扰（这个坑在本模块已经踩过一次）。
+pub fn resolve_in(root: &Path, path: &str) -> Result<String, String> {
+    let rel = path.trim().trim_start_matches('/');
+    if rel.is_empty() {
+        return Err("preview: empty path".into());
+    }
+    let full = crate::pi_bun::loopback::jail_path_in(root, rel)
+        .map_err(|_| format!("preview: '{rel}' is outside the workspace"))?;
+    if !full.is_file() {
+        let mut have: Vec<String> = Vec::new();
+        collect_html(root, "", 0, &mut have);
+        have.sort();
+        return Err(format!(
+            "preview: '{rel}' does not exist in the workspace. Write it first with the write tool. \
+             HTML files currently present: [{}]",
+            if have.is_empty() { "none".to_string() } else { have.join(", ") }
+        ));
+    }
+    Ok(rel.to_string())
+}
+
 /// workspace 里的 html 入口候选（给 UI 的选择列表）。
 ///
 /// 有界：限深度与条数，并跳过 node_modules 等。**不做全量遍历**——workspace 里
@@ -332,6 +365,28 @@ mod tests {
         // 不完整/非法的 % 序列按字面保留，不能 panic
         assert_eq!(percent_decode("/a%zz"), "/a%zz");
         assert_eq!(percent_decode("/a%2"), "/a%2");
+    }
+
+    /// 负向优先：填错路径时必须**当场说清工作区里有什么**，否则模型会反复重试
+    /// （同 CONTRACTS §2.2 的可执行指引纪律）。
+    #[test]
+    fn resolve_rejects_missing_escape_and_lists_what_exists() {
+        let root = fixture("resolve");
+
+        // 存在 → 通过，且归一化掉前导斜杠
+        assert_eq!(resolve_in(&root, "/app/index.html").unwrap(), "app/index.html");
+
+        // 不存在 → 报错里必须带上现有的 html，且提示先 write
+        let e = resolve_in(&root, "gomoku/index.html").unwrap_err();
+        assert!(e.contains("does not exist"), "{e}");
+        assert!(e.contains("write tool"), "{e}");
+        assert!(e.contains("app/index.html"), "应列出已有 html: {e}");
+
+        // 逃逸 → 拒（且不能因为「列出了文件」而泄露 root 之外的东西）
+        assert!(resolve_in(&root, "../secrets.json").is_err());
+        assert!(resolve_in(&root, "").is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
