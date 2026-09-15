@@ -193,7 +193,9 @@ pub fn init_tls(data_dir: &str) {
         return;
     };
 
-    let bundle = std::path::Path::new(data_dir).join("cacerts.pem");
+    // 文件名带 `v2`：上一版拼的是「整份文件」（含 END 之后的指纹文本），
+    // 那份 bundle 是坏的。换名字强制重建，否则会沿用旧文件继续失败。
+    let bundle = std::path::Path::new(data_dir).join("cacerts-v2.pem");
     let need_build = std::fs::metadata(&bundle).map(|m| m.len() == 0).unwrap_or(true);
     if need_build {
         let mut out = String::new();
@@ -201,13 +203,22 @@ pub fn init_tls(data_dir: &str) {
         if let Ok(entries) = std::fs::read_dir(src) {
             for e in entries.flatten() {
                 if let Ok(text) = std::fs::read_to_string(e.path()) {
-                    if text.contains("BEGIN CERTIFICATE") {
-                        out.push_str(&text);
-                        if !text.ends_with('\n') {
-                            out.push('\n');
-                        }
-                        n += 1;
-                    }
+                    // ⚠️ **只取 PEM 块本体，不要整份文件**。
+                    //
+                    // Android 的 cacerts 文件不是纯 PEM：`-----END CERTIFICATE-----`
+                    // 之后还跟着 `openssl x509 -text` 那段人类可读元数据（含
+                    // `SHA1 Fingerprint=…`）。整份拼进去会让 OpenSSL 解析这个文件时
+                    // 在中间撞上非 PEM 文本，失败为：
+                    //     failed to load certificates: error:05880020:…::BIO lib
+                    // 而 `sslCAInfo` 要的正是「若干 PEM 证书拼接」，本就不该带杂文本。
+                    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+                    const END: &str = "-----END CERTIFICATE-----";
+                    let Some(b) = text.find(BEGIN) else { continue };
+                    let Some(e_rel) = text[b..].find(END) else { continue };
+                    let block = &text[b..b + e_rel + END.len()];
+                    out.push_str(block);
+                    out.push('\n');
+                    n += 1;
                 }
             }
         }
@@ -230,11 +241,29 @@ pub fn init_tls(data_dir: &str) {
     // 所以只用 set_ssl_cert_file，不调 set_ssl_cert_dir。
     //
     // SAFETY: helper 内部会自行 `crate::init()`；启动期调用（agent_init 早期）。
-    let set = unsafe { git2::opts::set_ssl_cert_file(&bundle) };
+    // 自检：把「文件到底能不能读」与「传给 OpenSSL 的正是哪个字符串」都打出来。
+    // 上一次失败是 `error:05880020:…::BIO lib` —— 那个错来自
+    // `BIO_new_file()` 返回 NULL，即**文件打不开**，而不是格式问题（宿主 OpenSSL
+    // 能正常解析同一份 bundle，已实测）。所以先分清是「文件不可读」还是
+    // 「路径没传对」，别再猜格式。
+    match std::fs::File::open(&bundle) {
+        Ok(_) => crate::pi_bun::logcat(&format!(
+            "[git] CA bundle readable: {} ({} bytes)",
+            bundle.display(),
+            std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0)
+        )),
+        Err(e) => crate::pi_bun::logcat(&format!(
+            "[git] ERROR CA bundle NOT readable: {} → {e}",
+            bundle.display()
+        )),
+    }
+    // 显式传 &str：排除 IntoCString 对 PathBuf 的转换是否是问题所在。
+    let bundle_str = bundle.to_str().unwrap_or_default();
+    let set = unsafe { git2::opts::set_ssl_cert_file(bundle_str) };
     match &set {
         Ok(()) => crate::pi_bun::logcat(&format!(
             "[git] libgit2 sslCAInfo={} ({} bytes)",
-            bundle.display(),
+            bundle_str,
             std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0)
         )),
         Err(e) => crate::pi_bun::logcat(&format!("[git] ERROR set_ssl_cert_file: {e}")),
