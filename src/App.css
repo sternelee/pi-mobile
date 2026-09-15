@@ -1439,6 +1439,11 @@ button {
   display: flex;
   flex-direction: column;
   background: var(--surface);
+  /* ⚠️ 因为它是 `position: fixed`，**相对视口**定位 —— 于是绕过了
+     `.app` 的 `padding-top: var(--safe-top)`（app 自己的布局靠那条避开状态栏）。
+     不补这两行，工具栏就会盖住手机状态栏、iframe 也会被手势条压住。
+     底部用 same 变量：预览页不该被压在手势条下。 */
+  padding-bottom: var(--safe-bottom);
 }
 
 .preview-bar {
@@ -1446,6 +1451,10 @@ button {
   align-items: center;
   gap: 0.4rem;
   padding: 0.45rem 0.6rem;
+  /* 安全区加在**工具栏自己**而不是 sheet 上：这样工具栏底色一直铺到屏幕
+     顶边，文字/按钮落在状态栏下方 —— 视觉上更像原生，而不是顶部留一条
+     异色空白。 */
+  padding-top: calc(0.45rem + var(--safe-top));
   border-bottom: 1px solid hsl(var(--border));
   background: var(--surface-2);
 }

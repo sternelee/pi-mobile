@@ -593,6 +593,18 @@ function App() {
             script: ev.script === true,
           });
           break;
+        case "preview_open":
+          // D15：agent 自己打开了预览（它调了 preview 工具）。面板已开时是
+          // **切换 + 重载**——正是「改完再调一次」的迭代循环需要的行为。
+          if (typeof ev.path === "string" && ev.path) {
+            setPreviewPath(ev.path);
+            setPreviewList((prev) => (prev.includes(ev.path) ? prev : [...prev, ev.path]));
+            if (typeof ev.port === "number") setPreviewPort(ev.port);
+            setPreviewErr(null);
+            setPreviewNonce((n) => n + 1);
+            setPreviewOpen(true);
+          }
+          break;
         case "ask_user":
           setAsk({
             requestId: ev.requestId,
