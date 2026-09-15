@@ -338,6 +338,43 @@ pi-mobile/
   `deny_escape` 中间件做 canonicalize + 前缀校验；它不列目录（✓ 不泄露文件名）。
 - **真机已验**（2026-09-15）：pi 写五子棋 + 调 preview → 面板自动弹出且可玩。
 
+### D16：Git 集成（工作区内的 clone/pull/push）
+
+- **平台硬约束（先于一切选型）**：移动端**没有 `git` 二进制、没有 shell 可执行**
+  （D6 无 exec）→ 必须用**库**实现，不能 shell out，也不能像桌面那样靠 sidecar。
+- **库选型：`gix`（gitoxide，纯 Rust），不用 `git2`/libgit2。**
+  这不是口味问题，是**构建风险**问题：`git2` 是 C 库绑定，交叉编译到
+  arm64-android + arm64-ios 要 C 工具链 + cmake，`libgit2-sys` 的 vendored 构建在
+  iOS 真机上已知麻烦 —— 正是我们刚在「Android 从源码构建 JSC」上踩过的那类坑
+  （那条流水线的脚本甚至从未存在过，见 docs/PROGRESS.md 2026-09-14）。
+  **D12 当时已经为此刻意不引 git2**（理由同上，改用 codeload zipball）—— 本决策
+  不推翻它，只是补上「要真 git 能力时该用什么」。`gix` 无 C 依赖，与现有 Rust
+  代码同一条交叉编译路径。
+- **⚠️ 需早期验证的一点（可能推翻选型）**：`gix` 的 **push** 支持不如 fetch 成熟。
+  若 https + token 的 push 不可用，候选退路（按代价排序）：① v1 只做
+  clone/pull/commit，push 延后；② push 走手写的 smart-HTTP（代价大，不轻启）；
+  ③ 退到 git2 + 自建 NDK 构建（即回到上面那条已知高风险的坑）。**先用一个
+  十几行的 spike 验证 ①/② 的前提，再动工**——与 A3 那条同理：未知的地方先实验。
+- **工具集与审批：按「后果」分档，不按 API 分**
+
+  | 工具 | 后果 | 审批 |
+  |---|---|---|
+  | `git_status` / `git_diff` / `git_log` | 只读 | 自动 |
+  | `git_clone` | 读网络 + 写工作区（不覆盖已有文件） | 自动，但目标目录非空则拒 |
+  | `git_pull` | **覆盖工作区文件** | **ask** |
+  | `git_commit` | 只改本地仓库（与 `write` 同级后果） | 跟 `write` 同一基线 |
+  | `git_push` | **把用户代码发到远端（数据外泄）** | **ask，且卡上必须显示远端 URL** |
+
+- **URL 纪律**：复用 `http_tool::validate_url`（已拒 loopback/私网/链路本地）
+  **+ 只允许 https**。远端的理由不止 SSRF：远端地址是本功能最大的外泄面，而
+  `git://`/`ssh://`/`file://` 各自带一套不同的信任假设，v1 只认 https。
+- **凭证**：走现有 `creds`（`git:<host>` 作 provider key；iOS=keyring /
+  Android=沙箱文件，见 src/creds.rs）。**凭证绝不得进脚本 VM** → git 工具对 D14
+  脚本**永不可授予**（写进 `script.rs::NEVER_GRANTABLE` 的审计清单）。
+- **jail**：仓库根必须在 workspace 内；`clone` 的目标路径同样过 `jail_path`。
+- **待定**：`git_push` 的授权粒度（每次 ask / 按 host 记住 / 远端预先登记）；
+  `git_commit` 的 author 身份从哪来（无 `user.name` 配置）。
+
 ---
 
 ## 6. 里程碑路线图（方案 C 形态：libpi-bun 为关键路径）
