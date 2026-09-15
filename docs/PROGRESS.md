@@ -73,8 +73,75 @@ debug=`true` / release=`false`（`build.gradle.kts:21` 默认值未被覆盖）�
 未提交」）—— 所以 **`7ec576f` 当时并非端到端完整**：Rust 发事件但 UI 不认，
 agent 调 preview 时面板不会自动打开。现已补齐。
 
+### ⚠️ 边界情况清单（未修，按可能咬人的程度排序）
+
+#### A. 我怀疑是真问题的
+
+**A1. `sandbox` 不给 `allow-same-origin` → 预览页的 `fetch`/XHR 会被 CORS 挡掉**
+
+沙箱化后文档是 **opaque origin**，它向自己那个源发 `fetch('./data.json')` 会被视为
+跨源（`Origin: null`），而服务端**没有发 CORS 头**（`preview.rs` 里 0 处
+`CorsLayer`）。`<script src>` / `<link>` / `<img>` 不受影响（非 CORS 约束），
+**但 fetch/XHR 会失败**。
+
+实践里很可能会咬到：模型写的游戏常把关卡/棋盘数据放 JSON 里 fetch 进来。
+要在「保留 opaque origin（够不到 app DOM）」与「让 fetch 可用」之间选：补
+`Access-Control-Allow-Origin: *`（对只读静态服务是安全的），或改成给
+`allow-same-origin` 并把安全边界全押在独立端口 + token 上。
+*（按 Web 规范推断，**未实测** —— 列为第一优先要实测的一条）*
+
+**A2. `start()` 把端口缓存得早于「服务真的起来」**
+
+`preview.rs:65` 的 `PORT.set(port)` 在 `set_nonblocking`/`from_std`/`axum::serve`
+（`70`/`74`/`87` 行）**之前**。任一步失败 → 端口已缓存 → `start()` 永远返回 Ok，
+UI 拼出一个指向死服务的 iframe，且**永不重试**（完全静默）。
+修法：失败时清缓存（或 `OnceLock<Result>`），并让 `start()` 等到服务就绪再返回。
+
+**A3. 预览页里的死循环会冻住整个 app 的 WebView**
+
+D14 的脚本有独立 VM + 墙钟看门狗；**iframe 没有** —— 它跑在 UI 的 WebView 里，
+而 `while(1){}` 会把整个界面卡死。UI 侧只能事后补救（超时提示 + 强制关面板），
+或接受为已知限制。
+
+**A4. 沙箱禁掉了一批模型常用的 API（且工具描述没告知）**
+
+| 缺失的属性 | 后果 |
+|---|---|
+| `allow-modals` | `alert()` / `confirm()` / `prompt()` **被静默忽略** |
+| `allow-same-origin` | `localStorage` / `sessionStorage` 访问**抛 SecurityError** |
+| `allow-popups` | `window.open` 被拒 |
+| （默认无 top-navigation） | 点 `<a href>` 若无 `target=` **静默无反应** |
+
+模型写游戏时这几样都很常见，而现在的工具描述只说「scripts run」——**不够**。
+应该把这几条写进 `preview` 的描述，否则模型会写出“看起来对、实际无反应”的代码，
+而它看不见报错（见下面的下一步 1），只能靠用户复述。
+
+#### B. 功能缺口
+
+5. **`preview` 传目录会被拒**（`resolve_in` 要求 `is_file`）—— 其实应允许目录并补
+   `index.html`（现在是报错 + 列出 html）
+6. **`/app` 与 `/app/` 的差别**：`append_index_html_on_directories` 只在**带尾斜杠**
+   时补 index。不带尾斜杠时会怎样（重定向？404？）**需实测** —— 若是 404/无重定向，
+   而页面里用相对路径，基准目录会错到父级，表现为「CSS/JS 全 404」
+7. `targets()` 有深度 4 / 50 条上限，但**服务本身没有** → agent 能预览一个选择器里
+   看不到的文件（不一致，不致命）
+8. **无文件大小上限**：预览一个很大的文件会整块读进内存（ServeDir 本身是流式的，
+   但未验证）
+9. `resolve_in` 允许任意文件（`.md`/`.txt`/`.svg`）→ `.md` **不会渲染成 markdown**
+   （当纯文本）。可能反直觉，值得在工具描述里说一句
+10. 预览页 `fetch('/../pi-bun.log')` 被 jail 拒 ✓，但 `fetch('/')` 会拿到根提示文本
+
+#### C. 只在特定路径出现
+
+11. 重启 app 后面板不恢复（预览不持久化）
+12. release 构建依赖 `res/xml/network_security_config.xml` —— 若日后动 manifest，
+    要连它一起看，否则回到「debug 能预览、release 空白」
+
 ### ⏭ 下一步候选
 
+0. **先结掉上面 A 组的四条**，其中 **A1（fetch 被 CORS 挡）与 A2（端口早缓存）
+   建议优先**：A1 直接决定模型能否写“fetch JSON”型的游戏，A2 是一个全静默的失败面。
+   A1 的实测很便宜：往 workspace 放一个会 fetch 的页面看一眼即可。
 1. **把预览页的 console error / `window.onerror` 回传给 agent**（`postMessage` →
    hostcall）—— 现在页面报错**用户看得见、pi 看不见**，只能靠猜；补上才能闭环
    「写 → 跑 → 自己看报错 → 修」。这是这条流程下一个真正的痛点。
