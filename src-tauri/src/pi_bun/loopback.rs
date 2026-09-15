@@ -39,10 +39,19 @@ pub(crate) fn workspace_dir() -> Option<String> {
 /// 路径越狱防护：限制在 workspace 内，拒绝绝对路径与 `..`。
 pub(crate) fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
     let root = WORKSPACE_DIR.get().ok_or("workspace not configured")?;
+    jail_path_in(std::path::Path::new(root), p)
+}
+
+/// 同上，但根目录由调用方给出。
+///
+/// 拆出来是为了**不重复那条越狱规则**（安全规则只能有一份）：`preview::serve`
+/// 是纯函数（不碰全局，否则会与 `configure` 的 OnceLock 互相干扰），它需要
+/// 用自己的 root 做同一个判定。
+pub(crate) fn jail_path_in(root: &std::path::Path, p: &str) -> Result<std::path::PathBuf, String> {
     if p.starts_with('/') || p.split('/').any(|seg| seg == "..") || p.contains('\\') {
         return Err(format!("path outside workspace: {p}"));
     }
-    Ok(std::path::Path::new(root).join(p))
+    Ok(root.join(p))
 }
 
 /// 读 workspace 相对路径文件（approval 计算 diff 等宿主内部用途）。

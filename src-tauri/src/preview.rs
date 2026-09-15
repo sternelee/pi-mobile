@@ -194,10 +194,34 @@ fn handle_conn(mut stream: TcpStream) {
     let method = parts.next().unwrap_or("");
     let raw_path = parts.next().unwrap_or("/");
 
-    // HEAD 用于探活；POST/PUT/DELETE 等一律拒 —— 预览页不该有能力写任何东西。
+    let root = match crate::pi_bun::loopback::workspace_dir() {
+        Some(r) => std::path::PathBuf::from(r),
+        None => {
+            respond(
+                &mut stream,
+                "503 Service Unavailable",
+                "text/plain",
+                b"workspace not configured",
+            );
+            return;
+        }
+    };
+    let (status, mime, body) = serve(&root, method, raw_path);
+    respond(&mut stream, status, mime, &body);
+}
+
+/// 请求处理核心 —— **纯函数**：只依赖传入的 root，不碰任何全局。
+///
+/// 这样测试能用临时目录直接验，不会像早期版本那样因 `loopback::configure` 是
+/// OnceLock（先到先得）而把 loopback 自己的测试弄挂。
+fn serve(
+    root: &std::path::Path,
+    method: &str,
+    raw_path: &str,
+) -> (&'static str, &'static str, Vec<u8>) {
+    // 只读：预览页永不该有能力写任何东西。
     if method != "GET" && method != "HEAD" {
-        respond(&mut stream, "405 Method Not Allowed", "text/plain", b"read-only");
-        return;
+        return ("405 Method Not Allowed", "text/plain", b"read-only".to_vec());
     }
 
     // 查串与锚点不属于文件名；顺带做个 URL 解码（%20 等）。
@@ -205,41 +229,43 @@ fn handle_conn(mut stream: TcpStream) {
     let decoded = percent_decode(path);
     let rel = decoded.trim_start_matches('/');
     if rel.is_empty() {
-        respond(
-            &mut stream,
+        return (
             "200 OK",
             "text/plain; charset=utf-8",
-            b"pi-mobile preview: GET /<workspace-relative-path>\n",
+            b"pi-mobile preview: GET /<workspace-relative-path>\n".to_vec(),
         );
-        return;
     }
-    // 目录请求 → 补 index.html（相对路径引用才不会 404）。
+    // 目录请求 → 补 index.html（否则相对引用会 404）。
     let rel = if rel.ends_with('/') {
         format!("{rel}index.html")
     } else {
         rel.to_string()
     };
 
-    let full = match crate::pi_bun::loopback::jail_path(&rel) {
+    // 越狱防护复用 loopback 那一份规则（安全规则只能有一份）。
+    let full = match crate::pi_bun::loopback::jail_path_in(root, &rel) {
         Ok(p) => p,
         Err(e) => {
             log(&format!("deny {rel}: {e}"));
-            respond(&mut stream, "403 Forbidden", "text/plain", b"outside workspace");
-            return;
+            return ("403 Forbidden", "text/plain", b"outside workspace".to_vec());
         }
     };
     match std::fs::read(&full) {
         Ok(bytes) => {
             let mime = mime_for(&rel);
             if method == "HEAD" {
-                respond(&mut stream, "200 OK", mime, b"");
+                ("200 OK", mime, Vec::new())
             } else {
-                respond(&mut stream, "200 OK", mime, &bytes);
+                ("200 OK", mime, bytes)
             }
         }
         Err(e) => {
             let msg = format!("cannot read {rel}: {e}");
-            respond(&mut stream, "404 Not Found", "text/plain; charset=utf-8", msg.as_bytes());
+            (
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                msg.into_bytes(),
+            )
         }
     }
 }
@@ -300,57 +326,51 @@ mod tests {
     ///   1. **只读**：POST 必须 405（预览页永不该有能力写东西）
     ///   2. **jail**：`../creds.json` 这类路径必须 403（否则等于把凭证交给一段
     ///      LLM 写的脚本）
+    /// 真的走 HTTP 语义跑一遍核心（不再是只测 mime 函数）。
+    ///
+    /// 用**纯函数 + 临时 root**，不碰任何全局 —— 早期版本调
+    /// `loopback::configure` 去设 workspace，而那是 OnceLock（先到先得），
+    /// 于是竞态地把 loopback 自己的测试弄挂了。
     #[test]
-    fn serves_over_real_http_and_refuses_escape_and_writes() {
-        let dir = std::env::temp_dir().join(format!("pi-preview-test-{}", std::process::id()));
-        let ws = dir.join("workspace");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(ws.join("app")).unwrap();
-        std::fs::write(ws.join("app/index.html"), b"<h1>hi</h1>").unwrap();
-        std::fs::write(ws.join("app/site.css"), b"h1{color:red}").unwrap();
-        // 想让逃逸成立的诱饵：就放在 workspace 旁边
-        std::fs::write(dir.join("creds.json"), b"SECRET").unwrap();
-        crate::pi_bun::loopback::configure(ws.to_str().unwrap(), dir.to_str().unwrap());
+    fn serves_and_refuses_escape_and_writes() {
+        let root = std::env::temp_dir().join(format!("pi-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/index.html"), b"<h1>hi</h1>").unwrap();
+        std::fs::write(root.join("app/site.css"), b"h1{color:red}").unwrap();
+        // 逃逸诱饵：放在 root 之外（`../` 的落点）
+        let bait = root.parent().unwrap().join("pi-preview-bait.json");
+        std::fs::write(&bait, b"SECRET").unwrap();
 
-        let port = start().expect("preview start");
-        let get = |target: &str| -> String {
-            use std::io::{Read, Write};
-            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            s.write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
-                .unwrap();
-            let mut out = String::new();
-            s.read_to_string(&mut out).unwrap();
-            out
+        let body = |t: &str| -> (String, String) {
+            let (st, mime, b) = serve(&root, "GET", t);
+            (format!("{st} | {mime}"), String::from_utf8_lossy(&b).into_owned())
         };
 
-        let ok = get("/app/index.html");
-        assert!(ok.starts_with("HTTP/1.1 200 OK"), "{ok}");
-        assert!(ok.contains("text/html"), "Content-Type 错了浏览器就不渲染: {ok}");
-        assert!(ok.contains("<h1>hi</h1>"), "{ok}");
+        let (h, txt) = body("/app/index.html");
+        assert!(h.starts_with("200 OK"), "{h}");
+        assert!(h.contains("text/html"), "Content-Type 错了浏览器就不渲染: {h}");
+        assert!(txt.contains("<h1>hi</h1>"), "{txt}");
 
         // 相对引用：css 能被取到（这正是不用 srcdoc 的原因）
-        let css = get("/app/site.css");
-        assert!(css.contains("text/css"), "{css}");
-
+        assert!(body("/app/site.css").0.contains("text/css"));
         // 目录请求补 index.html
-        assert!(get("/app/").starts_with("HTTP/1.1 200 OK"));
+        assert!(body("/app/").0.starts_with("200 OK"));
+        // 查串不参与文件名（预览重开时带 ?v=…）
+        assert!(body("/app/index.html?v=3").0.starts_with("200 OK"));
 
         // 逃逸必须被拒，且**不能**泄露内容
-        let esc = get("/../creds.json");
-        assert!(esc.starts_with("HTTP/1.1 403"), "{esc}");
-        assert!(!esc.contains("SECRET"), "逃逸把 workspace 外的文件泄了: {esc}");
+        let (s1, t1) = body("/../pi-preview-bait.json");
+        assert!(s1.starts_with("403"), "{s1}");
+        assert!(!t1.contains("SECRET"), "逃逸把 root 外的文件泄了: {t1}");
+        assert!(body("/app/../../pi-preview-bait.json").0.starts_with("403"));
 
         // 只读
-        {
-            use std::io::{Read, Write};
-            let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            s.write_all(b"POST /app/index.html HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .unwrap();
-            let mut out = String::new();
-            s.read_to_string(&mut out).unwrap();
-            assert!(out.starts_with("HTTP/1.1 405"), "{out}");
-        }
+        let (st, _, _) = serve(&root, "POST", "/app/index.html");
+        assert!(st.starts_with("405"), "{st}");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&bait);
     }
+
 }
