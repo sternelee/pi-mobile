@@ -349,6 +349,9 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     // 先立日志通道：真机排障只能靠文件（各平台 stdout/logcat 都不可靠，
     // 缘由见 set_log_dir 注释）。之后的每条 logcat 都会落盘。
     set_log_dir(data_dir);
+    // D16：Android 的 CA 信任库不在 OpenSSL 的默认路径上，必须在任何 git 网络操作
+    // 之前指过去 —— 否则 clone/pull 一律报 `SSL certificate is invalid`。
+    crate::git::init_tls();
     let port = loopback::start()?;
     init(data_dir)?;
     // 开发期自检：debug 构建才跑，且不得阻塞启动（最坏要等各步超时

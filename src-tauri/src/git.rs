@@ -155,6 +155,42 @@ fn scrub(msg: &str) -> String {
     out
 }
 
+/// 把操作系统的信任库指给 OpenSSL（**仅 Android 需要**）。
+///
+/// 真机症状：`clone failed: the SSL certificate is invalid; code=Certificate (-17)`
+/// —— libgit2+openssl 用 `SSL_CTX_set_default_verify_paths()`，而它的默认路径是
+/// 通用 Linux 的 `/etc/ssl/certs`，**在 Android 上不存在**，于是信任库为空、
+/// 任何证书都验不过。
+///
+/// Android 的信任库是 `/apex/com.android.conscrypt/cacerts`（Android 14+ 的
+/// 权威位置）与 `/system/etc/security/cacerts`，**格式恰好就是 OpenSSL 的 hashed
+/// 目录**（`subject_hash.N` 文件），所以直接指 `SSL_CERT_DIR` 即可，不需要拼 bundle。
+///
+/// 在**任何网络操作之前**调用（libgit2 每次 fetch/clone 会新建 SSL context，
+/// 但早设比晚设可靠）。已设过就不覆盖 —— 尊重用户的显式配置。
+pub fn init_tls() {
+    #[cfg(target_os = "android")]
+    {
+        if std::env::var_os("SSL_CERT_DIR").is_some() {
+            return;
+        }
+        // 优先 APEX（14+ 权威位置），回退传统路径 —— 两者在 Android 16 上都存在
+        // 且内容一致（实测各 149 个 hashed 证书），但按权威性优先。
+        for dir in [
+            "/apex/com.android.conscrypt/cacerts",
+            "/system/etc/security/cacerts",
+        ] {
+            if std::path::Path::new(dir).is_dir() {
+                // SAFETY: 启动期单线程调用（agent_init 早期），无并发读 env。
+                unsafe { std::env::set_var("SSL_CERT_DIR", dir) };
+                crate::pi_bun::logcat(&format!("[git] SSL_CERT_DIR={dir}"));
+                return;
+            }
+        }
+        crate::pi_bun::logcat("[git] WARN: no Android CA store found; https will fail");
+    }
+}
+
 // ── 只读操作 ────────────────────────────────────────────────────────
 
 pub fn status(repo_rel: &str) -> Result<String, String> {
