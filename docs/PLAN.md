@@ -350,11 +350,25 @@ pi-mobile/
   **D12 当时已经为此刻意不引 git2**（理由同上，改用 codeload zipball）—— 本决策
   不推翻它，只是补上「要真 git 能力时该用什么」。`gix` 无 C 依赖，与现有 Rust
   代码同一条交叉编译路径。
-- **⚠️ 需早期验证的一点（可能推翻选型）**：`gix` 的 **push** 支持不如 fetch 成熟。
-  若 https + token 的 push 不可用，候选退路（按代价排序）：① v1 只做
-  clone/pull/commit，push 延后；② push 走手写的 smart-HTTP（代价大，不轻启）；
-  ③ 退到 git2 + 自建 NDK 构建（即回到上面那条已知高风险的坑）。**先用一个
-  十几行的 spike 验证 ①/② 的前提，再动工**——与 A3 那条同理：未知的地方先实验。
+- **❌ 已验证：`gix` 0.87.1 没有 push。**（2026-09-15，源码实测，不是猜）
+  `remote/connection/` 下只有 `fetch/`；全 crate 只有 `PushRefSpec`（配置解析）与
+  `Push`（配置段），**无 `prepare_push`**。所以 clone / fetch / pull 可用，**推送不可用**。
+
+  这条验证在**写任何集成代码之前**做掉了（本决策自己定的「先 spike 再动工」），
+  省掉了后面几百行白写 —— 与 A3 那条纪律同一来源。
+
+  **push 的三条退路（按代价排序，待定）**：
+  1. **v1 不做 push**：clone/pull/status/diff/log/commit 先用 gix 落地，push 延后。
+     代价最低且不引入新风险，但「让 agent 把成果推上去」这个诉求要等。
+  2. **手写 smart-HTTP push**（`git-receive-pack`）：协议本身不复杂（一个
+     POST + pkt-line + 对象打包复用 gix 已有的 pack 能力），但要自己处理
+     认证与协商，属**真活**。
+  3. **为 push 单独引入 git2**：等于**同一个功能两套 git 实现**，且把 D12 刻意避开
+     的 NDK 交叉编译风险请回来 —— 不推荐（仅当 2 也不可接受时）。
+
+  另一条可选路线：**不做 push，改用现有 HTTP 能力把产物经 GitHub API 提交**
+  （`PUT /repos/{o}/{r}/contents/{path}`）—— 语义比 push 弱（不能推历史、一次一文件），
+  但对「把生成的页面传上去」这类真实需求可能够用，且复用现存依赖。
 - **工具集与审批：按「后果」分档，不按 API 分**
 
   | 工具 | 后果 | 审批 |

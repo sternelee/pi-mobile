@@ -49,6 +49,21 @@ tauri-plugin-pi-native = { path = "plugins/pi-native" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { version = "1", features = ["net", "fs"] }
+# D16 Git 集成。选 gix 而非 git2/libgit2：后者是 C 库，arm64-android +
+# arm64-ios 交叉编译风险大（D12 已为此刻意不引它，见 skills.rs 头注释）。
+# ⚠️ 传输层必须显式选 reqwest+rustls —— gix 也可以走 curl，那等于把 C 依赖请回来。
+gix = { version = "0.87", default-features = false, features = [
+    "blocking-network-client",
+    "blocking-http-transport-reqwest-rust-tls",
+    "credentials",
+    "revision",
+    "status",
+    "dirwalk",
+    "excludes",
+    "attributes",
+    "index",
+    "worktree-mutation",
+] }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。
