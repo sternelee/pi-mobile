@@ -420,6 +420,36 @@ fn run_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             std::fs::create_dir_all(&path).map_err(|e| format!("mkdir: {e}"))?;
             Ok(format!("created directory {}", display_rel(&path)))
         }
+        // D17：删除文件/目录。**默认不递归** —— 删目录要显式传 recursive，
+        // 否则只能删空目录。这样「误删整棵树」需要一个明确的动作，而不是默认后果。
+        "rm" => {
+            let path = jail_path(args.get("path").and_then(|v| v.as_str()).ok_or("path?")?)?;
+            let recursive = args
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !path.exists() {
+                return Err(format!(
+                    "no such path: {} (use ls to see what is there)",
+                    display_rel(&path)
+                ));
+            }
+            let rel = display_rel(&path);
+            if path.is_dir() && !path.is_symlink() {
+                if recursive {
+                    std::fs::remove_dir_all(&path).map_err(|e| format!("rm -r: {e}"))?;
+                } else {
+                    std::fs::remove_dir(&path).map_err(|e| {
+                        format!(
+                            "rm: directory not empty ({e}). Pass recursive: true to remove it                              and everything inside — that cannot be undone."
+                        )
+                    })?;
+                }
+            } else {
+                std::fs::remove_file(&path).map_err(|e| format!("rm: {e}"))?;
+            }
+            Ok(format!("removed {rel}"))
+        }
         "grep" => {
             let pattern = args
                 .get("pattern")

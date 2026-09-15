@@ -1509,3 +1509,41 @@ button {
   border: 0;
   background: #fff;
 }
+
+/* ── D17 界面细节 ───────────────────────────────────────────────── */ 
+
+/* ② 模型选择列表：每行是独立卡片，需要竖向间距。
+   与侧栏会话卡片同一问题（当初那里也漏了间距，相邻边框看起来像一条粗线）。 */
+.model-row {
+  margin: 0.4rem 0;
+  align-items: center;
+}
+
+/* 当前模型的勾号：用主题色而不是默认前景色，让「选中」在列表里一眼可辨
+   （列表里其它行是灰的，只有它该被立刻看到）。 */
+.model-check {
+  color: var(--amber, hsl(var(--primary)));
+  margin-right: 0.35rem;
+}
+
+/* ③ 抽屉底部两个入口（Preview / Settings）之间留间距。
+   刻意用相邻兄弟选择器限定在 `.mt-auto` 里，不去动全局 `.settings-row` —— 
+   设置页里那些行本来就有自己的节奏，全局改会连带影响。 */
+.mt-auto > .settings-row + .settings-row {
+  margin-top: 0.5rem;
+}
+
+/* ⑤ Agent 配置面板的版块标题：加一条上分隔线，让「版块」在视觉上真的成块
+   （原来只有加粗文字，滚动时几个版块会糊在一起）。首块不要顶线。 */
+.settings-section-title {
+  margin-top: 1.1rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid hsl(var(--border));
+  letter-spacing: 0.02em;
+}
+
+.settings-section-title:first-of-type {
+  margin-top: 0.2rem;
+  padding-top: 0;
+  border-top: none;
+}

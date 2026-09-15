@@ -23,7 +23,9 @@ const ASK_TOOLS: &[&str] = &["write", "edit", "mkdir", "bash", "git_commit"];
 /// **永远 ask**，不受 write 基线影响（D16：pull 会覆盖工作区文件，是这套里
 /// 唯一「直接改用户已有文件」的操作；把它降成 auto 等于让 agent 静默覆盖）。
 /// clone 不在此列：它只往**空目录**里写，非空即拒，不覆盖任何已有内容。
-const ALWAYS_ASK_TOOLS: &[&str] = &["git_pull"];
+/// 含 **rm**：删除不可逆，而且审批卡没法像 diff 那样把「会失去什么」展示清楚 ——
+/// 降成 auto 等于让 agent 静默删掉用户的东西。与 write/edit 分开一档是刻意的。
+const ALWAYS_ASK_TOOLS: &[&str] = &["git_pull", "rm"];
 /// 脚本执行工具（D14）。单独一档：它**永不参与 always 全局降级**，且每次都要
 /// 把能力清单展示给用户。
 const SCRIPT_TOOLS: &[&str] = &["run_js"];

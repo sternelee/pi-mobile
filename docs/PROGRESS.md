@@ -2,6 +2,54 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-15 — ✅ 一批 Agent/界面细节（D17）：删除工具 + 三处界面优化；⏸ rewind 待做
+
+用户暂停 D16 的 TLS 阻塞，转来这批细节。**四项已做，一项记录待做**。
+
+### ✅ ① 文件/目录删除（agent 工具）
+
+Rust 侧本来就有 `fs` 通道的 `remove`（且已支持目录 + 显式 `recursive`），**缺的只是
+agent 工具**。按既有约定（read/write/edit/ls/mkdir/grep 都在 `run_tool` 里）加 `rm` 到
+`run_tool`，而不是走 `fs` 通道 —— 一个功能一种约定。
+
+两个刻意的判断：
+- **默认不递归**：删非空目录必须显式 `recursive: true`。这样「误删整棵树」需要一个
+  明确动作，而不是默认后果。报错信息里写明「不可撤销」。
+- **审批进 `ALWAYS_ASK`**（与 `git_pull` 同档），**不跟 write 基线**：删除不可逆，
+  且审批卡没法像 diff 那样把「会失去什么」展示清楚 —— 降成 auto 等于让 agent 静默
+  删掉用户的东西。与 write/edit 分开一档是刻意的。
+
+### ✅ ② 模型选择列表
+每行是独立卡片却**没有竖向间距** —— 与侧栏会话卡片当初同一个漏（相邻边框看起来像
+一条粗线）。加 `.model-row { margin }`；当前模型的勾号改用主题色，让「选中」在列表里
+一眼可辨。
+
+### ✅ ③ 抽屉底部 Preview / Settings 间距
+用**相邻兄弟选择器**限定在 `.mt-auto` 里（`.mt-auto > .settings-row + .settings-row`），
+不去动全局 `.settings-row` —— 设置页里那些行本来有自己的节奏，全局改会连带影响。
+
+### ✅ ⑤ Agent 配置面板版块样式
+`.settings-section-title` 原来只有加粗文字，滚动时几个版块会糊在一起。加上分隔线 +
+上边距（首块不要顶线）。
+
+### ⏸ ④ 修改上一次消息并重新发送（rewind）—— 未做，附计划
+
+**难点不在 UI，而在对话历史的位置**：`messages` 在 **bundle 的内存里**
+（`pi-bundle/agent-main.js` 持有 `sessionId` 与消息数组，Rust 侧 `sessions.rs` 只
+`list`/`delete` 文件）。所以只截断会话 JSONL **不够** —— agent 内存里的历史还在，
+它会把已撤回的那轮当作上下文继续。**必须同时截断内存**。
+
+有利条件：857 行注释提到上游有 `replayFromBranch` 概念（todo 回放即走此路），
+所以「从某个分支点重放」在依赖里已有基础。
+
+计划：
+1. bundle：暴露 `rewindTo(index)` —— 截断 `messages` 到指定下标，并同步持久化
+2. Rust：给 `sessions.rs` 加 `truncate(root, id, keep)`（按 JSONL 行数截断），
+   供 bundle 经 hostcall 调用
+3. UI：最后一条用户消息上给「编辑」入口 → 文本回到输入框 → 重发时先 rewind 再 prompt
+4. 验收要点：rewind 后**内存与文件一致**（否则出现「界面上撤回了、下次回复却带旧上下文」
+   这种最难查的不一致）
+
 ## 2026-09-15 — ⛔ D16 Git：https 远端被 Android 上的 TLS 证书加载卡住（4 轮未解，已暂停换方向）
 
 **状态**：Git 工具本体（clone/pull/status/diff/log/commit）代码 + 44 tests 都好了，

@@ -517,7 +517,22 @@ const gitTools = [
 	),
 ];
 
-const extensionTools = [askUserTool, runScriptTool, previewTool];
+const rmTool = hostTool(
+	"rm",
+	"Delete",
+	"Delete a file, or a directory inside the workspace. Deleting a non-empty directory requires `recursive: true` — without it only an empty directory can be removed, so removing a whole tree needs an explicit decision rather than being the default. Deletion cannot be undone. Args: {path, recursive?}",
+	obj(
+		{
+			path: { type: "string", description: "workspace-relative path to delete" },
+			recursive: { type: "boolean", description: "required to delete a non-empty directory" },
+		},
+		["path"],
+	),
+	// mutating: 删除是 ALWAYS_ASK（Rust 侧），必须真的把审批发出去
+	{ mutating: true },
+);
+
+const extensionTools = [askUserTool, runScriptTool, previewTool, rmTool];
 
 const tools = [...coreTools, fetchTool, ...nativeTools, ...gitTools, ...extensionTools];
 

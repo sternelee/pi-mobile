@@ -2452,7 +2452,7 @@ function App() {
               <For each={pickerModels()}>
                 {(m) => (
                   <div
-                    class={`item-card ${currentModel()?.id === m.id ? "active" : ""}`}
+                    class={`item-card model-row ${currentModel()?.id === m.id ? "active" : ""}`}
                     onClick={() => selectModel(pickerProvider(), m)}
                   >
                     <div class="item-title">
