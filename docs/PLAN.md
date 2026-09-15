@@ -357,7 +357,33 @@ pi-mobile/
   这条验证在**写任何集成代码之前**做掉了（本决策自己定的「先 spike 再动工」），
   省掉了后面几百行白写 —— 与 A3 那条纪律同一来源。
 
-  **push 的三条退路（按代价排序，待定）**：
+- **🔄 外部证据推翻了我的初步推荐（2026-09-15，待用户定）**：[GitSync]
+  (https://github.com/ViscousPot/GitSync) 是 **Flutter + Rust core**（同一架构形态：
+  Rust 核心 + 移动壳，只是壳用 Flutter），支持 **Android 5+ / iOS 13+**，功能含
+  clone/fetch/pull/commit/**push**/合并冲突/网络恢复重试，认证支持 HTTPS/SSH/OAuth。
+  它的 Rust `Cargo.toml` 写的是：
+
+  ```toml
+  git2 = { version = "0.20.4" }
+  libssh2-sys = { version = "0.3.1" }
+  [features]
+  default = ["vendored"]
+  vendored = ["git2/vendored-libgit2", "git2/vendored-openssl"]
+  ```
+
+  → **`git2` + vendored libgit2 + vendored OpenSSL 在 aarch64-android 与
+  aarch64-ios 上是跑得通的**（连 OpenSSL 都自带编译，那是最难的一环）。也就是说
+  D12 当年判为「有风险」的那条路**已有生产级先例**，而当时的风险评估针对的是
+  napi-rs/@google/genai 那一族，不能直接外推到 libgit2。
+
+  **于是推荐改为 `git2`（vendored）**，理由：gix 缺 push（上面刚实测），而 push 是
+  本需求明确要的一项；git2 一次拿到 push + SSH + HTTPS，且交叉编译有先例可循。
+  **待确认的开销**：① vendored-openssl 在双端的构建配置（GitSync 必然有对应的
+  cargo config / 环境变量，值得照抄）② iOS 上 libgit2 的 HTTPS 是否走
+  Security.framework 而非 openssl（若走，则 vendored-openssl 只为 Android）。
+  这两条要在动工前查清 —— 同一条纪律：未知先实验。
+
+  **push 的三条退路（若仍选 gix 则适用，按代价排序）**：
   1. **v1 不做 push**：clone/pull/status/diff/log/commit 先用 gix 落地，push 延后。
      代价最低且不引入新风险，但「让 agent 把成果推上去」这个诉求要等。
   2. **手写 smart-HTTP push**（`git-receive-pack`）：协议本身不复杂（一个
