@@ -2,6 +2,55 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-15 — ⛔ D16 Git 集成：git2 vendored 与 minSdk 24 冲突，APK 构建当前**是坏的**
+
+**状态**：spike 表面通过、实际暴露一个**真实的平台冲突**。依赖树里已加 git2
+（vendored-openssl/libgit2/zlib），**`bun tauri android build` 现在失败**。
+在解决之前 Android 无法出包。
+
+### 冲突本身（不是配置疏漏）
+
+```
+src-tauri/gen/android/app/build.gradle.kts:23:  minSdk = 24
+```
+
+而 `getentropy` **需要 API 28**，OpenSSL 3.x 的 `providers/…/rands/seeding/rand_unix.c`
+会直接调它：
+
+| 做法 | 后果 |
+|---|---|
+| CC 用 API 24（= minSdk，Tauri 构建的做法） | **编不过**（`getentropy is unavailable: introduced in Android 28`） |
+| CC 用 API 28（我第一次 spike 的做法） | 编得过，但**产出的代码在 API 24–27 设备上运行期失败** |
+
+### 🔴 教训：我的第一次 spike「通过」是误导性的
+
+我 export 了 `CC_aarch64_linux_android=…-android28-clang` 才让 Android 侧编过，
+并据此宣布「双端交叉编译通过」。但**我手动指定的 API level 高于本 app 的 minSdk**，
+所以那不是有效验证，而是**把不适用的配置测成了一个假绿**。
+
+**下次验证 C 依赖时必须让 API level 与 minSdk 一致**，否则测的是另一个目标。
+这与本项目已经吃过的「探针只断言 ok/失败不够、要断言返回形状」是同一类问题：
+**测了，但测的不是那个东西**。
+
+### 有效的部分（仍然成立）
+
+- **iOS 侧通过**且无此问题（`cargo check --target aarch64-apple-ios` 1m21s，0 errors）
+- 配方本身有效：`.cargo/config.toml` 的 `ZLIB_SRC=1` +
+  `LIBGIT2_SYS_USE_PKG_CONFIG=0` 确实让三个 C 库走 vendored 交叉编译
+- 另一个真坑（NDK 无带前缀的 `ranlib`，需 `RANLIB_aarch64_linux_android`）已确认
+
+### ⏭ 选项（需产品层决定，未动手）
+
+1. **把 minSdk 提到 28**：最干净，但**放弃 Android 9 及以下**（2018 年及更早设备）。
+   是否可接受是产品决定，不是技术决定。
+2. **找 OpenSSL 的 configure 开关避开 getentropy**（若有，最优：保留 minSdk 24）。
+   需查 OpenSSL 3.x 在 Android < 28 的官方姿态。
+3. **强钉 API 28 编** —— **不可取**：编译通过但运行期在 24–27 挂，属「把问题推到用户手上」。
+4. **换掉 vendored-openssl**：libgit2 在 Android 上的 HTTPS 需要 TLS 后端，
+   Android 侧可选项很窄（mbedtls/schannel 都不合适），**大概率仍是 openssl**。
+5. **回退 git2**：立刻恢复可出包，Git 集成改用 gix（但有 push 缺口）或延后。
+
+**恢复可出包的最短路径是 5；把功能做成的最短路径取决于 1 是否可接受。**
 ## 2026-09-15 — ✅ D15 产物预览：真机跑通（pi 自己写五子棋 + 调预览工具）
 
 **状态**：用户的完整流程已验证——「让 pi 写一个五子棋 → pi 用 `write` 写
