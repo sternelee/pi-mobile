@@ -1547,3 +1547,42 @@ button {
   padding-top: 0;
   border-top: none;
 }
+
+/* ⑤b Agent 面板能力行的三级层次（标题 / 工具名 / 描述）
+   原来三者都靠 item-title·item-sub，字号只差一点、颜色也接近，
+   扫一眼分不出「这是什么」与「它做什么」。用三层明确的对比：
+     标题  —— 最大、最重、最亮（先被看到）
+     工具名 —— 等宽极小、最暗（机器可核对，不抢视线）
+     描述  —— 常规小字、中等暗（读得清但不与标题竞争） */
+.cap-item {
+  margin: 0.4rem 0;
+}
+
+.cap-item-title {
+  font-size: 0.92rem;
+  font-weight: 650;
+  color: var(--text, hsl(var(--foreground)));
+  line-height: 1.3;
+}
+
+.cap-item-tools {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.01em;
+  color: var(--text-faint);
+  margin-top: 0.1rem;
+  word-break: break-all;
+}
+
+.cap-item-detail {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-dim, hsl(var(--muted-foreground)));
+  margin-top: 0.3rem;
+}
+
+.cap-item-note {
+  font-size: 0.7rem;
+  color: var(--amber);
+  margin-top: 0.2rem;
+}

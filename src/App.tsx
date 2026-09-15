@@ -2379,15 +2379,13 @@ function App() {
               </Show>
               <For each={nativeCaps()}>
                 {(cap) => (
-                  <div class="item-card flex items-center justify-between gap-3">
+                  <div class="item-card cap-item flex items-center justify-between gap-3">
                     <div class="min-w-0">
-                      <div class="item-title">
-                        {cap.title}
-                        <span class="item-sub"> · {cap.tools.join(", ")}</span>
-                      </div>
-                      <div class="item-sub">{cap.detail}</div>
+                      <div class="cap-item-title">{cap.title}</div>
+                      <div class="cap-item-tools">{cap.tools.join(", ")}</div>
+                      <div class="cap-item-detail">{cap.detail}</div>
                       <Show when={!cap.supported}>
-                        <div class="item-sub">Not available on this platform</div>
+                        <div class="cap-item-note">Not available on this platform</div>
                       </Show>
                     </div>
                     <Show
