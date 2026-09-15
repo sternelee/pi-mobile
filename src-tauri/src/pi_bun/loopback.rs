@@ -825,8 +825,18 @@ pub fn port() -> Option<u16> {
 /// * 都不带 → 暂按 agent 处理（bundle 尚未带 token）——**Phase 3 翻 flag 后
 ///   这种请求会被拒**，与 bundle wrapper 改动同一次落地；在那之前脚本
 ///   runner 也不存在，所以此洞当前不可利用（详见 `script.rs` 模块头）。
-fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
-    let script_token = payload
+/// `body` = **整个请求体** `{ method, payload, __hostToken | __scriptToken }`。
+///
+/// 两个 token 都是 `payload` 的**同级**字段。第一版从 `payload` 里找，于是永远
+/// 读不到——真机上恒 `host token ABSENT`，翻 flag 后所有 hostcall 被拒（一次
+/// 启动 23 次 deny）。这层嵌套是本模块最容易搞错的地方，把 body 单独传进来
+/// 就是为了不再靠猜。
+fn dispatch(
+    method: &str,
+    payload: &serde_json::Value,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let script_token = body
         .get(crate::script::TOKEN_FIELD)
         .and_then(|v| v.as_str())
         .map(str::to_owned);
@@ -840,18 +850,24 @@ fn dispatch(method: &str, payload: &serde_json::Value) -> serde_json::Value {
             return denied;
         }
     } else {
-        // D14 诊断（临时）：记录 agent 请求里 host token 的状态。
-        //
-        // 判读方式：**没有日志 = token 有效对得上**。只有出问题时才会打。
-        // 为什么要分「没带」与「不匹配」：前者是 wrapper 的事（没发送），
-        // 后者是签发/传递的事（发了但对不上）——两者修法完全不同。
-        match payload
+        // agent 主体：校验 host token（读的是 **body**，不是 payload）。
+        let raw = body
             .get(crate::script::HOST_TOKEN_FIELD)
-            .and_then(|v| v.as_str())
-        {
-            Some(t) if crate::script::host_token_valid(t) => {}
-            Some(_) => logcat(&format!("host token MISMATCH: {method}")),
-            None => logcat(&format!("host token ABSENT: {method}")),
+            .and_then(|v| v.as_str());
+        if !raw.is_some_and(crate::script::host_token_valid) {
+            // 判读：**没有日志 = token 有效对得上**。区分没发送与不匹配，
+            // 因为两者修法不同（前者改客户端，后者改签发/传递）。
+            match raw {
+                Some(_) => logcat(&format!("host token MISMATCH: {method}")),
+                None => logcat(&format!("host token ABSENT: {method}")),
+            }
+            if crate::script::REQUIRE_HOST_TOKEN {
+                logcat(&format!("hostcall deny (bad host token): {method}"));
+                return serde_json::json!({
+                    "error": "missing or invalid host token",
+                    "denied": true,
+                });
+            }
         }
     }
 
@@ -1164,7 +1180,8 @@ fn handle_conn(mut stream: TcpStream) {
                     .unwrap_or("")
                     .to_string();
                 let payload = v.get("payload").cloned().unwrap_or(serde_json::Value::Null);
-                serde_json::to_string(&dispatch(&m, &payload))
+                // 整个 body 也传进去：两个 token 都是 payload 的**同级**字段。
+                serde_json::to_string(&dispatch(&m, &payload, &v))
                     .unwrap_or_else(|_| "{\"error\":\"serialize\"}".into())
             }
             Err(e) => format!("{{\"error\":\"bad json: {e}\"}}"),

@@ -43,11 +43,14 @@ pub const HOST_TOKEN_FIELD: &str = "__hostToken";
 
 /// 是否强制 host token。见模块头「一个必须靠 host token 才能堵的洞」。
 ///
-/// **当前回到 `false`**：翻 true 后在真机上 agent 的 hostcall 全被拒
-/// （一次启动 23 次 `deny (bad host token)`），说明 token 没送到或对不上。
-/// 先回双路径把 app 恢复可用，靠 `dispatch` 的诊断日志定位真因。
-/// **翻 true 的前置条件：真机上诊断日志完全静默**（静默 = token 有效）。
-pub const REQUIRE_HOST_TOKEN: bool = false;
+/// 已翻为 `true`。前置条件已满足：真机上诊断日志**完全静默**（ABSENT 0 /
+/// MISMATCH 0），证明 token 真的送到了。
+///
+/// 曾经的失败原因值得留档：初版从**内层 `payload`** 找 token，而两个 token
+/// 都是它的**同级**字段（见 `loopback::dispatch` 的 `body` 参数），于是永远读
+/// 不到 → 翻 true 后所有 hostcall 被拒（一次启动 23 次 deny）。**客户端一直是
+/// 对的，错在读的那一层。** 回退成 false 等于重新打开模块头那个洞。
+pub const REQUIRE_HOST_TOKEN: bool = true;
 
 const DEFAULT_CALLS: u32 = 200;
 const DEFAULT_WALL_MS: u64 = 5_000;
