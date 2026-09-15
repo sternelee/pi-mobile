@@ -49,21 +49,12 @@ tauri-plugin-pi-native = { path = "plugins/pi-native" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 tokio = { version = "1", features = ["net", "fs"] }
-# D16 Git 集成。选 gix 而非 git2/libgit2：后者是 C 库，arm64-android +
-# arm64-ios 交叉编译风险大（D12 已为此刻意不引它，见 skills.rs 头注释）。
-# ⚠️ 传输层必须显式选 reqwest+rustls —— gix 也可以走 curl，那等于把 C 依赖请回来。
-gix = { version = "0.87", default-features = false, features = [
-    "blocking-network-client",
-    "blocking-http-transport-reqwest-rust-tls",
-    "credentials",
-    "revision",
-    "status",
-    "dirwalk",
-    "excludes",
-    "attributes",
-    "index",
-    "worktree-mutation",
-] }
+# D16 Git 集成。用 git2（libgit2 绑定）而非 gix —— 实测 gix 0.87.1 **没有 push**
+# （remote/connection 下只有 fetch/，无 prepare_push），而 push 是本需求明确要的。
+# 交叉编译风险有生产级先例可循：GitSync（Flutter+Rust，Android 5+/iOS 13+）用
+# git2 + vendored-libgit2 + vendored-openssl，配方就是 .cargo/config.toml 里那两个 env。
+# 先按「和它一样」验证，不要一上手就裁掉 openssl。
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。

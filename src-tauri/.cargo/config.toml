@@ -1,0 +1,14 @@
+# D16：libgit2 / zlib / openssl 的 vendored 构建配置。
+#
+# 照抄 GitSync（Flutter+Rust，双端在生产用 git2 vendored）的全部有效配置 —— 这两个
+# 变量恰好是最容易踩的坑：
+#   * LIBGIT2_SYS_USE_PKG_CONFIG=0：否则 vendored 构建仍可能去找宿主 pkg-config，
+#     交叉编译时拿到宿主 x86 的库而在链接期炸
+#   * ZLIB_SRC=1：zlib 也得从源码编（libz-sys 的约定），否则同样串到宿主的 libz
+#
+# 注意：这里**不放** NDK / Xcode 工具链路径 —— 那是机器相关的，应由构建系统
+# （tauri android/ios build）或 CI 通过环境变量传入，写进仓库会让别人 clone 下来
+# 直接失败。
+[env]
+ZLIB_SRC = "1"
+LIBGIT2_SYS_USE_PKG_CONFIG = "0"
