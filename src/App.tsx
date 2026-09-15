@@ -54,6 +54,7 @@ import {
   FiSettings,
   FiEye,
   FiRefreshCw,
+  FiExternalLink,
   FiSquare,
   FiTarget,
   FiTrash2,
@@ -2565,6 +2566,26 @@ function App() {
               aria-label="reload"
             >
               <FiRefreshCw size="0.95em" />
+            </button>
+            {/* A3 逃生口：预览页里的同步死循环会冻住**整个 app**（iframe 与 app
+                共用 WebView 主线程，真机实测确认）。系统浏览器是独立进程，
+                页面再重也带不倒 app。
+                ⚠️ 它救不了已经卡死的现场（那时这个按钮也点不动），是**事前选择**。 */}
+            <button
+              type="button"
+              class="preview-btn"
+              onClick={() => {
+                const p = previewPath();
+                const port = previewPort();
+                if (p && port)
+                  void invoke("preview_open_external", { port, path: p }).catch((e) =>
+                    setPreviewErr(`open in browser: ${e}`),
+                  );
+              }}
+              aria-label="open in system browser"
+              title="open in system browser (safe if the page hangs)"
+            >
+              <FiExternalLink size="0.95em" />
             </button>
             <button
               type="button"

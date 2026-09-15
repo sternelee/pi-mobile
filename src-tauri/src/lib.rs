@@ -292,6 +292,30 @@ async fn preview_targets() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("join: {e}"))
 }
 
+/// 在**系统浏览器**里打开预览（D15 的逃生口）。
+///
+/// 存在的理由只有一个：A3 —— 预览页里的同步死循环会**冻住整个 app**（iframe 与
+/// app 共用 WebView 主线程，真机实测确认）。系统浏览器是**独立进程**，页面再重
+/// 也带不倒 pi-mobile，所以这是真机上唯一可靠的隔离手段。
+///
+/// 局限要说清：它**不能在已经卡死之后救场**（卡死时连这个按钮都点不动），它是
+/// **事前选择**——早知道页面重就先用浏览器开。事后只能靠系统手势划掉 app。
+#[tauri::command]
+async fn preview_open_external(
+    app: tauri::AppHandle,
+    port: u16,
+    path: String,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = format!(
+        "http://127.0.0.1:{port}/{}",
+        path.trim_start_matches('/')
+    );
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("open_url: {e}"))
+}
+
 /// 脚本能力目录（D14）。
 ///
 /// UI 用它把审批卡上的能力 id 翻成人话——**说明文字只在 `script.rs` 里写一份**。
@@ -465,6 +489,7 @@ pub fn run() {
             native_request_permission,
             preview_start,
             preview_targets,
+            preview_open_external,
             script_capabilities,
             set_creds,
             has_creds,
