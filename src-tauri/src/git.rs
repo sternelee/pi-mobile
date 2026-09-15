@@ -218,12 +218,34 @@ pub fn init_tls(data_dir: &str) {
         crate::pi_bun::logcat(&format!("[git] built CA bundle: {n} certs → {}", bundle.display()));
     }
 
+    // ── 主路径：走 libgit2 自己的证书配置，而不是指望 OpenSSL 读环境变量 ──
+    //
+    // `GIT_OPT_SET_SSL_CERT_LOCATIONS` 是 libgit2 为 `http.sslCAInfo`/`sslCAPath`
+    // 预留的全局设置，它由 libgit2 在建立 SSL_CTX 时**直接使用**，完全绕开
+    // `SSL_CTX_set_default_verify_paths()` 那一套（我们连改两轮 env 都无效，
+    // 说明那条路在 Android 上确实不通）。
+    //
+    // ⚠️ **只能调一个**：这两个函数都把另一个参数传 NULL，也就是 libgit2 是
+    // 「一次性覆盖两者」—— 先后调用会让**后者清掉前者**。bundle 文件更完整，
+    // 所以只用 set_ssl_cert_file，不调 set_ssl_cert_dir。
+    //
+    // SAFETY: helper 内部会自行 `crate::init()`；启动期调用（agent_init 早期）。
+    let set = unsafe { git2::opts::set_ssl_cert_file(&bundle) };
+    match &set {
+        Ok(()) => crate::pi_bun::logcat(&format!(
+            "[git] libgit2 sslCAInfo={} ({} bytes)",
+            bundle.display(),
+            std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0)
+        )),
+        Err(e) => crate::pi_bun::logcat(&format!("[git] ERROR set_ssl_cert_file: {e}")),
+    }
+
+    // 环境变量作为**次要**路径保留（若 OpenSSL 也认，是多一条路，不冲突）。
     // SAFETY: 启动期调用（agent_init 早期），无并发读 env。
     unsafe {
         std::env::set_var("SSL_CERT_FILE", &bundle);
         std::env::set_var("SSL_CERT_DIR", src);
     }
-    crate::pi_bun::logcat(&format!("[git] SSL_CERT_FILE={} SSL_CERT_DIR={src}", bundle.display()));
 }
 
 /// iOS/桌面：libgit2 在 Apple 平台走系统的 TLS（SecureTransport），无需指信任库。
