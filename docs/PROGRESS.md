@@ -2,6 +2,106 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-14 — ✅ D14 脚本执行：安全核心 + 隔离 runner 完成，host token 真机打通；⏸ run_js 端到端待自建产物
+
+**状态**：方案 C（D14）的**安全模型在真机上成立了**。剩最后一块：`run_js`
+从未在真机上跑过一次——因为**两端的嵌入式产物都还是旧的**（见下面「环境事实」）。
+
+### 已入库
+
+| 提交 | 内容 |
+|------|------|
+| `211bac6` | D14 决策 + spike 结论 |
+| `74af6dc` | spike：第二 VM + 执行时限（宿主验证） |
+| `56cf4a3` `e4c343c` | 安全核心（能力表/token/边界强制/配额）+ 契约登记 |
+| `8a0e659` `e471317` | UI 审批卡（能力清单 + 脚本源码 + script 标志） |
+| `3593420` | zig 隔离 runner + 双超时（父会话独立复现过） |
+| `25bf4f7` | `script_run` 通路 + `run_js` + 翻 flag |
+| `a53ea32` | `cargo fmt` 全量（既有债，**单独一次**） |
+| `daad1e2` `188a389` `1754a88` `6f43a8e` | host token：接入 → 排查 → 修根因 → 真机全绿 |
+
+### 🔴 根因归档：host token 恒 ABSENT（读错了嵌套层）
+
+**症状**：翻 `REQUIRE_HOST_TOKEN=true` 后真机上 agent 的 hostcall **全被拒**
+（一次启动 23 次 `deny (bad host token)`）；诊断恒报 `host token ABSENT`。
+
+**根因**：hostcall 请求体是 `{ method, payload, __hostToken | __scriptToken }`
+—— 两个 token 都是 `payload` 的**同级**字段。而 `handle_conn` 传给 `dispatch`
+的是**内层 `payload`**，于是永远读不到 token。**客户端一直是对的。**
+
+```rust
+// 错：token 在 v 里，不在 payload 里
+let payload = v.get("payload").cloned()...;
+dispatch(&m, &payload)
+// 对：另传整个 body
+let payload = v.get("payload").cloned()...;
+dispatch(&m, &payload, &v)
+```
+
+**它制造的假矛盾**（白花了好几轮）：`cfg-diag` 实测 `__PI_CONFIG` 完全正常
+（`{"k":[...hostToken...],"t":"string","l":69}`），可请求恒 ABSENT。于是
+一直在怀疑「注入对不对 / 顺序对不对 / 客户端发没发」—— 全是**我写过的**
+地方，唯独没怀疑「传参的嵌套层」。
+
+> **教训**：证据说「发送方正常」而「接收方说没有」时，第三个可能——
+> **接收方看错了地方** —— 应该更早进入候选。
+
+### 🔴 两个流程陷阱（同类：把「没有坏消息」当成「好消息」）
+
+1. **跳过了自己定的分阶段验证**。第 1 步提交信息里写了「未验：Android
+   真机」，第 2 步却直接翻 flag —— 而那次验证正是分阶段设计的唯一目的。
+   分阶段的价值不在「少改」，而在**让每次失败只剩一种解释**。
+2. **差点把空日志读成「已修好」**。设备 USB 掉线时日志为空，`grep -c` 输出
+   `ABSENT: 0`，看着像修好了。同批命令里 `adb` 报的是 `device not found`。
+   → 结论前先确认观测通道活着（`adb devices` + `system_profiler` 双验）。
+
+### 已加的两道防线
+
+- `dispatch` 的诊断**分 `ABSENT`（没发送）与 `MISMATCH`（发了但对不上）**
+  —— 两者修法完全不同（改客户端 vs 改签发/传递），混在一起会白烧一轮构建。
+- 翻 flag 的前置条件写进了 `script.rs` 注释：**真机诊断日志完全静默**。
+
+### 已修的真 bug（顺手）
+
+- `netprobe.js` 读**小写** `__pi_config` → loopback 那项一直静默 `skipped`，
+  从未真正测过（即启动自检「全绿」里这一项没跑）。已修，真机现为 `status 200`。
+- `bridge.js` 是**第二个 hostcall 客户端**，两处都不对：读小写 `__pi_config`
+  （→ 在真实 app 里根本装不起来，也是 netprobe 当初读小写的源头）、裸 fetch
+  不带 token。已修（两个全局都认 + 调用时读取 token）。
+
+### 💡 环境事实（重要，别再搞错对象）
+
+| 平台 | 嵌入式产物 | 有 `pibun_run_script` 吗 |
+|------|-----------|----------------------|
+| **Android** | **上游预构建的 `libskal.so`**（`fetch-libpi-bun.sh`，91,935,608 字节，sha256 `5cdc391b…`） | ❌ 真机日志：`WARN pibun_run_script missing — script execution disabled (stale build?)` |
+| iOS | 自建 `libskal.dylib`（但 `ios-release/*.o` 是**旧入口**编的） | ❌ 实测 0 次 |
+
+我一度误以为 Android 有 runner —— 因为 grep 的是 Rust 自己的
+`libpi_mobile_lib.so`，而不是 `jniLibs/libskal.so`。**查符号要看对文件。**
+软绑定在这里救了场：缺符号只让脚本能力不可用，agent 其余功能照常。
+
+### ⏭ 下一步（按顺序）
+
+1. **跑 `scripts/build-libpi-bun.sh`** 用自建产物替换 Android 的 `libskal.so`
+   （会先编 JSC-for-Android，耗时较长），然后装包确认日志里**不再有那条 WARN**。
+2. **`run_js` 端到端真机验证（至今一次没跑过）**：
+   - 正向：`needs:["fs:read"]` 的脚本能读到工作区文件
+   - 负向：未声明能力被 **Rust 侧**拒；伪造/未知 `__scriptToken` 被拒且**不回退成 agent**
+   - 两条超时：`while(1){}`（JSC 看门狗）与 `await new Promise(()=>{})`
+     （墙钟看护，看门狗在此**不触发**）→ 终止且 **app 不冻**
+3. **iOS**：需先重新登录 Apple ID（profile 已于 09-13 16:02 过期）；且要
+   重交叉编译 bun（`--profile=ios-release`）+ 在 `scripts/link-skal-ios.sh` 补
+   `_pibun_run_script` 导出与 `-Wl,-u,_pibun_run_script`（见 `3593420` 说明）。
+4. **清理**：spike 脚手架已删；`cfg-diag`（`1754a88`）是临时诊断，**定位后应删**。
+
+### 仍挂着（与本次无关）
+
+- **463MB 检查点 ref**：`refs/pi-checkpoints/*`(50) + `refs/cline/checkpoints/*`(12)
+  钉着重写前的旧对象（main 本身已干净：0 产物文件、0 相关提交）。删了会让
+  rewind/cline 的回退失效，**待用户决定**。
+- **`biome check` 在 `App.tsx` 本身就有 33 个 error**（既有债，量过没动；
+  `cargo fmt` 那笔已清）。
+
 ## 2026-09-13 — ⏸ 已知问题：Android photos_list 读不到相册（已记录，暂停排查）
 
 **状态**：iOS 侧 `photos_list` / `photos_save` 真机验证通过（138ms 返回真实
