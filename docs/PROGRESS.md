@@ -2,6 +2,85 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-15 — ✅ D15 产物预览：真机跑通（pi 自己写五子棋 + 调预览工具）
+
+**状态**：用户的完整流程已验证——「让 pi 写一个五子棋 → pi 用 `write` 写
+html/js/css → pi 调 `preview` 工具 → 面板自动弹出且可玩」。**效果确认不错。**
+
+### 已入库
+
+| 提交 | 内容 |
+|------|------|
+| `be8ac08` | D15 决策（含用户选的「允许脚本 + 允许联网」） |
+| `1fc5dd2` `f649920` | 手写 HTTP 预览服务 + 纯函数重构（修测试间全局竞态） |
+| `79e8142` | **换 axum + `tower-http::ServeDir`**（替掉手写 HTTP 解析） |
+| `7ec576f` | agent 侧 `preview` 工具（hostcall `preview_open`） |
+| `69fed59` | 工具栏安全区 + 补上 `preview_open` 的 UI 半边 |
+
+### 🏗 关键决策：为什么必须是**真实回环 HTTP 源**
+
+用户曾提议参考 `tauri-axum-htmx`。读完后发现那个项目**不是 HTTP 服务**：它跑的是
+axum 的 **Router**，请求经 **Tauri command（IPC）隧道**转发。
+
+它**不能用于预览**：`<link href>`、`import "./app.js"`、`<img src>` 这些是**浏览器
+引擎自己发起**的请求，**不经过页面 JS**，所以 JS 层拦截根本看不见（要装 Service
+Worker，而它需要 secure context，在移动端自定义 scheme 上不可靠）。
+
+→ 结论：**架构不变**（真实回环 HTTP 源，相对路径/ES module/图片才能正常加载），
+**实现换掉**（用 axum + ServeDir，不再手写 HTTP 解析）。那个项目的启发只有
+「别手写 HTTP」这一半。
+
+### 🔴 两个坑（都是「换库/加覆盖层」时才出现的那类）
+
+**① `ServeDir` 会跟随符号链接 —— 换库不等于安全自动到手**
+
+换的时候就说好要审默认行为，审出两条：
+- **不列目录**（ServeDir 无此能力，只补 `index.html`）→ 不泄露文件名 ✓
+- **会跟随符号链接** ⚠️ —— 而且这是 ServeDir 与手写版**共有**的风险：只查字符串
+  挡不住 `workspace/link -> ../../creds.json`。
+
+→ 新增 `deny_escape` 中间件做 canonicalize + 前缀校验。测试同时验反向
+（工作区内指向工作区内的符号链接仍放行，避免过度拦截）。
+
+**② `position: fixed` 绕过 safe-area（预览工具栏遮状态栏）**
+
+```css
+.app { padding-top: var(--safe-top); }        /* app 布局靠这条避开状态栏 */
+.preview-sheet { position: fixed; inset: 0; }  /* ← 相对视口定位，跳过了它 */
+```
+
+这类 bug 只在**新增 fixed/absolute 覆盖层**时出现。修法：安全区加在工具栏
+**自己**上（底色铺到屏幕顶边更像原生），sheet 补 `padding-bottom`。
+
+**③（环境）Android release 的 `usesCleartextTraffic=false` 会拦掉整个 iframe**
+
+debug=`true` / release=`false`（`build.gradle.kts:21` 默认值未被覆盖）→ WebView
+拒绝 `http://127.0.0.1`，表现为「debug 能预览、release 打开是空白」。
+→ 新增 `res/xml/network_security_config.xml` **只对 127.0.0.1/localhost 放开明文**
+（不是把 release 整体放开——那会让整个 WebView 允许任意明文）。
+
+### 安全姿态（有意接受的）
+
+用户选择**允许脚本 + 允许联网**。预览页可以把数据发到任意外网，本模块**不拦**
+网络。能外泄的只有页面自己能生成的、或先经审批写进 workspace 的东西；预览页
+够不到 app DOM、拿不到 host token（`REQUIRE_HOST_TOKEN` 已真机验证）、调不了
+任何工具。面板刻意做足辨识度（`PREVIEW` 徽标 + 独立底色），否则它就是一个
+现成的钓鱼面。
+
+### 另一个记录问题（已如实写进提交信息）
+
+`69fed59` 提交时把 `src/App.tsx` 的 `preview_open` 处理一并带走（它一直「已暂存
+未提交」）—— 所以 **`7ec576f` 当时并非端到端完整**：Rust 发事件但 UI 不认，
+agent 调 preview 时面板不会自动打开。现已补齐。
+
+### ⏭ 下一步候选
+
+1. **把预览页的 console error / `window.onerror` 回传给 agent**（`postMessage` →
+   hostcall）—— 现在页面报错**用户看得见、pi 看不见**，只能靠猜；补上才能闭环
+   「写 → 跑 → 自己看报错 → 修」。这是这条流程下一个真正的痛点。
+2. 截图回传（让模型“看”到自己画的棋盘）—— 更重，移动端 WebView 截图要先看平台能力
+3. 清理：`cfg-diag`（`1754a88`）是临时诊断，定位后应删
+
 ## 2026-09-14 — ✅ D14 脚本执行：安全核心 + 隔离 runner 完成，host token 真机打通；⏸ run_js 端到端待自建产物
 
 **状态**：方案 C（D14）的**安全模型在真机上成立了**。剩最后一块：`run_js`
