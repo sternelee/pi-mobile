@@ -427,6 +427,13 @@ pi-mobile/
 - **jail**：仓库根必须在 workspace 内；`clone` 的目标路径同样过 `jail_path`。
 - **待定**：`git_push` 的授权粒度（每次 ask / 按 host 记住 / 远端预先登记）；
   `git_commit` 的 author 身份从哪来（无 `user.name` 配置）。
+- **⛔ 当前阻塞（2026-09-15）**：**https 远端在 Android 上被 TLS 证书加载卡住** ——
+  `set_ssl_cert_file` 报 `error:05880020 … ::BIO lib`，4 轮修复未解。已排除「无 TLS
+  后端 / env 没设上 / CA 路径格式错 / 文件不可读 / bundle 格式」五种假设，剩下
+  `set_ssl_cert_dir`（未试）与「最小单证书」决断实验。**详细证据链与教训见
+  docs/PROGRESS.md 2026-09-15 那条**。
+  注意：**本地操作（init/commit/status/log/diff）不走 TLS**，不受此阻塞影响 ——
+  可先把远端操作标为暂不可用，把本地工作流放出去用。
 
 ---
 

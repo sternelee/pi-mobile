@@ -2,6 +2,71 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-15 — ⛔ D16 Git：https 远端被 Android 上的 TLS 证书加载卡住（4 轮未解，已暂停换方向）
+
+**状态**：Git 工具本体（clone/pull/status/diff/log/commit）代码 + 44 tests 都好了，
+安卓出包也正常；**但真机 `git_clone` 到 https 远端一直失败**。已连续 4 轮修复都在
+同一症状上，现记录清楚后暂停试错。
+
+### 当前症状（最新一轮，日志原文）
+
+```
+[pi-bun] [git] built CA bundle: 149 certs → /data/user/0/com.sternelee.pi_mobile/cacerts-v2.pem
+[pi-bun] [git] CA bundle readable: …/cacerts-v2.pem (222448 bytes)
+[pi-bun] [git] ERROR set_ssl_cert_file: OpenSSL error: failed to load certificates:
+                error:05880020:x509 certificate routines::BIO lib; class=Ssl (16)
+```
+
+用户侧看到的：`Error: git: clone failed: the SSL certificate is invalid; code=Certificate (-17)`
+
+### ✅ 已被证据排除的（别再重复走）
+
+| 假设 | 如何排除 |
+|---|---|
+| libgit2 没有 TLS 后端 | 已加 git2 的 `https` feature（`default-features=false` 曾把它一起关掉）。修后 `libgit2.a` 里实测 **8 个 TLS 符号 + 31 个 http 符号**，且 `out/build/` 下有 `openssl.o`/`tls.o` |
+| env 变量没设上 | 日志确认 `SSL_CERT_FILE`/`SSL_CERT_DIR` 都设了；但**设了也没用** |
+| Android CA 路径/格式不对 | 实测 `/apex/com.android.conscrypt/cacerts` 与 `/system/etc/security/cacerts` 各 **149 个 hashed 证书**（`subject_hash.N`，正是 OpenSSL 目录格式），app 进程 `run-as` 可读 |
+| bundle 文件不可读 | Rust 侧 `File::open` 成功、字节数 222448 |
+| bundle 格式（尾部杂文本） | Android cacerts 的 `END CERTIFICATE` 之后**确实**跟着 `SHA1 Fingerprint=` 等文本，已改为只提取 PEM 块（773174 → 222448 字节）；但**宿主 OpenSSL 实测能正常解析带尾部文本的原版**（`crl2crl2pkcs7` 无报错、逐证书 0 失败）→ 该假设不成立 |
+
+### ❌ 我两次被自己的推断误导（值得记）
+
+1. 以为「OpenSSL 不读环境变量」→ 真错是**文件加载**失败，方向一直偏着
+2. 以为「尾部杂文本导致解析失败」→ 宿主 OpenSSL 能解析，不成立
+
+两次都是**在没有直接证据前就锁定了一个原因并围绕它改**。真正让定位前进的是**加了
+自检日志**（把 `File::open` 结果、字节数、传给 OpenSSL 的字符串都打出来），而不是
+继续推理。
+
+### ⏭ 剩下两条（下次从这里接）
+
+**② 改调 `set_ssl_cert_dir`（尚未试过，推荐先做）**
+Android cacerts 目录本身就是 OpenSSL hashed 格式，走的是 `X509_LOOKUP_hash_dir`，
+与 file 的 `BIO_new_file` 是**两条不同代码路径**。⚠️ 注意 `set_ssl_cert_file` 与
+`set_ssl_cert_dir` 都往 `GIT_OPT_SET_SSL_CERT_LOCATIONS` 的另一个参数传 NULL，
+**libgit2 是一次性覆盖两者**，所以只能调一个（两个都调会让后者清掉前者）。
+
+**① 决断性实验：最小单证书文件**
+主机生成一个只含 1 张证书的 PEM 放进 data dir，调 `set_ssl_cert_file`：
+- 也失败 → 我们 vendored 的 OpenSSL 在 Android 上 file/BIO 层有问题 → 该换 TLS 路径或后端
+- 成功 → 是我们那份 bundle 的问题，可缩小到具体证书
+
+### 💡 不必卡在这里：不依赖网络的那半可以先用
+
+`init` / `commit` / `status` / `log` / `diff` **完全不走 TLS**，且代码与测试都已就绪。
+`workspace/gitdemo/`（**故意不是 git 仓库**）就是为它准备的：让 agent「把 gitdemo
+提交一下」，应自动 init + stage + commit，随后 `git_status` 报 `clean`。
+**这条至今也没验过**。若它通，说明 Git 集成本体是好的，只有 https 这一条路受阻 ——
+可先把远端操作标为暂不可用、把本地工作流放出去用，TLS 单独当一个问题解决。
+
+### 其它已确认的环境事实（与上面无关但会绊人）
+
+- **Android 上任何 cargo 命令都需要那组 NDK env**（不只手 tauri build）：
+  裸 `cargo check --target aarch64-linux-android` 会因 openssl-sys 的 build script 要 CC 而失败
+  → 走 `scripts/android-build.sh`，或照抄它那四个 export
+- `minSdk` 已 24 → **28**（OpenSSL 的 `getentropy` 需要 API 28）
+- debug APK 已达 **571 MB**（三个静态 C 库 + 调试符号；release 会小很多）
+
 ## 2026-09-15 — ✅ D16 Git 工具本体已落地（clone/pull/status/diff/log/commit）
 
 **状态**：Rust 侧 + hostcall + bundle 工具都写好了，44 tests 绿，双端交叉编译通过。
