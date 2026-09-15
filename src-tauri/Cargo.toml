@@ -54,7 +54,17 @@ tokio = { version = "1", features = ["net", "fs"] }
 # 交叉编译风险有生产级先例可循：GitSync（Flutter+Rust，Android 5+/iOS 13+）用
 # git2 + vendored-libgit2 + vendored-openssl，配方就是 .cargo/config.toml 里那两个 env。
 # 先按「和它一样」验证，不要一上手就裁掉 openssl。
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+# ⚠️ `https` **必须显式列出**：git2 的 default = ["ssh", "https"]，而我们用
+# default-features = false 会把它一起关掉 —— 只留 vendored-openssl 只保证
+# **openssl 被编出来**，并**不**启用 libgit2 的 HTTPS transport。真机症状：
+#     clone failed: there is no TLS stream available; class=Ssl (16)
+# 不列 ssh：v1 只认 https（validate_remote 拒 ssh://），列了会多引入
+# libssh2-sys 这个 C 库。
+git2 = { version = "0.20", default-features = false, features = [
+    "https",
+    "vendored-libgit2",
+    "vendored-openssl",
+] }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。
