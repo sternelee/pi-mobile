@@ -52,6 +52,8 @@ import {
   FiRotateCw,
   FiSend,
   FiSettings,
+  FiEye,
+  FiRefreshCw,
   FiSquare,
   FiTarget,
   FiTrash2,
@@ -232,6 +234,40 @@ function App() {
   // D14：脚本审批卡上的能力说明。**单一真源在 Rust 的 `script.rs`** —— 这里
   // 只缓存 id → 说明的映射，绝不在 TS 另写一份说明文字：两份一旦不一致，
   // 用户看到的就是与实际授权集不同的东西，而审批卡的全部意义是「所见即所授」。
+  // D15：预览。编写侧本来就有（write/mkdir jail 在 workspace），这里只解决「看」。
+  // iframe 指向 Rust 的**独立端口**静态服务（src-tauri/src/preview.rs）——与
+  // /hostcall 不同源是纵深防御；真正的防线是预览页拿不到 host token。
+  const [previewOpen, setPreviewOpen] = createSignal(false);
+  const [previewPort, setPreviewPort] = createSignal<number | null>(null);
+  const [previewPath, setPreviewPath] = createSignal<string | null>(null);
+  const [previewList, setPreviewList] = createSignal<string[]>([]);
+  const [previewNonce, setPreviewNonce] = createSignal(0);
+  const [previewErr, setPreviewErr] = createSignal<string | null>(null);
+  const openPreview = async () => {
+    setPreviewErr(null);
+    try {
+      const port = await invoke<number>("preview_start");
+      setPreviewPort(port);
+      const list = await invoke<string[]>("preview_targets");
+      setPreviewList(list);
+      // 没选过就自动挑一个；`index.html` 优先（最常见的入口）
+      if (!previewPath() && list.length) {
+        setPreviewPath(list.find((p) => p.toLowerCase().endsWith("index.html")) ?? list[0]);
+      }
+      setPreviewOpen(true);
+    } catch (e) {
+      setPreviewErr(String(e));
+      setPreviewOpen(true);
+    }
+  };
+  const previewSrc = () => {
+    const p = previewPath();
+    const port = previewPort();
+    if (!p || !port) return null;
+    // nonce 强制 iframe 重新加载：agent 刚改过文件时要能看到新版本
+    return `http://127.0.0.1:${port}/${p}?v=${previewNonce()}`;
+  };
+
   const [capCatalog, setCapCatalog] = createSignal<Record<string, string>>({});
   const loadCapCatalog = async () => {
     if (Object.keys(capCatalog()).length) return;
@@ -1899,6 +1935,26 @@ function App() {
           </div>
 
           <div class="mt-auto">
+            {/* D15 预览入口。放在抽屉里而非顶栏：顶栏刚被精简过（去掉了设置
+                齿轮），不再往上堆图标。 */}
+            <div
+              class="settings-row"
+              onClick={() => {
+                setDrawerOpen(false);
+                void openPreview();
+              }}
+            >
+              <span class="settings-icon-chip">
+                <FiEye size="1.05em" />
+              </span>
+              <div class="settings-row-body">
+                <div class="settings-row-title">Preview</div>
+                <div class="settings-row-sub">render HTML/CSS/JS from the workspace</div>
+              </div>
+              <span class="settings-chevron">
+                <FiChevronRight size="1em" />
+              </span>
+            </div>
             <div
               class="settings-row"
               onClick={() => {
@@ -2459,6 +2515,66 @@ function App() {
             </Dialog>
           );
         }}
+      </Show>
+
+      {/* D15 预览。
+
+          刻意做成一整块可辨认的面板（标题 + 当前路径 + 可点击的关闭），而不是
+          把 iframe 塞进聊天流：预览里跑的是 **agent（LLM）写出来的 JS**，
+          如果它看起来像 app 自己的 UI，那就是一个现成的钓鱼面。
+
+          sandbox 只给 allow-scripts + allow-forms：
+          * 不给 allow-same-origin → 预览页是 opaque origin，够不到 app 的 DOM
+          * 不给 allow-top-navigation → 不能把 app 导航走
+          * 不给 allow-popups → 不能开新窗口
+          网络是**故意**放开的（用户选择，见 D15）——那条风险本模块不拦，
+          能外泄的只有页面自己能生成的、或先经审批写进 workspace 的东西。 */}
+      <Show when={previewOpen()}>
+        <div class="preview-sheet">
+          <div class="preview-bar">
+            <span class="preview-badge">PREVIEW</span>
+            <select
+              class="preview-pick"
+              value={previewPath() ?? ""}
+              onChange={(e) => {
+                setPreviewPath(e.currentTarget.value || null);
+                setPreviewNonce((n) => n + 1);
+              }}
+            >
+              <Show when={!previewList().length}>
+                <option value="">no .html in workspace</option>
+              </Show>
+              <For each={previewList()}>{(p) => <option value={p}>{p}</option>}</For>
+            </select>
+            <button
+              type="button"
+              class="preview-btn"
+              onClick={() => setPreviewNonce((n) => n + 1)}
+              aria-label="reload"
+            >
+              <FiRefreshCw size="0.95em" />
+            </button>
+            <button
+              type="button"
+              class="preview-btn"
+              onClick={() => setPreviewOpen(false)}
+              aria-label="close preview"
+            >
+              <FiX size="0.95em" />
+            </button>
+          </div>
+          <Show when={previewErr()}>
+            <div class="preview-err">{previewErr()}</div>
+          </Show>
+          <Show when={previewSrc()} fallback={<div class="preview-err">nothing to preview yet — ask the agent to write an .html file into the workspace</div>}>
+            <iframe
+              class="preview-frame"
+              title="preview"
+              src={previewSrc()!}
+              sandbox="allow-scripts allow-forms"
+            />
+          </Show>
+        </div>
       </Show>
     </main>
   );

@@ -31,6 +31,11 @@ pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     EVENT_SINK.set(Box::new(f)).ok();
 }
 
+/// workspace 根目录（preview 的静态服务要用它做 jail 根）。
+pub(crate) fn workspace_dir() -> Option<String> {
+    WORKSPACE_DIR.get().cloned()
+}
+
 /// 路径越狱防护：限制在 workspace 内，拒绝绝对路径与 `..`。
 pub(crate) fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
     let root = WORKSPACE_DIR.get().ok_or("workspace not configured")?;

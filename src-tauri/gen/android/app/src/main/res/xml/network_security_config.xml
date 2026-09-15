@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  D15：只对回环地址放开明文 HTTP。
+
+  为什么需要它：预览用 iframe 加载 `http://127.0.0.1:<port>/...`（见
+  src-tauri/src/preview.rs）。而 release 构建的 `usesCleartextTraffic` 是
+  `false`（app/build.gradle.kts:21 的默认值，release 块没覆盖），于是
+  WebView 会拦掉这个 iframe —— 表现为「debug 能预览、release 打开是空白」，
+  这是最容易漏掉的一类回归。
+
+  为什么不是直接把 release 的 usesCleartextTraffic 改成 true：那会让**整个
+  WebView** 允许任意明文 HTTP（agent 写的预览页可以拉任意外站的明文资源）。
+  这里只列 127.0.0.1，外部明文仍然被禁 —— 权限收窄到实际需要的那一个目标。
+
+  注意 127.0.0.1 与 localhost 是两个不同的 host 串，两个都要列，否则用
+  localhost 拼 URL 时会绕不过这一层。
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

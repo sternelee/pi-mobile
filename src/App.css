@@ -1427,3 +1427,76 @@ button {
     font-size: 16px;
   }
 }
+
+/* ── D15 预览面板 ────────────────────────────────────────────────────
+   刻意做成「一看就知道不是 app 自己」的一块：预览里跑的是 agent 写出来的
+   JS，若它长得像 app 的 UI 就是现成的钓鱼面。所以给它独立底色 + PREVIEW
+   徽标 + 与顶栏不同的边框。 */
+.preview-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+}
+
+.preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid hsl(var(--border));
+  background: var(--surface-2);
+}
+
+/* 徽标用等宽 + 大写字距：与 app 的正常文案明显区隔 */
+.preview-badge {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 5px;
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 16%, transparent);
+}
+
+.preview-pick {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 7px;
+  border: 1px solid hsl(var(--border));
+  background: var(--surface);
+  color: inherit;
+}
+
+.preview-btn {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.preview-err {
+  padding: 0.7rem 0.8rem;
+  font-size: 0.72rem;
+  color: var(--amber);
+}
+
+/* iframe 占满剩余高度；白底 —— 预览页通常假设自己是白底页面，
+   跟 app 的深色主题混在一起会看起来像渲染坏了。 */
+.preview-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}

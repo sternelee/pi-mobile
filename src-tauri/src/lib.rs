@@ -9,6 +9,7 @@ mod mcp;
 mod native;
 mod oauth;
 mod pi_bun;
+mod preview;
 mod script;
 mod sessions;
 mod skills;
@@ -272,6 +273,25 @@ async fn native_capabilities() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("join: {e}"))
 }
 
+/// 启动预览服务（D15）并返回端口。幂等——UI 每次打开预览都能安全调。
+///
+/// 懒启动：不给 app 启动路径加任何东西（预览不常用，而 bind 失败也不该
+/// 影响 agent 启动）。
+#[tauri::command]
+async fn preview_start() -> Result<u16, String> {
+    tauri::async_runtime::spawn_blocking(preview::start)
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
+/// workspace 里的 html 入口候选（有界扫描），给预览面板的选择列表。
+#[tauri::command]
+async fn preview_targets() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(preview::targets)
+        .await
+        .map_err(|e| format!("join: {e}"))
+}
+
 /// 脚本能力目录（D14）。
 ///
 /// UI 用它把审批卡上的能力 id 翻成人话——**说明文字只在 `script.rs` 里写一份**。
@@ -443,6 +463,8 @@ pub fn run() {
             agent_history,
             native_capabilities,
             native_request_permission,
+            preview_start,
+            preview_targets,
             script_capabilities,
             set_creds,
             has_creds,
