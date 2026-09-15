@@ -443,6 +443,20 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
         return Err(format!("agent config eval threw: {r}"));
     }
 
+    // D14 诊断（临时）：hostToken 在 bundle 侧是 undefined，但 `port` 明明可用
+    // （否则 hostcall 到不了 dispatch）。两者矛盾，所以直接把**实际对象**打出来。
+    // 三种结果分辨：
+    //   (a) keys 里没有 hostToken        → Rust 侧没带上
+    //   (b) keys 里有但 typeof undefined → 对象值异常
+    //   (c) 都正常                      → 问题在传输/比较，不在 __PI_CONFIG
+    match evaluate_blocking(
+        "JSON.stringify({k:Object.keys(globalThis.__PI_CONFIG||{}),t:typeof (globalThis.__PI_CONFIG||{}).hostToken,l:String(((globalThis.__PI_CONFIG||{}).hostToken||'')).length})",
+        "pi:cfg-diag",
+    ) {
+        Ok((s, _)) => logcat(&format!("cfg-diag: {s}")),
+        Err(e) => logcat(&format!("cfg-diag failed: {e}")),
+    }
+
     let (r, err) = eval_retry(AGENT_JS, "pi-bundle/dist/agent.js")?;
     if err {
         return Err(format!("agent bundle eval threw: {r}"));
