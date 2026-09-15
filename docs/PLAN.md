@@ -378,10 +378,23 @@ pi-mobile/
 
   **于是推荐改为 `git2`（vendored）**，理由：gix 缺 push（上面刚实测），而 push 是
   本需求明确要的一项；git2 一次拿到 push + SSH + HTTPS，且交叉编译有先例可循。
-  **待确认的开销**：① vendored-openssl 在双端的构建配置（GitSync 必然有对应的
-  cargo config / 环境变量，值得照抄）② iOS 上 libgit2 的 HTTPS 是否走
-  Security.framework 而非 openssl（若走，则 vendored-openssl 只为 Android）。
-  这两条要在动工前查清 —— 同一条纪律：未知先实验。
+  **✅ 构建配方已拿到（照抄，别自己试）**：GitSync 的 `rust/.cargo/config.toml`
+  全部有效内容就两个环境变量：
+
+  ```toml
+  [env]
+  ZLIB_SRC = "1"                        # zlib 也从源码编（libz-sys 的约定）
+  LIBGIT2_SYS_USE_PKG_CONFIG = "0"      # 别去找 pkg-config，走 vendored
+  ```
+
+  也就是说「C 交叉编译风险」实际是**两个 env + `vendored` features**，且在
+  Android 5+ / iOS 13+ 上已验证。这两个变量恰好是最容易踩的那两个坑（vendored
+  误用 pkg-config；zlib 也得一起编），照抄即省掉几小时的试错。
+
+  **仍需自己验的一条**：iOS 上 libgit2 的 HTTPS 是否走 Security.framework
+  （若走，`vendored-openssl` 可能只为 Android 而开）。但 GitSync 默认在双端都开
+  vendored-openssl，**先用「和它一样」的配置验证，再考虑优化**——不要一上手就
+  自作聪明地裁掉 openssl。
 
   **push 的三条退路（若仍选 gix 则适用，按代价排序）**：
   1. **v1 不做 push**：clone/pull/status/diff/log/commit 先用 gix 落地，push 延后。
