@@ -77,18 +77,26 @@ agent 调 preview 时面板不会自动打开。现已补齐。
 
 #### A. 我怀疑是真问题的
 
-**A1. `sandbox` 不给 `allow-same-origin` → 预览页的 `fetch`/XHR 会被 CORS 挡掉**
+**A1. ✅ 已修且真机验证通过（2026-09-15）**
 
 沙箱化后文档是 **opaque origin**，它向自己那个源发 `fetch('./data.json')` 会被视为
-跨源（`Origin: null`），而服务端**没有发 CORS 头**（`preview.rs` 里 0 处
+跨源（`Origin: null`），而服务端**没有发 CORS 头**（当时 `preview.rs` 里 0 处
 `CorsLayer`）。`<script src>` / `<link>` / `<img>` 不受影响（非 CORS 约束），
 **但 fetch/XHR 会失败**。
 
-实践里很可能会咬到：模型写的游戏常把关卡/棋盘数据放 JSON 里 fetch 进来。
-要在「保留 opaque origin（够不到 app DOM）」与「让 fetch 可用」之间选：补
-`Access-Control-Allow-Origin: *`（对只读静态服务是安全的），或改成给
-`allow-same-origin` 并把安全边界全押在独立端口 + token 上。
-*（按 Web 规范推断，**未实测** —— 列为第一优先要实测的一条）*
+**修法**：`CorsLayer` 只放行 **`Origin: null`**（`AllowOrigin::exact`），**不是 `*`**。
+理由：普通网页发的是真实 origin，于是读不到这个工作区；沙箱预览恰好发的就是
+`null`。只读静态服务在最小授权下已经够用。
+
+**验证链（两层，缺一不可）**：
+1. 单测 `allows_opaque_origin_but_not_the_whole_web`：服务端确实回
+   `ACAO: null`，且**真实 origin 不被放行**
+2. **真机**（用户确认）：`workspace/fetchtest/index.html` 显示绿字
+   `FETCH OK → {"msg":"fetch works","n":42}`
+
+两层都必要的理由：单测只能证明**服务端发了正确的头**，不能证明 **WebView 真的
+接受它**（沙箱 + opaque origin 下浏览器行为才是最终判据）。这类「客户端是否接受」
+的断言在真机上才成立 —— 与 D14 的 host token 是同一教训。
 
 **A2. `start()` 把端口缓存得早于「服务真的起来」**
 
@@ -159,9 +167,12 @@ iframe 与 app **共用 WebView 主线程**，没有被站点隔离到独立渲�
 
 ### ⏭ 下一步候选
 
-0. **先结掉上面 A 组的四条**，其中 **A1（fetch 被 CORS 挡）与 A2（端口早缓存）
-   建议优先**：A1 直接决定模型能否写“fetch JSON”型的游戏，A2 是一个全静默的失败面。
-   A1 的实测很便宜：往 workspace 放一个会 fetch 的页面看一眼即可。
+0. **A 组的战果**：A1 ✅ 已修 + 真机验证（fetch JSON 型游戏可写）；A2 ✅ 已修
+   （端口不再早缓存）；A3 ⚠️ 确认为真 + 已加逃生口，并归档了「进程内缓解都不可行」
+   的逐条否证；A4 ✅ 已改工具描述告知沙箱限制。
+   **A3 的候选解法（未做）**：先做一个便宜实验——Rust 侧心跳 + `webview.reload()`
+   能否解开一个 JS 线程已卡死的 Android WebView。**结果决定后面几小时的活该不该干**，
+   所以先实验再动工。
 1. **把预览页的 console error / `window.onerror` 回传给 agent**（`postMessage` →
    hostcall）—— 现在页面报错**用户看得见、pi 看不见**，只能靠猜；补上才能闭环
    「写 → 跑 → 自己看报错 → 修」。这是这条流程下一个真正的痛点。
