@@ -2,66 +2,92 @@
 //!
 //! ## 为什么需要一个真实的 HTTP 源
 //!
-//! 多文件项目靠**相对路径**互相引用（html → css/js），所以不能把内容内联成
-//! `srcdoc`：那会打断相对路径，还要手工处理转义。必须要有一个真源。
+//! 多文件项目靠**相对路径**互相引用（html → css/js/图片）。必须要有真源：
+//! * 不能内联成 `srcdoc`：会打断相对路径，还要手工处理转义。
+//! * 也不能靠「Tauri command 隧道」那类 IPC 转发（如 tauri-axum-htmx 的做法）：
+//!   `<link href>`. `import "./app.js"`、`<img src>` 这些是**浏览器引擎自己发起**
+//!   的请求，**不经过页面 JS**，所以 JS 层拦截根本看不见它们（要装 Service Worker，
+//!   而它需要 secure context，在移动端自定义 scheme 上不可靠）。
 //!
 //! ## 为什么是**独立端口**
 //!
 //! 预览跑的是 **agent（LLM）写出来的 JS**，所以「它与谁能同源」是承载性的：
+//! 与 `/hostcall`（`pi_bun::loopback`）**不同源**是纵深防御；真正的防线仍是
+//! `script::REQUIRE_HOST_TOKEN`（预览页拿不到 host token，自己去打也是拒，
+//! 已在真机验证）。两层不重复：换端口挡「意外可达」，token 挡「故意可达」。
 //!
-//! * 与 `/hostcall`（`pi_bun::loopback`）**不同源** → 纵深防御。
-//! * 真正的防线仍是 `script::REQUIRE_HOST_TOKEN`：预览页拿不到 host token，
-//!   即便它自己去打 `/hostcall` 也会被拒。这条已在真机上验证（diagnostic 静默）。
+//! ## 为什么用 axum + ServeDir 而不是手写 HTTP
 //!
-//! 两者是**两层**，不是重复：换端口挡住的是「意外可达」，token 挡住的是
-//! 「故意可达」。
+//! 初版是 ~120 行手写 HTTP/1.1 解析——手写 HTTP 是经典 bug 重灾区，且 Range/
+//! keep-alive/HEAD 语义都得自己维护。改用 `tower_http::services::ServeDir`。
 //!
-//! ## 只读且只服务 workspace
+//! **但换库不等于安全自动到手**（这是当时换的时候就说好的）：ServeDir 的默认
+//! 行为必须自己审、自己补测试。已确认的两点：
+//! * **不列目录**：ServeDir 没有目录列表能力（只支持补 `index.html`），所以不会
+//!   泄露工作区文件名。
+//! * **会跟随符号链接**（这是 ServeDir 与手写版**共有**的风险）→ 本模块额外加了
+//!   `deny_escape` 中间件做 canonicalize + 前缀校验。没有它，工作区里一个指向
+//!   外部的符号链接就能读到 `creds.json`。
 //!
-//! 复用 `pi_bun::loopback::jail_path`（拒绝对路径与 `..`），并且**只允许 GET/HEAD**
-//! —— 预览页永远不该有能力写任何东西。若不 jail，它就能读到 `creds.json` /
-//! `sessions/`，那等于把凭证交给一段 LLM 写的脚本。
+//! ## 有意接受的风险（D15）
 //!
-//! ## 已知且有意接受的风险（D15）
-//!
-//! 用户选择「允许脚本 + 允许联网」：预览页可以把数据发到任意外网。这是本模块
-//! **无法**防的（我们刻意不拦网络）。能外泄的只有页面自己生成的、或先经审批写进
-//! workspace 的东西；预览页够不到 app 的 DOM、拿不到 token、调不了任何工具。
+//! 用户选择「允许脚本 + 允许联网」：预览页可以把数据发到任意外网。本模块**不拦**
+//! 网络。能外泄的只有页面自己能生成的、或先经审批写进 workspace 的东西。
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
+use tower_http::services::ServeDir;
 
 static PORT: OnceLock<u16> = OnceLock::new();
 
 /// 启动（幂等）。返回预览端口。
 ///
-/// 懒启动：只在 UI 真的要开预览时才 bind，不给 app 启动路径加东西。
+/// 懒启动：只在 UI 真要开预览时 bind，不给 app 启动路径加东西。
 pub fn start() -> Result<u16, String> {
     if let Some(p) = PORT.get() {
         return Ok(*p);
     }
+    let root = crate::pi_bun::loopback::workspace_dir().ok_or("workspace not configured")?;
+
+    // 用 std 同步 bind：**端口必须在返回前确定**（UI 要拿它拼 iframe src）。
     let listener =
-        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("preview bind: {e}"))?;
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("preview bind: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("preview addr: {e}"))?
         .port();
     PORT.set(port).ok();
-    std::thread::Builder::new()
-        .name("pi-preview".into())
-        .spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(s) => {
-                        std::thread::spawn(move || handle_conn(s));
-                    }
-                    Err(e) => log(&format!("ERROR preview accept: {e}")),
-                }
+
+    // 转成 tokio listener 必须在运行时上下文里做 —— 所以整段放进 async 任务，
+    // 而不是在 start() 的调用点（那里是 spawn_blocking 线程）。
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = listener.set_nonblocking(true) {
+            log(&format!("ERROR set_nonblocking: {e}"));
+            return;
+        }
+        let l = match tokio::net::TcpListener::from_std(listener) {
+            Ok(l) => l,
+            Err(e) => {
+                log(&format!("ERROR from_std: {e}"));
+                return;
             }
-        })
-        .map_err(|e| format!("preview spawn: {e}"))?;
-    log(&format!("preview up: port={port}"));
+        };
+        // root 的 canonical 形式只算一次：中间件每次请求都要拿它做前缀校验。
+        let canon = tokio::fs::canonicalize(&root)
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&root));
+        let app = router(PathBuf::from(root), canon);
+        log(&format!("preview up: port={port}"));
+        if let Err(e) = axum::serve(l, app).await {
+            log(&format!("preview serve ended: {e}"));
+        }
+    });
     Ok(port)
 }
 
@@ -73,45 +99,62 @@ fn log(msg: &str) {
     crate::pi_bun::logcat(&format!("[preview] {msg}"));
 }
 
-/// 扩展名 → Content-Type。**必须正确**：浏览器对 `text/html` 才会渲染，
-/// 否则（如 application/octet-stream）会变成下载。
-fn mime_for(path: &str) -> &'static str {
-    let ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" | "map" => "application/json; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "txt" | "md" => "text/plain; charset=utf-8",
-        "wasm" => "application/wasm",
-        _ => "application/octet-stream",
+/// 路由。**只挂 GET/HEAD** —— 预览页永不该有能力写任何东西（其他方法由 axum
+/// 自动回 405）。
+fn router(root: PathBuf, canon: PathBuf) -> Router {
+    let state = Arc::new((root.clone(), canon));
+    Router::new()
+        .fallback_service(
+            ServeDir::new(&root)
+                // 目录请求补 index.html（相对引用才不会 404）。显式写出来，不依赖默认值。
+                .append_index_html_on_directories(true),
+        )
+        .layer(middleware::from_fn_with_state(state, deny_escape))
+}
+
+/// 逃逸防护：拒绝 `..`，并把**解析过符号链接之后**的路径限制在 root 内。
+///
+/// 为什么不能只查字符串（初版就是这样）：`workspace/link -> ../../creds.json`
+/// 这种符号链接能绕过纯字符串判定，而 ServeDir 会老老实实跟随它。
+type PreviewState = Arc<(PathBuf, PathBuf)>;
+
+async fn deny_escape(
+    State(state): State<PreviewState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let (_, canon) = &*state;
+    let decoded = percent_decode(req.uri().path());
+    let rel = decoded.trim_start_matches('/');
+    if rel.split('/').any(|s| s == "..") {
+        log(&format!("deny (..): {rel}"));
+        return (StatusCode::FORBIDDEN, "outside workspace").into_response();
     }
+    if rel.is_empty() {
+        return next.run(req).await;
+    }
+    // canonicalize 不存在时失败 → 目标不存在，交给 ServeDir 出 404 即可
+    // （符号链接指向不存在的外部路径也走这条，不会泄露）。
+    if let Ok(p) = tokio::fs::canonicalize(canon.join(rel)).await {
+        if !p.starts_with(canon) {
+            log(&format!("deny (symlink escape): {rel}"));
+            return (StatusCode::FORBIDDEN, "outside workspace").into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// workspace 里的 html 入口候选（给 UI 的选择列表）。
 ///
-/// 有界：限深度与条数。**不做全量遍历**——workspace 里可能有 node_modules 之类
-/// （本仓库在 fs/jail 上吃过无界遍历的亏）。
+/// 有界：限深度与条数，并跳过 node_modules 等。**不做全量遍历**——workspace 里
+/// 可能有 node_modules 之类（本仓库在无界遍历上吃过亏）。
 pub fn targets() -> serde_json::Value {
     let root = match crate::pi_bun::loopback::workspace_dir() {
         Some(r) => r,
         None => return serde_json::json!([]),
     };
     let mut out: Vec<String> = Vec::new();
-    collect_html(std::path::Path::new(&root), "", 0, &mut out);
+    collect_html(Path::new(&root), "", 0, &mut out);
     out.sort();
     serde_json::json!(out)
 }
@@ -120,7 +163,7 @@ const MAX_DEPTH: usize = 4;
 const MAX_TARGETS: usize = 50;
 const SKIP_DIRS: &[&str] = &["node_modules", ".git", "target", "dist", ".venv"];
 
-fn collect_html(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Vec<String>) {
+fn collect_html(dir: &Path, prefix: &str, depth: usize, out: &mut Vec<String>) {
     if depth > MAX_DEPTH || out.len() >= MAX_TARGETS {
         return;
     }
@@ -153,123 +196,6 @@ fn collect_html(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Vec
     }
 }
 
-fn respond(stream: &mut TcpStream, status: &str, mime: &str, body: &[u8]) {
-    let head = format!(
-        "HTTP/1.1 {status}\r\n\
-         Content-Type: {mime}\r\n\
-         Content-Length: {}\r\n\
-         Cache-Control: no-store\r\n\
-         X-Content-Type-Options: nosniff\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
-    );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body);
-    let _ = stream.flush();
-}
-
-fn handle_conn(mut stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-
-    // 读头部（直到 \r\n\r\n）
-    let mut buf = Vec::with_capacity(1024);
-    let mut byte = [0u8; 1];
-    loop {
-        match stream.read(&mut byte) {
-            Ok(1) => {
-                buf.push(byte[0]);
-                if buf.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-                if buf.len() > 16 * 1024 {
-                    return;
-                }
-            }
-            _ => return,
-        }
-    }
-    let head = String::from_utf8_lossy(&buf);
-    let request_line = head.lines().next().unwrap_or("");
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let raw_path = parts.next().unwrap_or("/");
-
-    let root = match crate::pi_bun::loopback::workspace_dir() {
-        Some(r) => std::path::PathBuf::from(r),
-        None => {
-            respond(
-                &mut stream,
-                "503 Service Unavailable",
-                "text/plain",
-                b"workspace not configured",
-            );
-            return;
-        }
-    };
-    let (status, mime, body) = serve(&root, method, raw_path);
-    respond(&mut stream, status, mime, &body);
-}
-
-/// 请求处理核心 —— **纯函数**：只依赖传入的 root，不碰任何全局。
-///
-/// 这样测试能用临时目录直接验，不会像早期版本那样因 `loopback::configure` 是
-/// OnceLock（先到先得）而把 loopback 自己的测试弄挂。
-fn serve(
-    root: &std::path::Path,
-    method: &str,
-    raw_path: &str,
-) -> (&'static str, &'static str, Vec<u8>) {
-    // 只读：预览页永不该有能力写任何东西。
-    if method != "GET" && method != "HEAD" {
-        return ("405 Method Not Allowed", "text/plain", b"read-only".to_vec());
-    }
-
-    // 查串与锚点不属于文件名；顺带做个 URL 解码（%20 等）。
-    let path = raw_path.split(['?', '#']).next().unwrap_or("");
-    let decoded = percent_decode(path);
-    let rel = decoded.trim_start_matches('/');
-    if rel.is_empty() {
-        return (
-            "200 OK",
-            "text/plain; charset=utf-8",
-            b"pi-mobile preview: GET /<workspace-relative-path>\n".to_vec(),
-        );
-    }
-    // 目录请求 → 补 index.html（否则相对引用会 404）。
-    let rel = if rel.ends_with('/') {
-        format!("{rel}index.html")
-    } else {
-        rel.to_string()
-    };
-
-    // 越狱防护复用 loopback 那一份规则（安全规则只能有一份）。
-    let full = match crate::pi_bun::loopback::jail_path_in(root, &rel) {
-        Ok(p) => p,
-        Err(e) => {
-            log(&format!("deny {rel}: {e}"));
-            return ("403 Forbidden", "text/plain", b"outside workspace".to_vec());
-        }
-    };
-    match std::fs::read(&full) {
-        Ok(bytes) => {
-            let mime = mime_for(&rel);
-            if method == "HEAD" {
-                ("200 OK", mime, Vec::new())
-            } else {
-                ("200 OK", mime, bytes)
-            }
-        }
-        Err(e) => {
-            let msg = format!("cannot read {rel}: {e}");
-            (
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                msg.into_bytes(),
-            )
-        }
-    }
-}
-
 /// 最小 %XX 解码。只做这一件事，不引入 URL 依赖。
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -293,14 +219,110 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt; // oneshot：不起 socket 也能测真实路由栈
 
-    #[test]
-    fn mime_covers_the_web_trio() {
-        // 这三个错了会直接表现为「浏览器不渲染」或「CSS/JS 被拒」。
-        assert!(mime_for("a/index.html").starts_with("text/html"));
-        assert!(mime_for("x/y.js").starts_with("text/javascript"));
-        assert!(mime_for("s.css").starts_with("text/css"));
-        assert_eq!(mime_for("noext"), "application/octet-stream");
+    fn fixture(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pi-preview-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/index.html"), b"<h1>hi</h1>").unwrap();
+        std::fs::write(root.join("app/site.css"), b"h1{color:red}").unwrap();
+        root
+    }
+
+    fn app_for(root: &Path) -> Router {
+        let canon = std::fs::canonicalize(root).unwrap();
+        router(root.to_path_buf(), canon)
+    }
+
+    async fn get(app: Router, target: &str) -> (StatusCode, String, String) {
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri(target)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let mime = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, mime, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn serves_html_and_css_with_right_content_types() {
+        let root = fixture("mime");
+        let (st, mime, body) = get(app_for(&root), "/app/index.html").await;
+        assert_eq!(st, StatusCode::OK);
+        // Content-Type 错了浏览器就不渲染而是下载 —— 这是最容易被换库换坏的一处
+        assert!(mime.starts_with("text/html"), "{mime}");
+        assert!(body.contains("<h1>hi</h1>"), "{body}");
+
+        let (st, mime, _) = get(app_for(&root), "/app/site.css").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(mime.starts_with("text/css"), "{mime}");
+
+        // 目录请求补 index.html（否则相对引用会 404）
+        let (st, _, _) = get(app_for(&root), "/app/").await;
+        assert_eq!(st, StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn refuses_escape_readonly_and_symlink() {
+        let root = fixture("deny");
+        // 逃逸诱饵：放在 root 之外
+        let bait = root.parent().unwrap().join(format!("pi-bait-{}.json", std::process::id()));
+        std::fs::write(&bait, b"SECRET").unwrap();
+
+        // `..` 直接拒，且**不泄露内容**
+        let (st, _, body) = get(app_for(&root), "/../pi-bait.json").await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+        assert!(!body.contains("SECRET"), "逃逸泄了内容: {body}");
+
+        // 只读：POST 必须 405
+        let res = app_for(&root)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/app/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // 符号链接逃逸：这是**换 ServeDir 之后新增**的一条，因为 ServeDir 会
+        // 跟随符号链接 —— 只查字符串挡不住。
+        #[cfg(unix)]
+        {
+            let link = root.join("escape.json");
+            if std::os::unix::fs::symlink(&bait, &link).is_ok() {
+                let (st, _, body) = get(app_for(&root), "/escape.json").await;
+                assert_eq!(st, StatusCode::FORBIDDEN, "符号链接逃逸没挡住: {body}");
+                assert!(!body.contains("SECRET"), "符号链接泄了内容: {body}");
+            }
+            // 工作区内指向工作区内的符号链接应放行（不要过度拦截）
+            let ok_link = root.join("app/alias.html");
+            if std::os::unix::fs::symlink(root.join("app/index.html"), &ok_link).is_ok() {
+                let (st, _, _) = get(app_for(&root), "/app/alias.html").await;
+                assert_eq!(st, StatusCode::OK);
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&bait);
     }
 
     #[test]
@@ -314,63 +336,8 @@ mod tests {
 
     #[test]
     fn targets_is_bounded_and_skips_noise() {
-        // 无界遍历在这个仓库是踩过的坑，所以只验「不 panic + 形状对」。
         let v = targets();
         assert!(v.is_array());
         assert!(v.as_array().unwrap().len() <= MAX_TARGETS);
     }
-
-    /// 真的起服务、真的走 TCP 发请求 —— 只测 mime 函数不算验过这条链路。
-    ///
-    /// 重点是两件安全性质：
-    ///   1. **只读**：POST 必须 405（预览页永不该有能力写东西）
-    ///   2. **jail**：`../creds.json` 这类路径必须 403（否则等于把凭证交给一段
-    ///      LLM 写的脚本）
-    /// 真的走 HTTP 语义跑一遍核心（不再是只测 mime 函数）。
-    ///
-    /// 用**纯函数 + 临时 root**，不碰任何全局 —— 早期版本调
-    /// `loopback::configure` 去设 workspace，而那是 OnceLock（先到先得），
-    /// 于是竞态地把 loopback 自己的测试弄挂了。
-    #[test]
-    fn serves_and_refuses_escape_and_writes() {
-        let root = std::env::temp_dir().join(format!("pi-preview-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("app")).unwrap();
-        std::fs::write(root.join("app/index.html"), b"<h1>hi</h1>").unwrap();
-        std::fs::write(root.join("app/site.css"), b"h1{color:red}").unwrap();
-        // 逃逸诱饵：放在 root 之外（`../` 的落点）
-        let bait = root.parent().unwrap().join("pi-preview-bait.json");
-        std::fs::write(&bait, b"SECRET").unwrap();
-
-        let body = |t: &str| -> (String, String) {
-            let (st, mime, b) = serve(&root, "GET", t);
-            (format!("{st} | {mime}"), String::from_utf8_lossy(&b).into_owned())
-        };
-
-        let (h, txt) = body("/app/index.html");
-        assert!(h.starts_with("200 OK"), "{h}");
-        assert!(h.contains("text/html"), "Content-Type 错了浏览器就不渲染: {h}");
-        assert!(txt.contains("<h1>hi</h1>"), "{txt}");
-
-        // 相对引用：css 能被取到（这正是不用 srcdoc 的原因）
-        assert!(body("/app/site.css").0.contains("text/css"));
-        // 目录请求补 index.html
-        assert!(body("/app/").0.starts_with("200 OK"));
-        // 查串不参与文件名（预览重开时带 ?v=…）
-        assert!(body("/app/index.html?v=3").0.starts_with("200 OK"));
-
-        // 逃逸必须被拒，且**不能**泄露内容
-        let (s1, t1) = body("/../pi-preview-bait.json");
-        assert!(s1.starts_with("403"), "{s1}");
-        assert!(!t1.contains("SECRET"), "逃逸把 root 外的文件泄了: {t1}");
-        assert!(body("/app/../../pi-preview-bait.json").0.starts_with("403"));
-
-        // 只读
-        let (st, _, _) = serve(&root, "POST", "/app/index.html");
-        assert!(st.starts_with("405"), "{st}");
-
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_file(&bait);
-    }
-
 }

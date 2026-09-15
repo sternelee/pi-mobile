@@ -43,6 +43,12 @@ tauri-plugin-geolocation = "2.3.3"
 # 路径依赖而非 crates.io：它是本仓的一部分，且 build.rs 需要能找到同目录的
 # ios/ 与 android/ 原生源码才能把它们编进产物。
 tauri-plugin-pi-native = { path = "plugins/pi-native" }
+# D15 预览：用 axum + tower-http::ServeDir 替掉手写 HTTP 解析。
+# 成本很低：hyper/tower/tower-http 已由 tauri 传递引入（见 Cargo.lock），
+# 这里只新增 axum 本身；tokio 只多要 `net`/`fs` feature。
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+tokio = { version = "1", features = ["net", "fs"] }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。
@@ -54,4 +60,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 
 [dev-dependencies]
 filetime = "0.2"
+# preview 的路由测试用 oneshot（不起 socket）：那才是真的跑过 ServeDir +
+# 中间件那一栈，而不是只测几个辅助函数。tower 本就在依赖树里（tauri 传递引入）。
+tower = { version = "0.5", features = ["util"] }
 
