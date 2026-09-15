@@ -300,6 +300,36 @@ pi-mobile/
 - **spike 跑在哪**：宿主（darwin-aarch64 / Release / 预构建 WebKit），`scripts/link-skal-macos.sh` + `scripts/spike-harness.c` 可复现。**iOS 真机仍验不了**（设备掉线 + profile 过期）→ 「iOS 关 JIT 下看门狗是否照常生效」仍未证（看门狗是独立线程、不需 JIT，理论上无碍）。Android 未跑（同引擎路径；`PI_SPIKE=1` 自动触发钩子已留在 `skal_create_runtime` 尾部备用）。
 - **清理义务**：spike 脚手架（`patches/pi_entry.zig` 新增 239 行）**会随 fork 进 iOS dylib**。默认惰性（`PI_SPIKE` 未设时不触发），但**上线前必须删除**；D14 真实 runner 落地时会自然取代它。
 
+### D15：产物预览（agent 自写 html/js/css → iframe 预览）
+
+- **定位**：让 agent 写出的页面能直接看。**编写侧已有**——`write`/`mkdir` 本来就
+  jail 在 `{data_dir}/workspace`，不需要新工具；本决策只解决「**看**」。
+- **为什么不能只把文件内联成 `srcdoc`**：多文件项目靠相对路径互相引用（html → css/js），
+  内联会打断相对路径，且要手工处理转义。必须要一个真实的 HTTP 源。
+- **服务方式**：Rust 侧新增**独立端口**的只读静态服务（`127.0.0.1:<previewPort>`），
+  路径 jail 到 workspace。**独立端口是刻意的**：让预览与 `/hostcall` **不同源**，
+  这是纵深防御；真正的防线仍是 `REQUIRE_HOST_TOKEN`（预览页拿不到 host token，
+  所以它即便自己去打 hostcall 也是拒）。
+- **iframe sandbox**：只给 `allow-scripts` + `allow-forms`。**不给** `allow-same-origin`
+  （预览页是 opaque origin，够不到 app 的 DOM、也没 localStorage）、**不给**
+  `allow-top-navigation`（不能把 app 导航走）、**不给** `allow-popups`。
+- **网络：允许**（用户决定，2026-09-14）。可引 CDN/字体/公开 API，交互最完整。
+- **⚠️ 这个选择下必须明确写下的后果**：**agent 写的页面可以把数据发到任意外网**。
+  这是本决策里唯一不可控的一条，而且它与其他工具的能力**叠加**——比如脚本先经
+  `fs:read` 读到工作区文件，再由预览页把内容 POST 出去。有意接受，因为：
+  (a) 预览页仍然够不到 app DOM、拿不到 host token、无法调任何工具；
+  (b) 能外泄的只有页面自己能生成的（或先经审批写进 workspace 的东西）；
+  (c) 预览是**用户主动打开**的可见面。
+- **需要的配套**：
+  1. 预览必须**看得见是预览**（顶栏/边框标识 + 当前路径），不能与 app 自身 UI 混淆
+     —— 否则它就是一个现成的钓鱼面。
+  2. 只读服务，且只服务 workspace 内文件（复用 `loopback::jail_path`）；
+     不得因路径穿越读到 `creds.json`/`sessions/` 等。
+  3. 响应带合理头部（`Content-Type` 按扩展名；不缓存，或短缓存 + 重开时带
+     版本参数）。
+- **待定（实现时再定，不阻塞）**：是否给 agent 一个 `preview` 工具让它自己打开预览
+  （符合「agent 能做的事用户也能做，反之亦然」）；v1 先做用户侧入口，工具看实际需要。
+
 ---
 
 ## 6. 里程碑路线图（方案 C 形态：libpi-bun 为关键路径）
