@@ -351,7 +351,7 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     set_log_dir(data_dir);
     // D16：Android 的 CA 信任库不在 OpenSSL 的默认路径上，必须在任何 git 网络操作
     // 之前指过去 —— 否则 clone/pull 一律报 `SSL certificate is invalid`。
-    crate::git::init_tls();
+    crate::git::init_tls(data_dir);
     let port = loopback::start()?;
     init(data_dir)?;
     // 开发期自检：debug 构建才跑，且不得阻塞启动（最坏要等各步超时

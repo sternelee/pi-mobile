@@ -155,41 +155,80 @@ fn scrub(msg: &str) -> String {
     out
 }
 
-/// 把操作系统的信任库指给 OpenSSL（**仅 Android 需要**）。
+/// 让 libgit2+OpenSSL 找到 Android 的信任库（**仅 Android 需要**）。
 ///
 /// 真机症状：`clone failed: the SSL certificate is invalid; code=Certificate (-17)`
-/// —— libgit2+openssl 用 `SSL_CTX_set_default_verify_paths()`，而它的默认路径是
-/// 通用 Linux 的 `/etc/ssl/certs`，**在 Android 上不存在**，于是信任库为空、
-/// 任何证书都验不过。
 ///
-/// Android 的信任库是 `/apex/com.android.conscrypt/cacerts`（Android 14+ 的
-/// 权威位置）与 `/system/etc/security/cacerts`，**格式恰好就是 OpenSSL 的 hashed
-/// 目录**（`subject_hash.N` 文件），所以直接指 `SSL_CERT_DIR` 即可，不需要拼 bundle。
+/// ## 为什么只设 `SSL_CERT_DIR` 不够（实测踩过）
 ///
-/// 在**任何网络操作之前**调用（libgit2 每次 fetch/clone 会新建 SSL context，
-/// 但早设比晚设可靠）。已设过就不覆盖 —— 尊重用户的显式配置。
-pub fn init_tls() {
-    #[cfg(target_os = "android")]
-    {
-        if std::env::var_os("SSL_CERT_DIR").is_some() {
-            return;
-        }
-        // 优先 APEX（14+ 权威位置），回退传统路径 —— 两者在 Android 16 上都存在
-        // 且内容一致（实测各 149 个 hashed 证书），但按权威性优先。
-        for dir in [
-            "/apex/com.android.conscrypt/cacerts",
-            "/system/etc/security/cacerts",
-        ] {
-            if std::path::Path::new(dir).is_dir() {
-                // SAFETY: 启动期单线程调用（agent_init 早期），无并发读 env。
-                unsafe { std::env::set_var("SSL_CERT_DIR", dir) };
-                crate::pi_bun::logcat(&format!("[git] SSL_CERT_DIR={dir}"));
-                return;
+/// libgit2 经 `SSL_CTX_set_default_verify_paths()` 找信任库。而 OpenSSL 3.x 的
+/// `X509_STORE_set_default_paths()` 是：
+///
+/// ```c
+/// if (!X509_LOOKUP_load_file(lookup, NULL, X509_FILETYPE_DEFAULT)) return 0;  // ← 先文件
+/// if (!X509_LOOKUP_add_dir (lookup, NULL, X509_FILETYPE_DEFAULT)) return 0;  // ← 后目录
+/// ```
+///
+/// Android 上那个**默认 CA 文件不存在** → 第一步就 return 0 → **目录那一步根本没执行**。
+/// 所以只设 `SSL_CERT_DIR` 无效（已实测：日志显示变量设上了，clone 依旧报证书无效）。
+///
+/// ## 做法：拼一个真实存在的 PEM bundle
+///
+/// Android 的信任库是 `…/cacerts/` 下的 149 个 PEM 文件（`subject_hash.N`）。把它们
+/// 拼成 `<data_dir>/cacerts.pem` 再指 `SSL_CERT_FILE` —— 文件真实存在，第一步就能过。
+/// 同时也设 `SSL_CERT_DIR`（若 OpenSSL 愿意走目录，是一条额外的路，不冲突）。
+///
+/// bundle 只在缺失或为空时重建，不每次启动都做（149 个文件读一遍不值得）。
+#[cfg(target_os = "android")]
+pub fn init_tls(data_dir: &str) {
+    if std::env::var_os("SSL_CERT_FILE").is_some() {
+        return; // 尊重用户的显式配置
+    }
+    let dirs = [
+        "/apex/com.android.conscrypt/cacerts", // Android 14+ 权威位置
+        "/system/etc/security/cacerts",        // 传统位置（实测两者内容一致）
+    ];
+    let Some(src) = dirs.iter().find(|d| std::path::Path::new(d).is_dir()) else {
+        crate::pi_bun::logcat("[git] WARN: no Android CA store found; https will fail");
+        return;
+    };
+
+    let bundle = std::path::Path::new(data_dir).join("cacerts.pem");
+    let need_build = std::fs::metadata(&bundle).map(|m| m.len() == 0).unwrap_or(true);
+    if need_build {
+        let mut out = String::new();
+        let mut n = 0usize;
+        if let Ok(entries) = std::fs::read_dir(src) {
+            for e in entries.flatten() {
+                if let Ok(text) = std::fs::read_to_string(e.path()) {
+                    if text.contains("BEGIN CERTIFICATE") {
+                        out.push_str(&text);
+                        if !text.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        n += 1;
+                    }
+                }
             }
         }
-        crate::pi_bun::logcat("[git] WARN: no Android CA store found; https will fail");
+        if n == 0 || std::fs::write(&bundle, &out).is_err() {
+            crate::pi_bun::logcat(&format!("[git] WARN: failed to build CA bundle from {src}"));
+            return;
+        }
+        crate::pi_bun::logcat(&format!("[git] built CA bundle: {n} certs → {}", bundle.display()));
     }
+
+    // SAFETY: 启动期调用（agent_init 早期），无并发读 env。
+    unsafe {
+        std::env::set_var("SSL_CERT_FILE", &bundle);
+        std::env::set_var("SSL_CERT_DIR", src);
+    }
+    crate::pi_bun::logcat(&format!("[git] SSL_CERT_FILE={} SSL_CERT_DIR={src}", bundle.display()));
 }
+
+/// iOS/桌面：libgit2 在 Apple 平台走系统的 TLS（SecureTransport），无需指信任库。
+#[cfg(not(target_os = "android"))]
+pub fn init_tls(_data_dir: &str) {}
 
 // ── 只读操作 ────────────────────────────────────────────────────────
 
