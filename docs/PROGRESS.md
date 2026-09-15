@@ -39,7 +39,24 @@ src-tauri/gen/android/app/build.gradle.kts:23:  minSdk = 24
   `LIBGIT2_SYS_USE_PKG_CONFIG=0` 确实让三个 C 库走 vendored 交叉编译
 - 另一个真坑（NDK 无带前缀的 `ranlib`，需 `RANLIB_aarch64_linux_android`）已确认
 
-### ⏭ 选项（需产品层决定，未动手）
+### ✅ 解决（2026-09-15，用户决定提 minSdk 到 28）
+
+用户选择提 minSdk。改动与配套：
+
+1. `src-tauri/gen/android/app/build.gradle.kts`：`minSdk 24 → 28`（附注释说明原因，
+   并标注 `gen/android` 是 `tauri android init` 生成的、重新生成会丢）。代价已确认：
+   放弃 Android 9.0 以下。
+2. **新增 `scripts/android-build.sh`**：Android 构建必须走它，不能再用裸
+   `bun tauri android build`。原因：**Tauri 传给 `cc` 的 API level 与 minSdk 不一致**
+   —— 实测把 minSdk 提到 28 后，它**仍然**用低 API 包装器，所以 OpenSSL 依旧编不过。
+   脚本做三件事：从 `build.gradle.kts` **读出 minSdk**（不另写一份，否则两边漂移
+   就是又一次假绿）、据此选 `…-androidNN-clang`、并补齐 `AR`/`RANLIB`/`LINKER`。
+3. 验证：`./scripts/android-build.sh --debug --target aarch64` → **Finished 1 APK**。
+
+另记一条被否掉的办法：`ANDROID_API_LEVEL=28` 环境变量（想让 cc crate 自己选对包装器）
+**实测无效**；只有显式 `CC_<target>` 那条路有效，所以必须用包装脚本而非纯 env 配置。
+
+### ⏭ 原选项（存档）
 
 1. **把 minSdk 提到 28**：最干净，但**放弃 Android 9 及以下**（2018 年及更早设备）。
    是否可接受是产品决定，不是技术决定。

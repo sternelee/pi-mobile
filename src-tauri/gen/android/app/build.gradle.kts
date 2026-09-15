@@ -20,7 +20,13 @@ android {
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.sternelee.pi_mobile"
-        minSdk = 24
+        // D16：24 → 28。OpenSSL 3.x（libgit2 的 TLS 后端，vendored）的
+        // rand_unix.c 直接调 getentropy()，而它 **API 28 才引入** —— 用 24 编不过。
+        // 强钉 CC 到 28 编得过但会在 24–27 运行期失败（更糟），所以只能提 minSdk。
+        // 代价：放弃 Android 9.0 以下（2018 年及更早设备）。
+        // ⚠️ gen/android 是 `tauri android init` 生成的，若重新生成会丢掉本注释与
+        //    这个值，要记得改回来（或移到不会被覆盖的地方）。
+        minSdk = 28
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
