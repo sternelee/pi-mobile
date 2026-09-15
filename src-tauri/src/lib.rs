@@ -2,6 +2,7 @@
 mod approval;
 mod ask_user;
 mod creds;
+mod git;
 mod goal;
 mod http_tool;
 mod keepalive;

@@ -31,6 +31,11 @@ pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     EVENT_SINK.set(Box::new(f)).ok();
 }
 
+/// data 根目录（git 凭证按 `git:<host>` 存在这里，见 src/creds.rs）。
+pub(crate) fn data_dir() -> Option<String> {
+    DATA_DIR.get().cloned()
+}
+
 /// workspace 根目录（preview 的静态服务要用它做 jail 根）。
 pub(crate) fn workspace_dir() -> Option<String> {
     WORKSPACE_DIR.get().cloned()
@@ -1057,6 +1062,36 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
             None => serde_json::json!({ "skills": [] }),
         },
         "http" => crate::http_tool::run(payload),
+        // D16 Git。**agent 主体专用**：不在 script.rs 白名单里 → 脚本自调会被自动拒
+        // （凭证绝不能进脚本 VM；git 工具也不该由脚本触发）。
+        // 审批不在这里判：走 approval.rs 的工具名分档（pull 永远 ask、
+        // commit 跟 write 基线、其余只读自动）。
+        "git_status" | "git_diff" | "git_log" | "git_clone" | "git_pull" | "git_commit" => {
+            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let repo = args.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let res = match method {
+                "git_status" => crate::git::status(repo),
+                "git_diff" => crate::git::diff(repo),
+                "git_log" => crate::git::log(
+                    repo,
+                    args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize,
+                ),
+                "git_clone" => {
+                    let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                    let dest = args.get("dest").and_then(|v| v.as_str()).unwrap_or("");
+                    crate::git::clone(url, dest)
+                }
+                "git_pull" => crate::git::pull(repo),
+                _ => {
+                    let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    crate::git::commit(repo, msg)
+                }
+            };
+            match res {
+                Ok(t) => serde_json::json!({ "text": t }),
+                Err(e) => serde_json::json!({ "error": e }),
+            }
+        }
         // D15：agent 自己把预览面板打开（用户的流程是「让它写个五子棋 → 它调
         // 预览工具」，所以工具是必需的，不能只有用户侧入口）。
         //

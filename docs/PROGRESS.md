@@ -2,6 +2,51 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-15 — ✅ D16 Git 工具本体已落地（clone/pull/status/diff/log/commit）
+
+**状态**：Rust 侧 + hostcall + bundle 工具都写好了，44 tests 绿，双端交叉编译通过。
+**未做真机验证**（没在设备上真 clone 过），**push 未实现**（见下）。
+
+### 已实现
+
+| 层 | 内容 |
+|---|---|
+| `src-tauri/src/git.rs` | libgit2 封装：status / diff / log / clone / pull / commit；5 个负向优先单测 |
+| hostcall | `git_status` / `git_diff` / `git_log` / `git_clone` / `git_pull` / `git_commit`，**agent 主体专用**（不在 script 白名单 → 脚本自调自动被拒） |
+| 审批 | `git_pull` 进 **ALWAYS_ASK**（永远问，不受 write 基线影响）；`git_commit` 进 ASK_TOOLS（跟 write 基线）；其余只读自动 |
+| bundle | 6 个工具注册；pull/commit 标 `mutating: true`（**漏标就等于绕过审批**） |
+
+三道边界都落在 Rust 侧（不在 JS 侧，同 D14/D15）：
+1. **jail**：仓库路径必须落在 workspace 内（复用 `loopback::jail_path_in`）
+2. **URL**：只允许 https + 复用 `http_tool::validate_url`（拒 loopback/私网）
+3. **脱敏**：`scrub()` 把错误信息里的 URL 换成 `<remote>` —— git2 的报错有时会带上
+   含 token 的 URL，而错误信息是要回给模型的
+
+### 有意为之的几个判断
+
+- **pull 只做快进，不自动合并**：冲突合并需要工作区干净 + 人工决策，agent 在这种
+  场景更容易把事情搞坏。分叉时直接报错并说明怎么办。
+- **commit 时目录存在但非仓库 → 就地 init**：「写文件然后提交」是很自然的流程，
+  报错反而挡路。
+- **author 缺省用 `pi-mobile agent`**：移动端通常没有 `user.name`，libgit2 会因此
+  拒绝提交；给显式默认值比报错好，且提交历史里能看出是自动产生的。
+- **clone 目标非空则拒**：`Repository::clone` 到非空目录要么失败要么留半成品，
+  而那种报错对模型毫无指导意义。
+
+### ⚠️ 顺带发现的运维事实
+
+**Android 上任何 cargo 命令都需要那组 NDK env**，不只是 `tauri build`：
+裸 `cargo check --target aarch64-linux-android` 现在也会失败（openssl-sys 的 build
+script 要 CC）。**CI 里若不导出会红在一个看起来与业务无关的地方**（openssl-sys）。
+已写进 `scripts/android-build.sh` 头注释。
+
+### push：仍未实现
+
+`git2` 本身**有** push 能力，所以不再是「库不支持」的问题，而是**没写**。
+按 D16 的决策它本来就在 v1 之外（当时的前提是 gix 无 push，现在换 git2 后
+技术障碍消失了 —— 但 push 是最需要谨慎设计的一项：把用户代码发到远端，
+审批卡必须显示远端 URL）。**要不要做、按什么授权粒度做，待定。**
+
 ## 2026-09-15 — ⛔ D16 Git 集成：git2 vendored 与 minSdk 24 冲突，APK 构建当前**是坏的**
 
 **状态**：spike 表面通过、实际暴露一个**真实的平台冲突**。依赖树里已加 git2

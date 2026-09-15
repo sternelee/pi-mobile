@@ -19,7 +19,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 走审批的工具集（D6：Android bash 暂未注册，保持集合完整以便后续）。
-const ASK_TOOLS: &[&str] = &["write", "edit", "mkdir", "bash"];
+const ASK_TOOLS: &[&str] = &["write", "edit", "mkdir", "bash", "git_commit"];
+/// **永远 ask**，不受 write 基线影响（D16：pull 会覆盖工作区文件，是这套里
+/// 唯一「直接改用户已有文件」的操作；把它降成 auto 等于让 agent 静默覆盖）。
+/// clone 不在此列：它只往**空目录**里写，非空即拒，不覆盖任何已有内容。
+const ALWAYS_ASK_TOOLS: &[&str] = &["git_pull"];
 /// 脚本执行工具（D14）。单独一档：它**永不参与 always 全局降级**，且每次都要
 /// 把能力清单展示给用户。
 const SCRIPT_TOOLS: &[&str] = &["run_js"];
@@ -133,6 +137,7 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     let is_mcp = tool.starts_with("mcp__");
     let is_script = SCRIPT_TOOLS.contains(&tool);
     let needs_ask = is_mcp
+        || ALWAYS_ASK_TOOLS.contains(&tool)
         || is_script
         || (ASK_TOOLS.contains(&tool)
             && POLICY

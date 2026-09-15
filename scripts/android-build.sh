@@ -15,6 +15,11 @@
 #
 # 用法（与 bun tauri android build 参数一致）：
 #     ./scripts/android-build.sh --debug --target aarch64
+#
+# ⚠️ 不止 `tauri build`：**Android 上任何 cargo 命令都需要这组 env**
+# （裸 `cargo check --target aarch64-linux-android` 也会失败 —— openssl-sys 的
+# build script 要 CC）。CI 里同样要导出，否则会红在一个看起来与业务无关的地方。
+# 需要单独跑 cargo 时，照抄本脚本下面那四个 export 即可。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

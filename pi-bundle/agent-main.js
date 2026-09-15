@@ -458,9 +458,68 @@ const previewTool = hostTool(
 	{ channel: "preview_open" },
 );
 
+// ---- D16 Git 集成（工作区内）----
+//
+// 这些工具在 Rust 侧是 **agent 主体专用**（不在 script.rs 白名单里），所以脚本
+// 自调会被自动拒 —— 凭证绝不能进脚本 VM。
+//
+// 审批分档在 Rust 侧（approval.rs），按「后果」而非按 API：
+//   status/diff/log 只读自动 · clone 自动（目标非空即拒，不覆盖任何东西）
+//   **pull 永远 ask**（会覆盖工作区文件）· commit 跟 write 基线
+// 标 mutating 的工具才会真的发 approval_request —— 漏标等于绕过审批。
+const GIT_ONLY_HTTPS =
+	"Only https:// remotes are accepted (ssh://, git:// and file:// are rejected). " +
+	"For private repos an access token is picked up automatically on known hosts, so do not ask the user for one.";
+
+const gitTools = [
+	hostTool(
+		"git_status",
+		"Git status",
+		"Show branch, changed files and untracked files for a git repository inside the workspace. Args: {repo}",
+		obj({ repo: { type: "string", description: "workspace-relative repo directory (e.g. `myproject`)" } }, ["repo"]),
+		{ channel: "git_status" },
+	),
+	hostTool(
+		"git_diff",
+		"Git diff",
+		"Show the diff between HEAD and the working tree (truncated if large). Use it to review what changed before committing. Args: {repo}",
+		obj({ repo: { type: "string" } }, ["repo"]),
+		{ channel: "git_diff" },
+	),
+	hostTool(
+		"git_log",
+		"Git log",
+		"List recent commits (sha, summary, author, time). Args: {repo, limit?}",
+		obj({ repo: { type: "string" }, limit: { type: "number", description: "default 20, max 50" } }, ["repo"]),
+		{ channel: "git_log" },
+	),
+	hostTool(
+		"git_clone",
+		"Git clone",
+		`Clone an https git repository into a workspace subdirectory. The destination must not exist or must be empty. ${GIT_ONLY_HTTPS} Args: {url, dest}`,
+		obj({ url: { type: "string" }, dest: { type: "string", description: "workspace-relative directory to create" } }, ["url", "dest"]),
+		{ channel: "git_clone" },
+	),
+	hostTool(
+		"git_pull",
+		"Git pull",
+		"Fetch origin and fast-forward the current branch. **Fast-forward only** — if the branch diverged it reports that instead of merging, because resolving conflicts needs a human decision. Args: {repo}",
+		obj({ repo: { type: "string" } }, ["repo"]),
+		// mutating: 它覆盖工作区文件，必须真的弹审批（Rust 侧 ALWAYS_ASK_TOOLS）
+		{ channel: "git_pull", mutating: true },
+	),
+	hostTool(
+		"git_commit",
+		"Git commit",
+		"Stage everything in the repo (including untracked files) and commit it. The repo is created if the directory exists but is not a repo yet. Args: {repo, message}",
+		obj({ repo: { type: "string" }, message: { type: "string" } }, ["repo", "message"]),
+		{ channel: "git_commit", mutating: true },
+	),
+];
+
 const extensionTools = [askUserTool, runScriptTool, previewTool];
 
-const tools = [...coreTools, fetchTool, ...nativeTools, ...extensionTools];
+const tools = [...coreTools, fetchTool, ...nativeTools, ...gitTools, ...extensionTools];
 
 // ---- subagents（pi-subagents 移动原生化：agent 委托）----
 // 上游的 fleet/workflow/mission 机制基于 pi-server 运行时，移动端取其核心
