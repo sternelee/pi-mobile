@@ -1,7 +1,7 @@
-import type { JSX, ValidComponent } from "solid-js";
-import { splitProps } from "solid-js";
 import * as CollapsiblePrimitive from "@kobalte/core/collapsible";
 import type { PolymorphicProps } from "@kobalte/core/polymorphic";
+import type { JSX, ValidComponent } from "solid-js";
+import { splitProps } from "solid-js";
 import { cn } from "~/lib/utils";
 
 type CollapsibleProps<T extends ValidComponent = "div"> =
@@ -11,16 +11,14 @@ const Collapsible = <T extends ValidComponent = "div">(
   props: PolymorphicProps<T, CollapsibleProps<T>>,
 ) => {
   const [local, others] = splitProps(props as CollapsibleProps, ["class"]);
-  return (
-    <CollapsiblePrimitive.Root
-      class={cn(local.class)}
-      {...others}
-    />
-  );
+  return <CollapsiblePrimitive.Root class={cn(local.class)} {...others} />;
 };
 
 type CollapsibleTriggerProps<T extends ValidComponent = "button"> =
-  CollapsiblePrimitive.CollapsibleTriggerProps<T> & { class?: string; children?: JSX.Element };
+  CollapsiblePrimitive.CollapsibleTriggerProps<T> & {
+    class?: string;
+    children?: JSX.Element;
+  };
 
 const CollapsibleTrigger = <T extends ValidComponent = "button">(
   props: PolymorphicProps<T, CollapsibleTriggerProps<T>>,
@@ -47,17 +45,10 @@ const CollapsibleContent = <T extends ValidComponent = "div">(
   ]);
   return (
     <CollapsiblePrimitive.Content
-      class={cn(
-        "animate-accordion-down overflow-hidden",
-        local.class,
-      )}
+      class={cn("animate-accordion-down overflow-hidden", local.class)}
       {...others}
     />
   );
 };
 
-export {
-  Collapsible,
-  CollapsibleTrigger,
-  CollapsibleContent,
-};
+export { Collapsible, CollapsibleContent, CollapsibleTrigger };

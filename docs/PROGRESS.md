@@ -2,6 +2,103 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-16 — ✅ UI 代码库拆分 + 事件 payload 类型化；遗留 3 处小 bug 记录
+
+纯重构日：零行为变化，typecheck / build / biome 全绿（biome errors 53→42，
+其中 `noExplicitAny` 18→5，剩余全部为存量债务）。
+
+### ✅ ① 清理脚手架残留
+
+- 删除根目录误建的 `./~/`（solid-ui CLI 把 `~` alias 当字面路径的产物，
+  且被全局 gitignore 的 `~` 模式掩盖，所以一直"隐形"）
+- 删除未被引用的 `card.tsx` / `text-field.tsx` / `separator.tsx`
+- 移除注释掉的 vconsole 及依赖
+
+### ✅ ② App.tsx 拆分（2614 → 1127 行）
+
+27 个新文件，按"纯逻辑 / domain 状态 / 展示组件"三层切：
+
+- `src/lib/`：`types.ts`（全部类型）、`format.ts`、`providers.tsx`（provider
+  常量 + 模块级 skillCmds 单例——语义不变）
+- `src/state/`：`useProviders` / `useMcp` / `useSkills` / `useSessions` /
+  `usePreview`，签名统一 `useXxx(push)`，依赖注入
+- `src/components/`：17 个 props-in 展示组件（accessor 传值），SettingsSheet
+  的 4 个 tab 视图拆到 `settings/` 子目录
+
+所有中文设计注释（D14/D15/A3/M6）原样跟随代码搬迁。App.tsx 保留事件 switch、
+跨域动作与 JSX 组装——这是 ~330 行 switch + ~230 行动作约束下的下限附近。
+
+### ✅ ③ `pi-agent-event` payload 类型化（`src/lib/events.ts`）
+
+`PiAgentEvent` 判别联合 ~50 个 variant，字段逐一与 emit 侧核对（pi-agent-core
+透传 / bundle emit / Rust emit 三方来源在 events.ts 注释里标注）；content blocks
+对齐 `pi-ai` 的 Text/Thinking/ToolCall/Image 结构；`parsePiEvent()` 替代内联
+try/catch。`agent_history` 消息数组同批类型化。
+
+### ✅ ④ a11y lint 清零
+
+42 errors → 6（剩余全为 CSS/noExplicitAny 存量）。三类修法：
+
+- `useButtonType` ×18：逐个核对 form 位置后全部 `type="button"`（无一是提交按钮）
+- 可点击 div/span ×8：7 处直接转原生 `<button>`（Tailwind preflight 已重置
+  UA 样式，`role="button"` 方案会触发 biome 的 `useSemanticElements`）；唯
+  session-item 因嵌套删除按钮保留 div，用 `role="option"` + `tabIndex` +
+  `activateOnKey`（新 `src/lib/a11y.ts`），并给删除按钮补 `onKeyDown`
+  stopPropagation 防键盘冒泡误切换会话
+- `noSvgWithoutTitle` ×2：dialog/sheet 关闭图标补 `aria-hidden`（按钮内已有
+  `sr-only` accessible name）
+
+### ⚠️ 顺带发现的疑似 bug（未改，记录在案）
+
+1. `deleteSession` 删当前会话不重置 token 徽标（`newSession` 会重置）
+2. `openDrawer` 中 mcp/skills 列表拉取失败也报 "session_list failed"
+3. `/btw` 等命令路径不重置 goalAuto 预算，只有普通消息重置
+4. `boot_error` 事件**无 emit 点**（Rust 走 `__pi_boot_error` 全局 → agent_init
+   的 Err 串）——App 里的消费 case 是死代码
+
+### ✅ ⑤ 工具卡 + composer 区重设计（参考 agent-workflow-ios 截图）
+
+参考图是浅色主题，我们只移植布局与信息层次模式，**保持暗色单主题**（既有
+刻意决策）。四个变化：
+
+- **工具调用卡**：左状态圆图标（绿勾/琥珀转圈/红 !）+ "TOOL CALL" 微标签
+  （10px  uppercase 0.08em）+ mono 工具名摘要；右侧 `success · 843 ms` 状态
+  文本（新计时：`tool_execution_start/end` 在 App 层记 Date.now 差值入
+  `ChatItem.durationMs`，`<1s` 显示 ms、≥1s 显示 s——`fmtDur`）。旧
+  `.tool-card` 系样式删除（仅 ChatStream 使用，已确认）
+- **composer 卡片化**:QuickBar chips 移入圆角 blur 材质的 composer 容器内部
+  （参考图的「chips 在输入行上方」模式）；上方新增 trust-row 微文案
+  （左 `ON-DEVICE · SANDBOXED`，右 `WRITES: ask · APPROVAL` 可点 → Settings
+  Agent tab）
+- **跳底钮改文字 pill**「↓ latest」
+- **DEV `#demo` 种子**:App.tsx 加 dev-only 演示数据（8 条代表性消息），浏览器
+  无 Tauri 后端也能预览聊天流，留作后续 UI 迭代工具
+
+视觉验证：chrome-devtools MCP + 390×844 视口截图走查（工具卡三态、composer
+卡片化、trust row、跳底 pill 均达标；截图 /tmp/pi-mobile-ui.png）。
+
+### ✅ ⑥ 细节打磨：inline code chip + 审批 chip
+
+- **inline code**（`.md code`）：亮底 + 1px 细边框 + 0.92em，全从现有 token
+  派生；codeblock 内复位边框防继承。从正文清晰跳出
+- **QuickBar 四 chip**:Files / Model ⌄ / **Approval**（FiShield + `writes ·
+  ask`，点击直达 Settings Agent tab，与 trust-row 同目标）/ Todos；容器
+  `overflow-x: auto` + 两端渐变 mask（iOS toolbar 惯例）兜底小屏溢出
+- 验证：typecheck / build 通过，biome 维持 6 errors 基线，截图
+  /tmp/pi-mobile-ui-v2.png 走查达标
+
+### ✅ ⑦ streaming 光标 + thinking 动效
+
+- `ChatItem.streaming`:`message_start/update` 置 true、`message_end` 置 false
+  （两个 merge 分支都写），`turn_end` 兜底收掉
+- **光标**：纯 CSS 伪元素（`.md.streaming` 末块 `::after`），0.5em×1em 圆角
+  绿块，只动 `opacity`（1 → 0.15 → 1,1.1s infinite,compositor 友好）；围栏
+  代码块场景光标落新行（可接受约定）
+- **thinking**：斜体 "thinking" + 三点 staggered 弹跳（delay 0/0.15/0.3s）
+- 两者均在现有 `prefers-reduced-motion` 块中关闭动画、静态呈现
+- 机器验证：getComputedStyle 确认 `md-cursor`/`dot-bounce` animationName
+  生效；截图 /tmp/pi-mobile-ui-v3.png
+
 ## 2026-09-15 — ✅ 一批 Agent/界面细节（D17）：删除工具 + 三处界面优化；⏸ rewind 待做
 
 用户暂停 D16 的 TLS 阻塞，转来这批细节。**四项已做，一项记录待做**。

@@ -1,7 +1,7 @@
 // 轻量 Markdown 渲染（零依赖）：覆盖 LLM 输出的绝大多数形态 ——
 // 围栏代码块（语言标签 + 复制）、标题、有序/无序列表、引用、粗斜体、
 // 行内代码、链接。先 HTML 转义再做自有转换，无注入面。
-import { For, Show, createSignal } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 
 function escapeHtml(s: string): string {
   return s
@@ -48,7 +48,9 @@ function mdToHtml(lines: string[]): string {
       const ordered = /^\d+[.)]\s+/.test(line);
       const items: string[] = [];
       while (i < lines.length && isListItem(lines[i])) {
-        items.push(inline(lines[i].replace(/^[-*]\s+/, "").replace(/^\d+[.)]\s+/, "")));
+        items.push(
+          inline(lines[i].replace(/^[-*]\s+/, "").replace(/^\d+[.)]\s+/, "")),
+        );
         i++;
       }
       const tag = ordered ? "ol" : "ul";
@@ -134,7 +136,7 @@ function CodeBlock(props: { lang: string; code: string }) {
     <div class="codeblock">
       <div class="codeblock-head">
         <span>{props.lang || "code"}</span>
-        <button class="codeblock-copy" onClick={copy}>
+        <button type="button" class="codeblock-copy" onClick={copy}>
           {copied() ? "copied ✓" : "copy"}
         </button>
       </div>
@@ -145,14 +147,16 @@ function CodeBlock(props: { lang: string; code: string }) {
   );
 }
 
-export function Markdown(props: { text: string }) {
+export function Markdown(props: { text: string; streaming?: boolean }) {
   return (
-    <div class="md">
+    <div class={`md ${props.streaming ? "streaming" : ""}`}>
       <For each={parse(props.text)}>
         {(b) => (
           <Show
             when={b.type === "code"}
-            fallback={<div innerHTML={(b as { type: "md"; html: string }).html} />}
+            fallback={
+              <div innerHTML={(b as { type: "md"; html: string }).html} />
+            }
           >
             <CodeBlock
               lang={(b as { type: "code"; lang: string }).lang}

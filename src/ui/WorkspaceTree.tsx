@@ -7,8 +7,9 @@
 //
 // 路径约定：目录以 "/" 结尾（FileTreeController 以此识别目录——空目录也
 // 不会丢）。workspace_tree 的 kind 字段在这里补上尾斜杠。
-import { createEffect, on, onCleanup, onMount, type Component } from "solid-js";
+
 import { FileTree } from "@pierre/trees";
+import { type Component, createEffect, on, onCleanup, onMount } from "solid-js";
 
 export type TreeEntry = {
   path: string;

@@ -1,233 +1,64 @@
+import { createMediaQuery } from "@solid-primitives/media";
+import { makePersisted } from "@solid-primitives/storage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
-  For,
-  Show,
-  createEffect,
   createMemo,
   createSignal,
   onCleanup,
   onMount,
   type Signal,
 } from "solid-js";
-import { createScrollPosition } from "@solid-primitives/scroll";
-import { makePersisted } from "@solid-primitives/storage";
-import { createMediaQuery } from "@solid-primitives/media";
-import { Markdown } from "./ui/Markdown";
-import { WorkspaceTree, type TreeEntry } from "./ui/WorkspaceTree";
-import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
+import { ApprovalCard } from "~/components/ApprovalCard";
+import { AskUserCard } from "~/components/AskUserCard";
+import { ChatStream } from "~/components/ChatStream";
+import { CommandPalette } from "~/components/CommandPalette";
+import { Composer } from "~/components/Composer";
+import { FilePreviewDialog } from "~/components/FilePreviewDialog";
+import { GoalBanner } from "~/components/GoalBanner";
+import { ModelPicker } from "~/components/ModelPicker";
+import { PlanCard } from "~/components/PlanCard";
+import { PreviewPanel } from "~/components/PreviewPanel";
+import { ProviderSetup } from "~/components/ProviderSetup";
+import { QuickBar } from "~/components/QuickBar";
+import { SessionDrawer } from "~/components/SessionDrawer";
+import { SettingsSheet } from "~/components/SettingsSheet";
+import { TodoPanel } from "~/components/TodoPanel";
+import { TopBar } from "~/components/TopBar";
+import { WorkspaceDrawer } from "~/components/WorkspaceDrawer";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "~/components/ui/dialog";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "~/components/ui/collapsible";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "~/components/ui/sheet";
-import { ToggleSwitch } from "~/components/ui/switch";
-import {
-  FiAlertTriangle,
-  FiArrowDown,
-  FiCheck,
-  FiCheckSquare,
-  FiChevronDown,
-  FiChevronRight,
-  FiCircle,
-  FiCopy,
-  FiCpu,
-  FiFolder,
-  FiKey,
-  FiLoader,
-  FiLock,
-  FiMenu,
-  FiPlay,
-  FiPlus,
-  FiRotateCw,
-  FiSend,
-  FiSettings,
-  FiEye,
-  FiRefreshCw,
-  FiExternalLink,
-  FiSquare,
-  FiTarget,
-  FiTrash2,
-  FiX,
-} from "solid-icons/fi";
-import { BsOpenai } from "solid-icons/bs";
-import {
-  SiAnthropic,
-  SiGooglegemini,
-  SiOpenrouter,
-  SiX,
-} from "solid-icons/si";
+  type AgentHistoryMessage,
+  type AgentHistoryResponse,
+  parsePiEvent,
+  type ToolResultPayload,
+} from "~/lib/events";
+import { allCommands, refreshSkillCmds, skillCmds } from "~/lib/providers";
+import type {
+  Approval,
+  AskRequest,
+  ChatItem,
+  NativeCapability,
+  SettingsView,
+  TodoTask,
+} from "~/lib/types";
+import { useMcp } from "~/state/mcp";
+import { usePreview } from "~/state/preview";
+import { useProviders } from "~/state/providers";
+import { useSessions } from "~/state/sessions";
+import { useSkills } from "~/state/skills";
+import type { TreeEntry } from "~/ui/WorkspaceTree";
 import "./App.css";
-
-type ChatItem = {
-  role: "user" | "assistant" | "tool" | "status";
-  text: string;
-  toolCallId?: string;
-  toolName?: string;
-  argsText?: string;
-  pending?: boolean;
-  isError?: boolean;
-  expanded?: boolean;
-  thinking?: boolean;
-  path?: string;
-  canRevert?: boolean;
-  reverted?: boolean;
-};
-
-type SessionMeta = {
-  id: string;
-  createdAt: number;
-  modifiedAt: number;
-  cwd: string;
-  entries: number;
-  size: number;
-  lastMessage?: string | null;
-};
-
-type Approval = {
-  requestId: string;
-  tool: string;
-  path: string;
-  diff: string;
-  /** D14 脚本执行：用户要批准的就是这份能力清单（id）。人话说明从 Rust 的
-   *  script_capabilities 取，不在 TS 另抄一份——审批卡的意义是「所见即所授」。 */
-  capabilities?: string[];
-  /** 脚本源码：审一个看不见的脚本没意义，用户批的就是这段代码。 */
-  code?: string;
-  /** 显式脚本标志：不在 TS 里硬编码工具名「run_js」（那是把 Rust 的
-   *  SCRIPT_TOOLS 另抄一份）。 */
-  script?: boolean;
-};
-
-type AskOption = { title: string; description?: string };
-
-type AskRequest = {
-  requestId: string;
-  question: string;
-  context?: string | null;
-  options: AskOption[];
-  allowMultiple: boolean;
-  allowFreeform: boolean;
-  allowComment: boolean;
-  selected: string[];
-  freeform: string;
-  comment: string;
-};
-
-type TodoTask = {
-  id: number;
-  subject: string;
-  description?: string;
-  activeForm?: string;
-  status: "pending" | "in_progress" | "completed" | "deleted";
-  blockedBy?: number[];
-  owner?: string;
-};
-
-type SkillMeta = {
-  id: string;
-  name: string;
-  description: string;
-  source: string;
-  version: string;
-  checksum: string;
-  enabled: boolean;
-  installedAt: number;
-};
-
-// AI provider / model（pi-ai createModels 目录，bundle 侧解析完整模型对象）
-type ProviderModel = { id: string; name: string };
-type ProviderInfo = { id: string; name: string; models: ProviderModel[] };
-type CurrentModel = { provider: string; id: string; name: string };
-
-// OAuth 订阅型 provider（bundle 侧 __pi_oauth_login 支持登录）
-const OAUTH_PROVIDERS = new Set(["anthropic", "openai-codex", "kimi-coding", "xai", "openrouter"]);
-// 图标随文字色/字号（solid-icons 默认 1em + currentColor）
-const providerIcon = (id: string) =>
-  id === "openai" || id === "openai-codex" ? (
-    <BsOpenai size="1.1em" />
-  ) : id === "openrouter" ? (
-    <SiOpenrouter size="1.1em" />
-  ) : id === "anthropic" ? (
-    <SiAnthropic size="1.1em" />
-  ) : id === "xai" ? (
-    <SiX size="1.1em" />
-  ) : id === "google-gemini" ? (
-    <SiGooglegemini size="1.1em" />
-  ) : (
-    <FiCpu size="1.1em" />
-  );
-
-const UI_PROVIDERS: ProviderInfo[] = [
-  { id: "openai", name: "OpenAI", models: [] },
-  { id: "openrouter", name: "OpenRouter", models: [] },
-  { id: "deepseek", name: "DeepSeek", models: [] },
-  { id: "google-gemini", name: "Google Gemini", models: [] },
-  { id: "anthropic", name: "Anthropic (Claude Pro/Max)", models: [] },
-  { id: "openai-codex", name: "OpenAI Codex (ChatGPT)", models: [] },
-  { id: "kimi-coding", name: "Kimi For Coding", models: [] },
-  { id: "xai", name: "xAI (SuperGrok/X Premium)", models: [] },
-];
-
-const SUGGESTIONS = [
-  "List my workspace files",
-  "Create hello.py that prints a greeting",
-  "What can you do?",
-];
-
-const COMMANDS = [
-  { cmd: "/plan", desc: "draft an implementation plan" },
-  { cmd: "/btw", desc: "quick side question (context-aware)" },
-  { cmd: "/goal", desc: "set a persistent objective (/goal off clears)" },
-  { cmd: "/todos", desc: "show/hide the agent's task list panel" },
-];
-
-// 技能自定义指令（/commit-it 等）：skills_applied 事件后从 bundle 回读。
-// 面板合并展示；handleCommand 对匹配的未知命令透传 agent_prompt（bundle 展开）。
-const [skillCmds, setSkillCmds] = createSignal<{ cmd: string; desc: string }[]>([]);
-const allCommands = () => [...COMMANDS, ...skillCmds()];
-const refreshSkillCmds = () => {
-  invoke<string>("pi_call_global", { fnName: "__pi_commands", arg: "" })
-    .then((r) =>
-      setSkillCmds(
-        JSON.parse(r).map((c: any) => ({ cmd: c.cmd, desc: c.description ?? c.name })),
-      ),
-    )
-    .catch(() => setSkillCmds([]));
-};
-
-function fmtTok(n: number): string {
-  if (n < 1000) return `${n} tok`;
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k tok`;
-  return `${(n / 1_000_000).toFixed(2)}M tok`;
-}
-
-function fmtRel(ms: number): string {
-  const mins = Math.floor((Date.now() - ms) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
 
 function App() {
   const [items, setItems] = createSignal<ChatItem[]>([
     { role: "status", text: "booting embedded pi agent…" },
   ]);
-  const [input, setInput] = makePersisted<string, Signal<string>>(createSignal(""), {
-    name: "pi-draft",
-  });
+  const [input, setInput] = makePersisted<string, Signal<string>>(
+    createSignal(""),
+    {
+      name: "pi-draft",
+    },
+  );
   const [ready, setReady] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [approval, setApproval] = createSignal<Approval | null>(null);
@@ -235,40 +66,6 @@ function App() {
   // D14：脚本审批卡上的能力说明。**单一真源在 Rust 的 `script.rs`** —— 这里
   // 只缓存 id → 说明的映射，绝不在 TS 另写一份说明文字：两份一旦不一致，
   // 用户看到的就是与实际授权集不同的东西，而审批卡的全部意义是「所见即所授」。
-  // D15：预览。编写侧本来就有（write/mkdir jail 在 workspace），这里只解决「看」。
-  // iframe 指向 Rust 的**独立端口**静态服务（src-tauri/src/preview.rs）——与
-  // /hostcall 不同源是纵深防御；真正的防线是预览页拿不到 host token。
-  const [previewOpen, setPreviewOpen] = createSignal(false);
-  const [previewPort, setPreviewPort] = createSignal<number | null>(null);
-  const [previewPath, setPreviewPath] = createSignal<string | null>(null);
-  const [previewList, setPreviewList] = createSignal<string[]>([]);
-  const [previewNonce, setPreviewNonce] = createSignal(0);
-  const [previewErr, setPreviewErr] = createSignal<string | null>(null);
-  const openPreview = async () => {
-    setPreviewErr(null);
-    try {
-      const port = await invoke<number>("preview_start");
-      setPreviewPort(port);
-      const list = await invoke<string[]>("preview_targets");
-      setPreviewList(list);
-      // 没选过就自动挑一个；`index.html` 优先（最常见的入口）
-      if (!previewPath() && list.length) {
-        setPreviewPath(list.find((p) => p.toLowerCase().endsWith("index.html")) ?? list[0]);
-      }
-      setPreviewOpen(true);
-    } catch (e) {
-      setPreviewErr(String(e));
-      setPreviewOpen(true);
-    }
-  };
-  const previewSrc = () => {
-    const p = previewPath();
-    const port = previewPort();
-    if (!p || !port) return null;
-    // nonce 强制 iframe 重新加载：agent 刚改过文件时要能看到新版本
-    return `http://127.0.0.1:${port}/${p}?v=${previewNonce()}`;
-  };
-
   const [capCatalog, setCapCatalog] = createSignal<Record<string, string>>({});
   const loadCapCatalog = async () => {
     if (Object.keys(capCatalog()).length) return;
@@ -284,106 +81,48 @@ function App() {
     }
   };
   const capLabel = (id: string) => capCatalog()[id] ?? id;
+
   const [ask, setAsk] = createSignal<AskRequest | null>(null);
   const [drawerOpen, setDrawerOpen] = createSignal(false);
-  const [sessions, setSessions] = createSignal<SessionMeta[]>([]);
-  const [mcpServers, setMcpServers] = createSignal<{ name: string; url: string; timeoutMs?: number; headers?: Record<string, string> }[]>([]);
-  const [mcpName, setMcpName] = createSignal("");
-  const [mcpUrl, setMcpUrl] = createSignal("");
-  const [mcpTimeout, setMcpTimeout] = createSignal("");
-  const [mcpHeaders, setMcpHeaders] = createSignal("");
-  const [mcpPasteOpen, setMcpPasteOpen] = createSignal(false);
-  const [mcpPaste, setMcpPaste] = createSignal("");
-  const [skills, setSkills] = createSignal<SkillMeta[]>([]);
-  const [skillUrl, setSkillUrl] = createSignal("");
-  const [installingSkill, setInstallingSkill] = createSignal(false);
-  const [currentSession, setCurrentSession] = createSignal<string | null>(null);
   const [filesOpen, setFilesOpen] = createSignal(false);
   const [tree, setTree] = createSignal<TreeEntry[]>([]);
-  const [preview, setPreview] = createSignal<{ path: string; content: string } | null>(
-    null,
-  );
+  const [preview, setPreview] = createSignal<{
+    path: string;
+    content: string;
+  } | null>(null);
   const [stick, setStick] = createSignal(true);
   const [sessionTokens, setSessionTokens] = createSignal(0);
-  const [plan, setPlan] = createSignal<{ objective: string; content: string } | null>(
-    null,
-  );
+  const [plan, setPlan] = createSignal<{
+    objective: string;
+    content: string;
+  } | null>(null);
   const [planning, setPlanning] = createSignal(false);
   const [goal, setGoal] = createSignal<string | null>(null);
   // autoContinue 状态（goal_auto_continue 事件驱动；null = 本回合非自动续跑）
-  const [goalAuto, setGoalAuto] = createSignal<{ count: number; cap: number } | null>(null);
-  const [todos, setTodos] = createSignal<{ tasks: TodoTask[]; nextId: number }>({
-    tasks: [],
-    nextId: 1,
-  });
+  const [goalAuto, setGoalAuto] = createSignal<{
+    count: number;
+    cap: number;
+  } | null>(null);
+  const [todos, setTodos] = createSignal<{ tasks: TodoTask[]; nextId: number }>(
+    {
+      tasks: [],
+      nextId: 1,
+    },
+  );
   const [todoOpen, setTodoOpen] = createSignal(false);
-
-  // ── AI provider / model 选择（pi-ai createModels 目录驱动）──
-  // 静态清单先渲染（产品定死 4 家）；runtime 的 providers_listed 事件带
-  // 完整目录（含模型列表）后覆盖。OpenRouter 为动态目录，首次刷新才拉全量。
-  const [providers, setProviders] = createSignal<ProviderInfo[]>(UI_PROVIDERS);
-  const [selProvider, setSelProvider] = createSignal("");
-  const [providerKey, setProviderKey] = createSignal("");
-  const [keySaved, setKeySaved] = createSignal(false);
-  const [loadingModels, setLoadingModels] = createSignal(false);
-  const [currentModel, setCurrentModel] = createSignal<CurrentModel | null>(null);
-
-  // 模型快选：优先当前生效模型的 provider，未选择时用抽屉里选中的 provider
-  const refreshConfigured = async () => {
-    const results = await Promise.all(
-      UI_PROVIDERS.map((p) =>
-        invoke<boolean>("has_creds", { provider: p.id }).catch(() => false),
-      ),
-    );
-    setConfigured(new Set(UI_PROVIDERS.filter((_, i) => results[i]).map((p) => p.id)));
-  };
-
-  const pickerProvider = () => currentModel()?.provider || selProvider() || "openai";
-  const pickerModels = () => providers().find((p) => p.id === pickerProvider())?.models ?? [];
-  const openModelPicker = () => {
-    setModelPickerOpen(true);
-    if (pickerModels().length === 0) void loadModels(pickerProvider());
-  };
-
-  let chatEl: HTMLDivElement | undefined;
-  // 滚动位置响应式跟踪（@solid-primitives/scroll）——滚离底部 >240px 时浮出跳底按钮
-  const chatScroll = createScrollPosition(() => chatEl);
-  const awayFromBottom = () => {
-    const el = chatEl;
-    if (!el) return 0;
-    return el.scrollHeight - chatScroll.y - el.clientHeight;
-  };
-  const jumpToLatest = () => {
-    chatEl?.scrollTo({
-      top: chatEl.scrollHeight,
-      behavior: reducedMotion() ? "auto" : "smooth",
-    });
-    setStick(true);
-  };
-  let textareaEl: HTMLTextAreaElement | undefined;
 
   // ── UI 2.0：动效偏好 / 会话搜索 / 设置页导航（@solid-primitives）──
   const reducedMotion = createMediaQuery("(prefers-reduced-motion: reduce)");
-  const [sessionSearch, setSessionSearch] = createSignal("");
   const [settingsOpen, setSettingsOpen] = createSignal(false);
-  const [settingsView, setSettingsView] = createSignal<
-    "providers" | "provider" | "mcp" | "skills" | "agent"
-  >("providers");
-  // M6 系统能力：能力清单 + 权限态（Rust 侧 native::status 为单一真源）
-  type NativeCapability = {
-    id: string;
-    title: string;
-    detail: string;
-    tools: string[];
-    needsPermission: boolean;
-    permission: "granted" | "denied" | "prompt" | "unknown";
-    supported: boolean;
-  };
+  const [settingsView, setSettingsView] =
+    createSignal<SettingsView>("providers");
   const [nativeCaps, setNativeCaps] = createSignal<NativeCapability[]>([]);
   const [nativeErr, setNativeErr] = createSignal("");
   async function refreshNativeCaps() {
     try {
-      const v = await invoke<{ capabilities: NativeCapability[] }>("native_capabilities");
+      const v = await invoke<{ capabilities: NativeCapability[] }>(
+        "native_capabilities",
+      );
       setNativeCaps(v.capabilities ?? []);
       setNativeErr("");
     } catch (e) {
@@ -400,7 +139,9 @@ function App() {
     setTimeout(() => void refreshNativeCaps(), 600);
   }
   // 审批策略（write 基线 ask/auto）——Agent 设置页的开关
-  const [approvalPolicy, setApprovalPolicy] = createSignal<"ask" | "auto">("ask");
+  const [approvalPolicy, setApprovalPolicy] = createSignal<"ask" | "auto">(
+    "ask",
+  );
   const setApprovalPolicyPersist = async (next: "ask" | "auto") => {
     const prev = approvalPolicy();
     setApprovalPolicy(next);
@@ -418,12 +159,8 @@ function App() {
       push({ role: "status", text: `approval_policy_set failed: ${e}` });
     }
   };
-  // 模型快选面板（composer 上方快捷条拉起）：当前 provider 的模型列表
-  const [modelPickerOpen, setModelPickerOpen] = createSignal(false);
-  // 已配置 key 的 provider 集合（LobeHub 式 provider 卡片状态标识）
-  const [configured, setConfigured] = createSignal<Set<string>>(new Set());
-  // MCP 服务器连接状态（mcp_ready / mcp_error 事件驱动）
-  const [mcpReady, setMcpReady] = createSignal<Set<string>>(new Set());
+
+  let textareaEl: HTMLTextAreaElement | undefined;
 
   const push = (item: ChatItem) => setItems((prev) => [...prev, item]);
   const updateItem = (toolCallId: string, patch: Partial<ChatItem>) =>
@@ -433,78 +170,58 @@ function App() {
       ),
     );
 
-  const hasConversation = () =>
-    items().some((i) => i.role === "user" || i.role === "assistant" || i.role === "tool");
+  // 工具执行计时：start 记时间戳，end 算出 durationMs 一并 patch 进卡片
+  const toolStartTimes = new Map<string, number>();
 
-  // 会话分组（Today / Yesterday / Earlier）+ 搜索过滤（id / 最后消息文本）
-  const sessionGroups = createMemo(() => {
-    const q = sessionSearch().trim().toLowerCase();
-    const list = sessions().filter(
-      (s) =>
-        !q ||
-        s.id.toLowerCase().includes(q) ||
-        (s.lastMessage ?? "").toLowerCase().includes(q),
-    );
-    const dayStart = new Date();
-    dayStart.setHours(0, 0, 0, 0);
-    const yesterday = dayStart.getTime() - 86_400_000;
-    const groups: { label: string; items: SessionMeta[] }[] = [
-      { label: "Today", items: [] },
-      { label: "Yesterday", items: [] },
-      { label: "Earlier", items: [] },
-    ];
-    for (const s of list) {
-      if (s.modifiedAt >= dayStart.getTime()) groups[0].items.push(s);
-      else if (s.modifiedAt >= yesterday) groups[1].items.push(s);
-      else groups[2].items.push(s);
-    }
-    return groups.filter((g) => g.items.length > 0);
+  const prov = useProviders(push);
+  const mcp = useMcp(push);
+  const skills = useSkills(push);
+  const sess = useSessions(push, {
+    closeDrawer: () => setDrawerOpen(false),
+    loadHistory: () => loadHistory(),
+    resetChat: (text, resetTokens) => {
+      setItems([{ role: "status", text }]);
+      if (resetTokens) setSessionTokens(0);
+    },
   });
+  const previewState = usePreview();
 
-  // ── 自动滚动：贴底跟随，用户上翻即暂停 ──
-  createEffect(() => {
-    items();
-    if (chatEl && stick()) {
-      chatEl.scrollTop = chatEl.scrollHeight;
-    }
-  });
-  const onChatScroll = () => {
-    if (!chatEl) return;
-    setStick(chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 90);
-  };
-
-  function mapHistoryMessage(m: any): ChatItem {
+  function mapHistoryMessage(m: AgentHistoryMessage): ChatItem {
     const text =
       typeof m.content === "string"
         ? m.content
-        : (m.content ?? [])
-            .filter((c: any) => c.type === "text")
-            .map((c: any) => c.text)
+        : m.content
+            .filter((c) => c.type === "text")
+            .map((c) => c.text)
             .join("");
     if (m.role === "toolResult") {
       return { role: "tool", text: `↳ ${text.slice(0, 200)}` };
     }
     if (m.role === "assistant") {
-      const calls = (m.content ?? [])
-        .filter((c: any) => c.type === "toolCall")
-        .map((c: any) => `⚒ ${c.name}(${JSON.stringify(c.arguments ?? {})})`);
+      const calls = m.content
+        .filter((c) => c.type === "toolCall")
+        .map((c) => `⚒ ${c.name}(${JSON.stringify(c.arguments ?? {})})`);
       return { role: "assistant", text: text || calls.join("\n") };
     }
     return { role: "user", text };
   }
 
   async function loadHistory() {
-    const h = JSON.parse(await invoke<string>("agent_history"));
-    setCurrentSession(h.sessionId ?? null);
-    const msgs = (h.messages ?? []) as any[];
+    const h = JSON.parse(
+      await invoke<string>("agent_history"),
+    ) as AgentHistoryResponse;
+    sess.setCurrentSession(h.sessionId ?? null);
+    const msgs = h.messages ?? [];
     if (!msgs.length) {
       setItems([]);
       return;
     }
     setItems(msgs.map(mapHistoryMessage));
-    const total = msgs.reduce((acc: number, m: any) => {
-      const u = m.usage;
-      return acc + (u ? (u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0)) : 0);
+    const total = msgs.reduce((acc: number, m) => {
+      const u = "usage" in m ? m.usage : undefined;
+      return (
+        acc + (u ? (u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0)) : 0)
+      );
     }, 0);
     setSessionTokens(total);
     push({ role: "status", text: `history loaded — ${msgs.length} messages` });
@@ -526,10 +243,79 @@ function App() {
       await invoke("workspace_revert", { path: it.path });
       await refreshCanRevert(it.path);
       updateItem(it.toolCallId, { reverted: true });
-      push({ role: "status", text: `reverted ${it.path} to the previous version` });
+      push({
+        role: "status",
+        text: `reverted ${it.path} to the previous version`,
+      });
     } catch (e) {
       push({ role: "status", text: `revert failed: ${e}` });
     }
+  }
+
+  // DEV 演示种子：`#demo` 打开时注入代表性聊天流（工具卡三态 / markdown /
+  // 用户气泡），无 Tauri 后端也能在浏览器里预览 UI —— 保留供后续 UI 迭代做视觉验证
+  if (import.meta.env.DEV && window.location.hash === "#demo") {
+    setReady(true);
+    prov.setCurrentModel({
+      provider: "demo",
+      id: "V4 Flash",
+      name: "V4 Flash",
+    });
+    setItems([
+      { role: "user", text: "Read the workspace README and summarize it" },
+      // thinking 空泡：模型先思考再输出（turn_end 前非末尾，不会被清掉）
+      { role: "assistant", text: "", thinking: true },
+      {
+        role: "assistant",
+        text: "The workspace contains three files — `backend.sh`, `index.html`, and `initial.json`. There's no README.md, so I'll read an existing file instead (`index.html`):",
+      },
+      {
+        role: "tool",
+        toolCallId: "demo-1",
+        toolName: "list_dir",
+        argsText: '{"path": "."}',
+        pending: false,
+        durationMs: 843,
+        text: "↳ backend.sh\nindex.html\ninitial.json",
+      },
+      {
+        role: "assistant",
+        text: "Done. Here's a summary of what happened:\n\n**Two things to flag:**\n\n1. The absolute path was rejected — `/workspace/README.md` failed with `E_AGENT_BAD_PATH`.\n2. `README.md` doesn't exist yet.",
+        streaming: true,
+      },
+      {
+        role: "tool",
+        toolCallId: "demo-2",
+        toolName: "read_file",
+        argsText: '{"path": "index.html"}',
+        pending: false,
+        durationMs: 1695,
+        text: "↳ <!doctype html>…",
+      },
+      {
+        role: "tool",
+        toolCallId: "demo-3",
+        toolName: "write_file",
+        argsText: '{"path": "README.md", "content": "# demo\\n"}',
+        text: "",
+        pending: true,
+        path: "README.md",
+      },
+      {
+        role: "tool",
+        toolCallId: "demo-4",
+        toolName: "edit_file",
+        argsText: '{"path": "backend.sh"}',
+        pending: false,
+        isError: true,
+        expanded: true,
+        durationMs: 312,
+        text: "↳ E_WORKSPACE_LOCKED: file is locked by another tool call",
+        path: "backend.sh",
+        canRevert: true,
+      },
+      { role: "status", text: "demo seed — visual verification only" },
+    ]);
   }
 
   onMount(async () => {
@@ -538,28 +324,31 @@ function App() {
       const raw = await invoke<string>("get_default_model");
       const sel = JSON.parse(raw);
       if (sel?.provider) {
-        setCurrentModel({ provider: sel.provider, id: sel.modelId, name: sel.modelId });
+        prov.setCurrentModel({
+          provider: sel.provider,
+          id: sel.modelId,
+          name: sel.modelId,
+        });
       }
     } catch {
       // 未配置：首启卡片引导选择
     }
     const un = await listen<string>("pi-agent-event", (e) => {
-      let ev: any;
-      try {
-        ev = JSON.parse(e.payload);
-      } catch {
-        return;
-      }
+      const ev = parsePiEvent(e.payload);
+      if (!ev) return;
       switch (ev.type) {
         case "agent_ready":
           setReady(true);
           // 目录与当前模型回读（runtime 就绪后才有意义）
-          refreshProviders();
+          prov.refreshProviders();
           refreshSkillCmds();
-          invoke<string>("pi_call_global", { fnName: "__pi_model_current", arg: "" })
+          invoke<string>("pi_call_global", {
+            fnName: "__pi_model_current",
+            arg: "",
+          })
             .then((r) => {
               const m = JSON.parse(r);
-              if (m?.id) setCurrentModel(m);
+              if (m?.id) prov.setCurrentModel(m);
             })
             .catch(() => {});
           break;
@@ -574,10 +363,10 @@ function App() {
           push({ role: "status", text: `ERROR: ${ev.error ?? "unknown"}` });
           break;
         case "session_restored":
-          setCurrentSession(ev.sessionId ?? null);
+          sess.setCurrentSession(ev.sessionId ?? null);
           break;
         case "session_created":
-          setCurrentSession(ev.sessionId ?? null);
+          sess.setCurrentSession(ev.sessionId ?? null);
           break;
         case "session_error":
           push({ role: "status", text: `session persist error: ${ev.error}` });
@@ -598,12 +387,15 @@ function App() {
           // D15：agent 自己打开了预览（它调了 preview 工具）。面板已开时是
           // **切换 + 重载**——正是「改完再调一次」的迭代循环需要的行为。
           if (typeof ev.path === "string" && ev.path) {
-            setPreviewPath(ev.path);
-            setPreviewList((prev) => (prev.includes(ev.path) ? prev : [...prev, ev.path]));
-            if (typeof ev.port === "number") setPreviewPort(ev.port);
-            setPreviewErr(null);
-            setPreviewNonce((n) => n + 1);
-            setPreviewOpen(true);
+            previewState.setPreviewPath(ev.path);
+            previewState.setPreviewList((prev) =>
+              prev.includes(ev.path) ? prev : [...prev, ev.path],
+            );
+            if (typeof ev.port === "number")
+              previewState.setPreviewPort(ev.port);
+            previewState.setPreviewErr(null);
+            previewState.setPreviewNonce((n) => n + 1);
+            previewState.setPreviewOpen(true);
           }
           break;
         case "ask_user":
@@ -625,7 +417,10 @@ function App() {
           refreshSkillCmds();
           break;
         case "oauth_open_url":
-          push({ role: "status", text: `browser opened — complete ${ev.provider ?? "provider"} sign-in` });
+          push({
+            role: "status",
+            text: `browser opened — complete ${ev.provider ?? "provider"} sign-in`,
+          });
           break;
         case "oauth_device_code":
           push({
@@ -640,17 +435,26 @@ function App() {
           if (ev.error) {
             push({ role: "status", text: `oauth FAILED: ${ev.error}` });
           } else {
-            push({ role: "status", text: `oauth: signed in to ${ev.provider ?? "provider"} — pick a model` });
-            void refreshConfigured();
-            invoke<string>("pi_call_global", { fnName: "__pi_providers_list", arg: "" }).catch(() => {});
+            push({
+              role: "status",
+              text: `oauth: signed in to ${ev.provider ?? "provider"} — pick a model`,
+            });
+            void prov.refreshConfigured();
+            invoke<string>("pi_call_global", {
+              fnName: "__pi_providers_list",
+              arg: "",
+            }).catch(() => {});
           }
           break;
         case "mcp_ready":
-          setMcpReady((prev) => new Set(prev).add(ev.server));
-          push({ role: "status", text: `mcp ${ev.server} ready — ${(ev.tools ?? []).length} tools` });
+          mcp.setMcpReady((prev) => new Set(prev).add(ev.server));
+          push({
+            role: "status",
+            text: `mcp ${ev.server} ready — ${(ev.tools ?? []).length} tools`,
+          });
           break;
         case "mcp_error":
-          setMcpReady((prev) => {
+          mcp.setMcpReady((prev) => {
             const next = new Set(prev);
             next.delete(ev.server);
             return next;
@@ -658,10 +462,16 @@ function App() {
           push({ role: "status", text: `mcp ${ev.server}: ${ev.error}` });
           break;
         case "compaction_start":
-          push({ role: "status", text: `compacting context (${ev.tokens} tokens, ${ev.messages} messages)…` });
+          push({
+            role: "status",
+            text: `compacting context (${ev.tokens} tokens, ${ev.messages} messages)…`,
+          });
           break;
         case "compaction_done":
-          push({ role: "status", text: `context compacted — ${ev.summarized} messages summarized` });
+          push({
+            role: "status",
+            text: `context compacted — ${ev.summarized} messages summarized`,
+          });
           break;
         case "mcp_tools_registered":
           push({ role: "status", text: `mcp tools registered (${ev.count})` });
@@ -678,7 +488,10 @@ function App() {
           push({ role: "status", text: `btw: ${ev.question} — thinking…` });
           break;
         case "btw_answer":
-          push({ role: "assistant", text: `💬 ${ev.question}\n\n${ev.answer ?? ""}` });
+          push({
+            role: "assistant",
+            text: `💬 ${ev.question}\n\n${ev.answer ?? ""}`,
+          });
           break;
         case "btw_error":
           push({ role: "status", text: `btw failed: ${ev.error}` });
@@ -697,23 +510,25 @@ function App() {
           break;
         }
         case "providers_listed":
-          setProviders(ev.providers ?? []);
+          prov.setProviders(ev.providers ?? []);
           break;
         case "providers_error":
           push({ role: "status", text: `providers: ${ev.error}` });
           break;
         case "models_listed":
-          setLoadingModels(false);
-          setProviders((ps) =>
-            ps.map((p) => (p.id === ev.provider ? { ...p, models: ev.models ?? [] } : p)),
+          prov.setLoadingModels(false);
+          prov.setProviders((ps) =>
+            ps.map((p) =>
+              p.id === ev.provider ? { ...p, models: ev.models ?? [] } : p,
+            ),
           );
           break;
         case "models_error":
-          setLoadingModels(false);
+          prov.setLoadingModels(false);
           push({ role: "status", text: `models ${ev.provider}: ${ev.error}` });
           break;
         case "model_applied":
-          setCurrentModel({
+          prov.setCurrentModel({
             provider: ev.provider,
             id: ev.modelId,
             name: ev.name ?? ev.modelId,
@@ -724,55 +539,77 @@ function App() {
           break;
         case "goal_auto_done":
           setGoalAuto(null);
-          push({ role: "status", text: "goal achieved — auto-continue stopped" });
+          push({
+            role: "status",
+            text: "goal achieved — auto-continue stopped",
+          });
           break;
         case "goal_error":
           setGoalAuto(null);
-          push({ role: "status", text: `goal auto-continue failed: ${ev.error}` });
+          push({
+            role: "status",
+            text: `goal auto-continue failed: ${ev.error}`,
+          });
           break;
         case "boot_error":
           setBusy(false);
           push({ role: "status", text: `BOOT ERROR: ${ev.error}` });
           break;
         case "turn_end":
-          // 回合收束：清掉滞留的 thinking 空泡
+          // 回合收束：清掉滞留的 thinking 空泡；带文本的末条 assistant
+          // 顺手收掉 streaming 光标（兜底，正常由 message_end 关闭）
           setItems((prev) => {
             const last = prev[prev.length - 1];
-            return last?.role === "assistant" && last.thinking && !last.text
-              ? prev.slice(0, -1)
-              : prev;
+            if (last?.role === "assistant" && last.thinking && !last.text)
+              return prev.slice(0, -1);
+            if (last?.role === "assistant" && last.streaming)
+              return [...prev.slice(0, -1), { ...last, streaming: false }];
+            return prev;
           });
           break;
         case "message_start":
         case "message_update":
         case "message_end": {
           // 只渲染 assistant 流（user/toolResult 的消息事件另行处理/已在界面）
-          const msg = ev.message ?? {};
+          const msg = ev.message;
           if (msg.role !== "assistant") break;
-          const blocks = msg.content ?? [];
+          const blocks = msg.content;
           const text = blocks
-            .filter((c: any) => c.type === "text")
-            .map((c: any) => c.text)
+            .filter((c) => c.type === "text")
+            .map((c) => c.text)
             .join("");
-          if (ev.type === "message_end" && msg.role === "assistant" && msg.usage) {
+          if (
+            ev.type === "message_end" &&
+            msg.role === "assistant" &&
+            msg.usage
+          ) {
             const u = msg.usage;
-            setSessionTokens((prev) => prev + (u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0)));
+            setSessionTokens(
+              (prev) =>
+                prev + (u.totalTokens ?? (u.input ?? 0) + (u.output ?? 0)),
+            );
           }
-          const thinking = blocks.some((c: any) => c.type === "thinking");
+          const thinking = blocks.some((c) => c.type === "thinking");
           if (ev.type === "message_update" && !text) {
             if (thinking) updateThinking();
             break;
           }
+          const streaming = ev.type !== "message_end";
           setItems((prev) => {
             const last = prev[prev.length - 1];
             if (last?.role === "assistant" && ev.type !== "message_start") {
-              return [...prev.slice(0, -1), { ...last, text, thinking: false }];
+              return [
+                ...prev.slice(0, -1),
+                { ...last, text, thinking: false, streaming },
+              ];
             }
-            return [...prev, { role: "assistant", text, thinking }];
+            return [...prev, { role: "assistant", text, thinking, streaming }];
           });
           break;
         }
         case "tool_execution_start":
+          // 记录开始时间，end 时算出 durationMs 展示在卡片上（纯本地计时）
+          toolStartTimes.set(ev.toolCallId, Date.now());
           // 清掉滞留 thinking 空泡（模型思考完直接调工具的场景）
           setItems((prev) => {
             const last = prev[prev.length - 1];
@@ -788,7 +625,8 @@ function App() {
                 toolCallId: ev.toolCallId,
                 toolName: ev.toolName,
                 argsText: JSON.stringify(ev.args ?? {}),
-                path: ev.args?.path,
+                path:
+                  typeof ev.args?.path === "string" ? ev.args.path : undefined,
                 pending: true,
               },
             ];
@@ -796,21 +634,28 @@ function App() {
           break;
         case "tool_execution_end": {
           const out =
-            ev.result?.content
-              ?.filter((c: any) => c.type === "text")
-              .map((c: any) => c.text)
+            (ev.result as ToolResultPayload | null | undefined)?.content
+              ?.filter((c) => c.type === "text")
+              .map((c) => c.text)
               .join("") ?? "";
           const isError = Boolean(ev.isError);
+          const startedAt = toolStartTimes.get(ev.toolCallId);
+          toolStartTimes.delete(ev.toolCallId);
           updateItem(ev.toolCallId, {
             isError,
             pending: false,
             expanded: isError ? true : undefined,
             text: `↳ ${String(out).slice(0, 400)}`,
+            durationMs:
+              typeof startedAt === "number"
+                ? Date.now() - startedAt
+                : undefined,
           });
           const it = items().find((x) => x.toolCallId === ev.toolCallId);
           if (it?.path) {
             invoke("workspace_backup_info", { path: it.path }).then((info) => {
-              if (info !== "null") updateItem(ev.toolCallId, { canRevert: true });
+              if (info !== "null")
+                updateItem(ev.toolCallId, { canRevert: true });
             });
           }
           break;
@@ -844,132 +689,6 @@ function App() {
     });
   }
 
-  // ── AI provider / model 选择流程 ──
-  // 目录来自 bundle 的 providers_listed/models_listed 事件；key 存 Rust
-  // creds（D4）；选择经 set_default_model 持久化、__pi_model_select 热切换。
-  const providerModels = () => providers().find((p) => p.id === selProvider())?.models ?? [];
-  const providerLabel = (id: string) => providers().find((p) => p.id === id)?.name ?? id;
-
-  async function refreshProviders() {
-    try {
-      await invoke("pi_call_global", { fnName: "__pi_providers_list", arg: "" });
-    } catch {
-      // runtime 未就绪：保留静态清单，agent_ready 后会再拉
-    }
-  }
-
-  async function chooseProvider(id: string) {
-    setSelProvider(id);
-    try {
-      const has = await invoke<boolean>("has_creds", { provider: id });
-      setKeySaved(has);
-      if (has) setConfigured((prev) => new Set(prev).add(id));
-    } catch {
-      setKeySaved(false);
-    }
-    if (keySaved() && providerModels().length === 0) await loadModels(id);
-  }
-
-  async function saveProviderKey(e: Event) {
-    e.preventDefault();
-    const p = selProvider();
-    if (!p || !providerKey().trim()) return;
-    try {
-      await invoke("set_creds", { provider: p, apiKey: providerKey().trim() });
-      setProviderKey("");
-      setKeySaved(true);
-      setConfigured((prev) => new Set(prev).add(p));
-      push({ role: "status", text: `API key saved (${p})` });
-      await loadModels(p);
-    } catch (err) {
-      push({ role: "status", text: `save key failed: ${err}` });
-    }
-  }
-
-  async function loadModels(id: string) {
-    setLoadingModels(true);
-    try {
-      await invoke("pi_call_global", { fnName: "__pi_models_refresh", arg: id });
-    } catch (err) {
-      setLoadingModels(false);
-      push({ role: "status", text: `model list failed: ${err}` });
-    }
-  }
-
-  async function selectModel(p: string, m: ProviderModel) {
-    try {
-      const r = await invoke<string>("pi_call_global", {
-        fnName: "__pi_model_select",
-        arg: JSON.stringify({ provider: p, modelId: m.id }),
-      });
-      if (r !== "started") throw new Error(r);
-      await invoke("set_default_model", { provider: p, modelId: m.id });
-      setCurrentModel({ provider: p, id: m.id, name: m.name });
-      setModelPickerOpen(false);
-      push({ role: "status", text: `model set: ${m.name}` });
-    } catch (err) {
-      push({ role: "status", text: `model select failed: ${err}` });
-    }
-  }
-
-  // Provider 选择节：首启卡片与抽屉共用（chooseProvider 自动拉已配置
-  // provider 的模型列表；OpenRouter 动态目录首次刷新拉全量）。
-  const providerSection = () => (
-    <div class="flex flex-col gap-1.5">
-      <div class="flex flex-wrap gap-1">
-        <For each={providers()}>
-          {(p) => (
-            <Button
-              variant={selProvider() === p.id ? "default" : "outline"}
-              size="sm"
-              class="h-7 text-xs"
-              onClick={() => chooseProvider(p.id)}
-            >
-              {p.name}
-            </Button>
-          )}
-        </For>
-      </div>
-      <Show when={selProvider()}>
-        <Show
-          when={!keySaved()}
-          fallback={
-            <div class="item-sub">
-              API key configured ·{" "}
-              <span class="underline" onClick={() => setKeySaved(false)}>
-                replace
-              </span>
-            </div>
-          }
-        >
-          <form class="flex flex-col gap-1.5" onSubmit={saveProviderKey}>
-            <input
-              class="ask-input"
-              type="text"
-              placeholder={`${providerLabel(selProvider())} API key…`}
-              value={providerKey()}
-              onInput={(e) => setProviderKey(e.currentTarget.value)}
-            />
-            <Button variant="outline" size="sm" type="submit">
-              Save key & load models
-            </Button>
-          </form>
-        </Show>
-        <Show when={loadingModels()}>
-          <div class="item-sub">loading models…</div>
-        </Show>
-        <For each={providerModels()}>
-          {(m) => (
-            <div class="item-card" onClick={() => selectModel(selProvider(), m)}>
-              <div class="item-title">{m.name}</div>
-              <div class="item-sub mcp-url">{m.id}</div>
-            </div>
-          )}
-        </For>
-      </Show>
-    </div>
-  );
-
   async function sendText(raw: string) {
     const text = raw.trim();
     if (!text || !ready()) return;
@@ -990,7 +709,11 @@ function App() {
     push({ role: "user", text });
     try {
       await invoke("agent_prompt", { text });
-      if (busy()) push({ role: "status", text: "queued — runs after the current response" });
+      if (busy())
+        push({
+          role: "status",
+          text: "queued — runs after the current response",
+        });
     } catch (e) {
       push({ role: "status", text: `prompt failed: ${e}` });
     }
@@ -1023,16 +746,25 @@ function App() {
       try {
         if (arg === "off" || arg === "clear") {
           await invoke("goal_clear");
-          await invoke("pi_call_global", { fnName: "__pi_goal_apply", arg: "" });
+          await invoke("pi_call_global", {
+            fnName: "__pi_goal_apply",
+            arg: "",
+          });
           setGoal(null);
           push({ role: "status", text: "goal cleared" });
         } else if (arg) {
           await invoke("goal_set", { objective: arg });
-          await invoke("pi_call_global", { fnName: "__pi_goal_apply", arg: "" });
+          await invoke("pi_call_global", {
+            fnName: "__pi_goal_apply",
+            arg: "",
+          });
           setGoal(arg);
           push({ role: "status", text: `goal set: ${arg}` });
         } else {
-          push({ role: "status", text: "usage: /goal <objective> | /goal off" });
+          push({
+            role: "status",
+            text: "usage: /goal <objective> | /goal off",
+          });
         }
       } catch (e) {
         push({ role: "status", text: `goal failed: ${e}` });
@@ -1053,7 +785,12 @@ function App() {
       }
       return;
     }
-    push({ role: "status", text: `unknown command ${cmd} — try ${allCommands().map((c) => c.cmd).join(", ")}` });
+    push({
+      role: "status",
+      text: `unknown command ${cmd} — try ${allCommands()
+        .map((c) => c.cmd)
+        .join(", ")}`,
+    });
   }
 
   async function continueGoal() {
@@ -1081,42 +818,6 @@ function App() {
       push({ role: "status", text: `goal clear failed: ${e}` });
     }
   }
-
-  // ── todo 面板（@juicesharp/rpiv-todo 移动原生化）──
-  // 上游 TUI overlay 的移动形态：列表非空自动显示（todo_updated 事件驱动），
-  // ✓ 完成 / ◐ 进行中（带 activeForm）/ ○ 待办；墓碑行不上屏。
-  const visibleTodos = () => todos().tasks.filter((t) => t.status !== "deleted");
-  const todoHeading = () => {
-    const all = visibleTodos();
-    const done = all.filter((t) => t.status === "completed").length;
-    return `Todos (${done}/${all.length})`;
-  };
-  const todoGlyph = (t: TodoTask) =>
-    t.status === "completed" ? (
-      <FiCheck size="0.85em" />
-    ) : t.status === "in_progress" ? (
-      <FiLoader size="0.85em" />
-    ) : (
-      <FiCircle size="0.85em" />
-    );
-
-  const onSubmit = (e: Event) => {
-    e.preventDefault();
-    sendText(input());
-  };
-
-  const onKeydown = (e: KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey && !(e as any).isComposing) {
-      e.preventDefault();
-      sendText(input());
-    }
-  };
-
-  const autoGrow = () => {
-    if (!textareaEl) return;
-    textareaEl.style.height = "auto";
-    textareaEl.style.height = `${Math.min(textareaEl.scrollHeight, 132)}px`;
-  };
 
   async function stop() {
     try {
@@ -1160,6 +861,12 @@ function App() {
     setAsk({ ...a, freeform: v, selected: v.trim() ? [] : a.selected });
   };
 
+  const setAskComment = (v: string) => {
+    const a = ask();
+    if (!a) return;
+    setAsk({ ...a, comment: v });
+  };
+
   async function answerAsk(cancelled: boolean) {
     const a = ask();
     if (!a) return;
@@ -1200,198 +907,11 @@ function App() {
     setFilesOpen(false);
     setDrawerOpen(true);
     try {
-      setSessions(JSON.parse(await invoke<string>("session_list")));
-      setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
-      setSkills(JSON.parse(await invoke<string>("skills_list")));
+      await sess.refreshList();
+      await mcp.refreshList();
+      await skills.refreshList();
     } catch (e) {
       push({ role: "status", text: `session_list failed: ${e}` });
-    }
-  }
-
-  // ── Skills（D12）：URL 安装 / 启停 / 删除，改完经 skills_reconnect 热注入 ──
-  async function refreshSkills() {
-    try {
-      setSkills(JSON.parse(await invoke<string>("skills_list")));
-    } catch (e) {
-      push({ role: "status", text: `skills_list failed: ${e}` });
-    }
-  }
-
-  async function installSkill(e: Event) {
-    e.preventDefault();
-    const url = skillUrl().trim();
-    if (!url || installingSkill()) return;
-    setInstallingSkill(true);
-    try {
-      const entry = JSON.parse(await invoke<string>("skills_install", { url }));
-      await invoke("skills_reconnect");
-      await refreshSkills();
-      setSkillUrl("");
-      push({ role: "status", text: `skill installed: ${entry.id} (${entry.version})` });
-    } catch (err) {
-      push({ role: "status", text: `skills_install failed: ${err}` });
-    } finally {
-      setInstallingSkill(false);
-    }
-  }
-
-  async function toggleSkill(id: string, enabled: boolean) {
-    try {
-      await invoke("skills_toggle", { id, enabled });
-      await invoke("skills_reconnect");
-      await refreshSkills();
-    } catch (e) {
-      push({ role: "status", text: `skills_toggle failed: ${e}` });
-    }
-  }
-
-  async function removeSkill(id: string) {
-    try {
-      await invoke("skills_remove", { id });
-      await invoke("skills_reconnect");
-      await refreshSkills();
-      push({ role: "status", text: `skill removed: ${id}` });
-    } catch (e) {
-      push({ role: "status", text: `skills_remove failed: ${e}` });
-    }
-  }
-
-  // 粘贴 JSON 批量导入：支持单服务器对象、数组、以及 {"mcpServers": {...}} 形态
-  async function importMcpJson() {
-    let parsed: any;
-    try {
-      parsed = JSON.parse(mcpPaste());
-    } catch (e) {
-      push({ role: "status", text: "paste JSON parse failed" });
-      return;
-    }
-    let entries: any[] = [];
-    if (Array.isArray(parsed)) entries = parsed;
-    else if (parsed?.mcpServers && typeof parsed.mcpServers === "object") {
-      entries = Object.entries(parsed.mcpServers).map(([name, v]: [string, any]) => ({
-        name,
-        ...(typeof v === "string" ? { url: v } : v),
-      }));
-    } else if (parsed?.name && parsed?.url) entries = [parsed];
-    if (!entries.length) {
-      push({ role: "status", text: "no servers found in pasted JSON" });
-      return;
-    }
-    let added = 0;
-    for (const e of entries) {
-      if (!e?.name || !e?.url) continue;
-      try {
-        await invoke("mcp_add", {
-          name: String(e.name),
-          url: String(e.url),
-          timeoutMs: e.timeoutMs ?? undefined,
-          headers: e.headers ?? undefined,
-        });
-        added++;
-      } catch (err) {
-        push({ role: "status", text: `${e.name}: ${err}` });
-      }
-    }
-    setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
-    setMcpPaste("");
-    setMcpPasteOpen(false);
-    if (added) {
-      push({ role: "status", text: `imported ${added} server(s) — reconnecting…` });
-      await invoke("mcp_reconnect");
-    }
-  }
-
-  async function addMcpServer(e: Event) {
-    e.preventDefault();
-    if (!mcpName().trim() || !mcpUrl().trim()) return;
-    // 请求头：每行 "Key: Value"，解析为 JSON 对象
-    const headers: Record<string, string> = {};
-    for (const line of mcpHeaders().split("\n")) {
-      const idx = line.indexOf(":");
-      if (idx === -1) continue;
-      const key = line.slice(0, idx).trim();
-      const val = line.slice(idx + 1).trim();
-      if (key && val) headers[key] = val;
-    }
-    const timeoutMs = Number(mcpTimeout()) || 30_000;
-    try {
-      await invoke("mcp_add", {
-        name: mcpName().trim(),
-        url: mcpUrl().trim(),
-        timeoutMs,
-        headers,
-      });
-      setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
-      setMcpName("");
-      setMcpUrl("");
-      setMcpTimeout("");
-      setMcpHeaders("");
-      push({ role: "status", text: `mcp server saved — reconnecting…` });
-      await invoke("mcp_reconnect");
-    } catch (e) {
-      push({ role: "status", text: `mcp_add failed: ${e}` });
-    }
-  }
-
-  async function reconnectMcp() {
-    push({ role: "status", text: "reconnecting mcp servers…" });
-    try {
-      await invoke("mcp_reconnect");
-    } catch (e) {
-      push({ role: "status", text: `mcp_reconnect failed: ${e}` });
-    }
-  }
-
-  async function removeMcpServer(name: string) {
-    try {
-      await invoke("mcp_remove", { name });
-      setMcpReady((prev) => {
-        const next = new Set(prev);
-        next.delete(name);
-        return next;
-      });
-      setMcpServers(JSON.parse(await invoke<string>("mcp_list")));
-    } catch (e) {
-      push({ role: "status", text: `mcp_remove failed: ${e}` });
-    }
-  }
-
-  async function switchSession(id: string) {
-    setDrawerOpen(false);
-    try {
-      await invoke("session_open", { id });
-      await loadHistory();
-    } catch (e) {
-      push({ role: "status", text: `session switch failed: ${e}` });
-    }
-  }
-
-  async function newSession() {
-    setDrawerOpen(false);
-    try {
-      await invoke("session_new");
-      setCurrentSession(null);
-      setSessionTokens(0);
-      setItems([{ role: "status", text: "new session started" }]);
-    } catch (e) {
-      push({ role: "status", text: `session_new failed: ${e}` });
-    }
-  }
-
-  async function deleteSession(id: string) {
-    try {
-      // 当前会话先切空白：避免运行中 repo 的追加写把已删文件重建为无 header 孤儿
-      if (id === currentSession()) {
-        await invoke("session_new");
-        setCurrentSession(null);
-        setItems([{ role: "status", text: "session deleted — new session started" }]);
-      } else {
-        push({ role: "status", text: "session deleted" });
-      }
-      await invoke("session_delete", { id });
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-    } catch (e) {
-      push({ role: "status", text: `session delete failed: ${e}` });
     }
   }
 
@@ -1414,1199 +934,287 @@ function App() {
     }
   }
 
-  const copyText = (text: string) => {
-    navigator.clipboard?.writeText(text).catch(() => {});
-  };
-
-  const toolState = (it: ChatItem) =>
-    it.pending ? "pending" : it.isError ? "error" : "ok";
-
-  const prettyArgs = (raw?: string) => {
-    if (!raw) return "";
-    try {
-      return JSON.stringify(JSON.parse(raw), null, 2);
-    } catch {
-      return raw;
-    }
-  };
-
   // 顶栏标题：当前会话的标题（与侧栏同源：取最后一条消息文本）。
   //
   // 有意**不**退化到会话 id —— 顶栏原来显示的是 id 短码，对用户没有意义，
   // 已按要求移除；没有消息时给「New chat」而不是一串乱码。
   const currentSessionTitle = createMemo(() => {
-    const id = currentSession();
+    const id = sess.currentSession();
     if (!id) return "pi-mobile";
-    const s = sessions().find((x) => x.id === id);
+    const s = sess.sessions().find((x) => x.id === id);
     return (s?.lastMessage ?? "").trim() || "New chat";
   });
 
+  // ── 组合回调（跨子系统的 UI 编排，原 JSX 内联逻辑原样收拢）──
+
+  const onPickCommand = (cmd: string) => {
+    setInput(`${cmd} `);
+    textareaEl?.focus();
+  };
+
+  const onOpenSettings = () => {
+    setSettingsView("providers");
+    void prov.refreshConfigured();
+    setDrawerOpen(false);
+    setSettingsOpen(true);
+  };
+
+  const onOpenAgentTab = () => {
+    setSettingsView("agent");
+    invoke<string>("approval_policy_get")
+      .then((p) => setApprovalPolicy(p === "auto" ? "auto" : "ask"))
+      .catch(() => {});
+    // 设备能力清单（含权限态）与审批策略同页，一起拉
+    void refreshNativeCaps();
+  };
+
+  const onOAuthLogin = () => {
+    void invoke("pi_call_global", {
+      fnName: "__pi_oauth_login",
+      arg: prov.selProvider(),
+    }).catch((e) => push({ role: "status", text: `oauth login failed: ${e}` }));
+    push({
+      role: "status",
+      text: `signing in with ${prov.providerLabel(prov.selProvider())}…`,
+    });
+  };
+
+  const onOpenProvider = (id: string) => {
+    void prov.chooseProvider(id);
+    setSettingsView("provider");
+  };
+
+  const onChangePickerProvider = () => {
+    prov.setModelPickerOpen(false);
+    setSettingsView("providers");
+    void prov.refreshConfigured();
+    setSettingsOpen(true);
+  };
+
+  const onApprovePlan = () => {
+    const planData = plan();
+    setPlan(null);
+    if (planData)
+      sendText(`✅ Plan approved — execute it now:\n\n${planData.content}`);
+  };
+
   return (
     <main class="app">
-      <header class="topbar">
-        <div class="topbar-actions">
-          <Button variant="secondary" size="icon" class="h-8 w-8" onClick={openDrawer} aria-label="sessions">
-            <FiMenu size="1.05em" />
-          </Button>
-        </div>
-        {/* 标题 = 会话标题；右侧只留 token 用量。
-            原来这里还有会话 id 短码与设置齿轮 —— id 对用户无意义、齿轮与
-            侧边栏底部的 Settings 入口重复，两者都已移除。 */}
-        <h1 class="topbar-title" title={currentSessionTitle()}>
-          {currentSessionTitle()}
-        </h1>
-        <div class="topbar-meta">
-          <Show when={sessionTokens() > 0}>
-            <span class="tok-badge">{fmtTok(sessionTokens())}</span>
-          </Show>
-        </div>
-      </header>
+      <TopBar
+        title={currentSessionTitle}
+        tokens={sessionTokens}
+        onOpenDrawer={openDrawer}
+      />
 
-      <Show when={goal()}>
-        {(g) => (
-          <div class="goal-banner">
-            <span class="goal-text">
-              <FiTarget size="0.95em" style={{ "vertical-align": "-0.1em" }} /> {g()}
-              <Show when={goalAuto()}>
-                <span class="goal-auto"> · auto {goalAuto()!.count}/{goalAuto()!.cap}</span>
-              </Show>
-            </span>
-            <div class="goal-actions">
-              <Show when={!busy()}>
-                <button class="goal-btn" onClick={continueGoal}>
-                  <FiPlay size="0.85em" /> Continue
-                </button>
-              </Show>
-              <button class="goal-btn" onClick={clearGoal} aria-label="clear goal">
-                <FiX size="0.9em" />
-              </button>
-            </div>
-          </div>
-        )}
-      </Show>
+      <GoalBanner
+        goal={goal}
+        goalAuto={goalAuto}
+        busy={busy}
+        onContinue={continueGoal}
+        onClear={clearGoal}
+      />
 
-      <Show when={!ready() || !currentModel()}>
-        <div class="keyform provider-setup">
-          <div class="item-sub">
-            Choose an AI provider — the model list loads automatically after your
-            key is saved.
-          </div>
-          {providerSection()}
-        </div>
-      </Show>
+      <ProviderSetup
+        show={() => !ready() || !prov.currentModel()}
+        providers={prov.providers}
+        selProvider={prov.selProvider}
+        chooseProvider={prov.chooseProvider}
+        keySaved={prov.keySaved}
+        setKeySaved={prov.setKeySaved}
+        providerKey={prov.providerKey}
+        setProviderKey={prov.setProviderKey}
+        saveProviderKey={prov.saveProviderKey}
+        loadingModels={prov.loadingModels}
+        providerModels={prov.providerModels}
+        providerLabel={prov.providerLabel}
+        selectModel={prov.selectModel}
+      />
 
-      <div class="chat" ref={chatEl} onScroll={onChatScroll}>
-        <Show when={ready() && !hasConversation()}>
-          <div class="welcome">
-            <div class="welcome-logo">π</div>
-            <h2>Your pocket coding agent</h2>
-            <p>
-              pi runs entirely on this device — it can list, read, write and edit
-              files in the sandboxed workspace. Writes ask for your approval.
-            </p>
-            <div class="chips">
-              <For each={SUGGESTIONS}>
-                {(s) => (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    class="rounded-full"
-                    onClick={() => sendText(s)}
-                  >
-                    {s}
-                  </Button>
-                )}
-              </For>
-            </div>
-          </div>
-        </Show>
+      <ChatStream
+        items={items}
+        ready={ready}
+        stick={stick}
+        setStick={setStick}
+        reducedMotion={reducedMotion}
+        sendText={sendText}
+        updateItem={updateItem}
+        revert={revert}
+      />
 
-        <For each={items()}>
-          {(it) => (
-            <Show
-              when={it.role !== "tool" || it.toolCallId}
-              fallback={
-                <div class="result-line">{it.text}</div>
-              }
-            >
-              <div class={`msg msg-${it.role}`}>
-                <Show
-                  when={it.role === "tool"}
-                  fallback={
-                    <Show
-                      when={it.role === "assistant"}
-                      fallback={
-                        <Show
-                          when={it.role === "user"}
-                          fallback={<span class="status-line">{it.text}</span>}
-                        >
-                          <div class="bubble">{it.text}</div>
-                        </Show>
-                      }
-                    >
-                      <div class={`bubble ${it.thinking ? "thinking" : ""}`}>
-                        <Show when={!it.thinking} fallback={<span>thinking…</span>}>
-                          <Markdown text={it.text} />
-                        </Show>
-                        <Show when={it.text && !it.thinking}>
-                          <button
-                            class="copy-btn"
-                            onClick={() => copyText(it.text)}
-                            aria-label="copy"
-                          >
-                            copy
-                          </button>
-                        </Show>
-                      </div>
-                    </Show>
-                  }
-                >
-                  <Collapsible
-                    open={it.expanded}
-                    onOpenChange={(o) => updateItem(it.toolCallId!, { expanded: o })}
-                    class={`tool-card ${toolState(it)}`}
-                  >
-                    <CollapsibleTrigger class="tool-head">
-                      <Badge
-                        variant={
-                          it.pending ? "warning" : it.isError ? "destructive" : "success"
-                        }
-                        class="px-1.5 text-[0.6rem]"
-                      >
-                        {it.pending ? "…" : it.isError ? "!" : <FiCheck size="0.9em" />}
-                      </Badge>
-                      <span class="tool-summary">
-                        {it.toolName}({(it.argsText ?? "").slice(0, 90)})
-                        {it.pending ? " …" : ""}
-                      </span>
-                      <span class="tool-caret">
-                        {it.expanded ? <FiChevronDown /> : <FiChevronRight />}
-                      </span>
-                    </CollapsibleTrigger>
-                    <CollapsibleContent>
-                      <div class="tool-body">
-                        <div>{prettyArgs(it.argsText)}</div>
-                        <Show when={it.text}>
-                          <div class="tool-result">{it.text}</div>
-                        </Show>
-                        <Show when={it.path && (it.canRevert || it.reverted)}>
-                          <div class="tool-revert-row">
-                            <Show
-                              when={it.canRevert}
-                              fallback={<span class="reverted-note">↩ reverted</span>}
-                            >
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                class="h-7 rounded-full text-xs"
-                                onClick={() => revert(it)}
-                              >
-                                ↩ Revert
-                              </Button>
-                            </Show>
-                          </div>
-                        </Show>
-                      </div>
-                    </CollapsibleContent>
-                  </Collapsible>
-                </Show>
-              </div>
-            </Show>
-          )}
-        </For>
+      <ApprovalCard approval={approval} capLabel={capLabel} onDecide={decide} />
+
+      <AskUserCard
+        ask={ask}
+        onToggleOption={toggleOption}
+        onSetFreeform={setFreeform}
+        onSetComment={setAskComment}
+        onAnswer={answerAsk}
+      />
+
+      <CommandPalette
+        visible={() => input().startsWith("/")}
+        commands={allCommands}
+        onPick={onPickCommand}
+      />
+
+      <PlanCard
+        plan={plan}
+        planning={planning}
+        onDiscard={() => setPlan(null)}
+        onApproveRun={onApprovePlan}
+      />
+
+      <TodoPanel
+        todoOpen={todoOpen}
+        todos={todos}
+        onClose={() => setTodoOpen(false)}
+      />
+
+      {/* composer 区：信任行（small-caps 微文案）+ 卡片化容器（chips 内嵌上方、
+          输入行下方，参考 agent-workflow-ios 设计稿的层次） */}
+      <div class="trust-row">
+        <span>ON-DEVICE · SANDBOXED</span>
+      </div>
+      <div class="composer-card">
+        <QuickBar
+          ready={ready}
+          onOpenFiles={openFiles}
+          onOpenModelPicker={prov.openModelPicker}
+          modelName={() => prov.currentModel()?.name ?? "Model"}
+          todoOpen={todoOpen}
+          onToggleTodos={() => setTodoOpen(!todoOpen())}
+        />
+        <Composer
+          input={input}
+          setInput={setInput}
+          ready={ready}
+          busy={busy}
+          onSend={sendText}
+          onStop={stop}
+          registerTextarea={(el) => {
+            textareaEl = el;
+          }}
+        />
       </div>
 
-      <Show when={awayFromBottom() > 240}>
-        <button class="jump-btn" onClick={jumpToLatest} aria-label="jump to latest">
-          <FiArrowDown size="1em" />
-        </button>
-      </Show>
-
-      {/* 会话底部快捷条（ChatGPT 式）：文件 / 模型快选 / Todos */}
-      <Show when={ready()}>
-        <div class="quick-bar">
-          <button class="quick-chip" onClick={openFiles}>
-            <FiFolder size="0.95em" /> <span>Files</span>
-          </button>
-          <button class="quick-chip" onClick={openModelPicker}>
-            <FiCpu size="0.95em" /> <span>{currentModel()?.name ?? "Model"}</span>
-            <span class="quick-caret">
-              <FiChevronDown size="0.8em" />
-            </span>
-          </button>
-          <button class="quick-chip" onClick={() => setTodoOpen(!todoOpen())}>
-            <FiCheckSquare size="0.95em" /> <span>Todos</span>
-          </button>
-        </div>
-      </Show>
-
-      <Show when={approval()}>
-        {(a) => (
-          <div class="approval">
-            <div class="approval-title">
-              <FiAlertTriangle size="0.95em" style={{ "vertical-align": "-0.12em" }} />{" "}
-              {/* 脚本没有 path，硬拼 «» 会变成 run_js «» —— 与之前修过的
-                  `approvalTarget` 是同一类文案 bug。脚本走单独标题。 */}
-              {a().script ? "run a script — approve?" : `${a().tool} «${a().path}» — approve?`}
-            </div>
-            <Show when={(a().capabilities?.length ?? 0) > 0}>
-              <div class="cap-list">
-                <div class="cap-list-head">
-                  This script will be able to:
-                </div>
-                <For each={a().capabilities}>
-                  {(id) => (
-                    <div class="cap-row">
-                      <span class="cap-dot">•</span>
-                      <span class="cap-desc">{capLabel(id)}</span>
-                      <span class="cap-id">{id}</span>
-                    </div>
-                  )}
-                </For>
-              </div>
-            </Show>
-            <Show when={a().script && !(a().capabilities?.length ?? 0)}>
-              {/* 空清单必须明说：否则用户会以为「卡上没写就是没风险」 */}
-              <div class="cap-list-head">
-                This script requests no device or file access.
-              </div>
-            </Show>
-            {/* D14 / §2.2 要求：用户批的是「这份能力清单 + 这段代码」，两者都
-                必须可见 —— 否则「批准」就成了一个不知道批了什么的动作。 */}
-            <Show when={a().code}>
-              <pre class="script-code">{a().code}</pre>
-            </Show>
-            <Show when={a().diff}>
-              <div class="diff">
-                {a().diff.split("\n").map((line) => (
-                  <div
-                    class={
-                      line.startsWith("+")
-                        ? "diff-add"
-                        : line.startsWith("-")
-                          ? "diff-del"
-                          : "diff-ctx"
-                    }
-                  >
-                    {line || " "}
-                  </div>
-                ))}
-              </div>
-            </Show>
-            <div class="approval-actions">
-              <Button variant="destructive" onClick={() => decide("deny")}>
-                Deny
-              </Button>
-              {/* 脚本不提供 Always：D14 规定脚本的 always 只对本次生效、不降
-                  全局基线。把一个点了之后不再生效的按钮摆在那里会骗人 ——
-                  用户会以为「以后这类脚本都行」，而实际每次都会再问。 */}
-              <Show when={!a().script}>
-                <Button variant="secondary" onClick={() => decide("always")}>
-                  Always
-                </Button>
-              </Show>
-              <Button
-                class="bg-success text-success-foreground hover:bg-success/90"
-                onClick={() => decide("allow")}
-              >
-                Allow
-              </Button>
-            </div>
-          </div>
-        )}
-      </Show>
-
-      <Show when={ask()}>
-        {(a) => (
-          <div class="approval">
-            <div class="approval-title">❓ {a().question}</div>
-            <Show when={a().context}>
-              <div class="ask-context">{a().context}</div>
-            </Show>
-            <Show when={a().options.length}>
-              <div class="ask-options">
-                <For each={a().options}>
-                  {(o) => (
-                    <button
-                      class={`ask-option ${a().selected.includes(o.title) ? "selected" : ""}`}
-                      onClick={() => toggleOption(o.title)}
-                    >
-                      <div class="ask-option-title">
-                        <span class="ask-option-mark">
-                          {a().selected.includes(o.title) ? "●" : "○"}
-                        </span>
-                        {o.title}
-                      </div>
-                      <Show when={o.description}>
-                        <div class="ask-option-desc">{o.description}</div>
-                      </Show>
-                    </button>
-                  )}
-                </For>
-              </div>
-            </Show>
-            <Show when={a().allowFreeform}>
-              <input
-                class="ask-input"
-                placeholder="Or write your own answer…"
-                value={a().freeform}
-                onInput={(e) => setFreeform(e.currentTarget.value)}
-              />
-            </Show>
-            <Show when={a().allowComment}>
-              <input
-                class="ask-input"
-                placeholder="Optional comment…"
-                value={a().comment}
-                onInput={(e) => setAsk({ ...a(), comment: e.currentTarget.value })}
-              />
-            </Show>
-            <div class="approval-actions">
-              <Button variant="secondary" onClick={() => answerAsk(true)}>
-                Skip
-              </Button>
-              <Button
-                onClick={() => answerAsk(false)}
-                disabled={!a().selected.length && !a().freeform.trim()}
-              >
-                Answer
-              </Button>
-            </div>
-          </div>
-        )}
-      </Show>
-
-      <Show when={input().startsWith("/")}>
-        <div class="cmd-palette">
-          <For each={allCommands()}>
-            {(c) => (
-              <button
-                class="cmd-row"
-                onClick={() => {
-                  setInput(`${c.cmd} `);
-                  textareaEl?.focus();
-                }}
-              >
-                <span class="cmd-name">{c.cmd}</span>
-                <span class="cmd-desc">{c.desc}</span>
-              </button>
-            )}
-          </For>
-        </div>
-      </Show>
-
-      <Show when={plan()}>
-        {(p) => (
-          <div class="approval">
-            <div class="approval-title">📋 Plan — {p().objective}</div>
-            <div class="md plan-body">
-              <Markdown text={p().content} />
-            </div>
-            <div class="approval-actions">
-              <Button variant="secondary" onClick={() => setPlan(null)}>
-                Discard
-              </Button>
-              <Button
-                class="bg-success text-success-foreground hover:bg-success/90"
-                onClick={() => {
-                  const planData = plan();
-                  setPlan(null);
-                  if (planData) sendText(`✅ Plan approved — execute it now:\n\n${planData.content}`);
-                }}
-              >
-                <FiPlay size="0.85em" /> Approve &amp; run
-              </Button>
-            </div>
-          </div>
-        )}
-      </Show>
-
-      <Show when={planning()}>
-        <div class="planning-note">drafting plan…</div>
-      </Show>
-
-      <Show when={todoOpen()}>
-        <div class="todo-panel">
-          <div class="todo-head">
-            <span class="todo-title">{todoHeading()}</span>
-            <button class="goal-btn" onClick={() => setTodoOpen(false)} aria-label="hide todos">
-              <FiX size="0.9em" />
-            </button>
-          </div>
-          <Show
-            when={visibleTodos().length > 0}
-            fallback={<div class="todo-row todo-empty">No todos yet. Ask the agent to add some!</div>}
-          >
-            <For each={visibleTodos()}>
-              {(t) => (
-                <div class={`todo-row todo-${t.status}`}>
-                  <span class="todo-glyph">{todoGlyph(t)}</span>
-                  <span class="todo-subject">
-                    #{t.id} {t.subject}
-                    <Show when={t.status === "in_progress" && t.activeForm}>
-                      <span class="todo-active"> ({t.activeForm})</span>
-                    </Show>
-                  </span>
-                </div>
-              )}
-            </For>
-          </Show>
-        </div>
-      </Show>
-
-      <form class="composer" onSubmit={onSubmit}>
-        <div class="composer-pill">
-          <textarea
-            ref={textareaEl}
-            rows="1"
-            placeholder={
-              ready() ? (busy() ? "Queue a message while pi works…" : "Ask pi to do something…") : "agent booting…"
-            }
-            disabled={!ready()}
-            value={input()}
-            onInput={(e) => {
-              setInput(e.currentTarget.value);
-              autoGrow();
-            }}
-            onKeyDown={onKeydown}
-          />
-          <Show
-            when={busy() && !input().trim()}
-            fallback={
-              <button
-                type="submit"
-                class="send-btn"
-                disabled={!ready() || !input().trim()}
-                aria-label="send"
-              >
-                <FiSend size="1em" />
-              </button>
-            }
-          >
-            {/* 仅在「空内容 + 响应中」显示停止；有内容时始终显示发送（消息入队） */}
-            <button type="button" class="stop-btn" onClick={stop} aria-label="stop">
-              <FiSquare size="0.95em" />
-            </button>
-          </Show>
-        </div>
-      </form>
-
-      <Sheet open={drawerOpen()} onOpenChange={setDrawerOpen}>
-        <SheetContent
-          side="left"
-          class="sheet-safe w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
-        >
-          <SheetHeader>
-            <SheetTitle class="text-base">Sessions</SheetTitle>
-          </SheetHeader>
-          <button class="new-chat-btn" onClick={newSession}>
-            <FiPlus size="1em" /> New chat
-          </button>
-          <input
-            class="session-search"
-            placeholder="Search sessions…"
-            value={sessionSearch()}
-            onInput={(e) => setSessionSearch(e.currentTarget.value)}
-          />
-          <div class="-mx-1 flex-1 overflow-y-auto px-1">
-            <For each={sessionGroups()}>
-              {(grp) => (
-                <>
-                  <div class="session-group-label">{grp.label}</div>
-                  <For each={grp.items}>
-                    {(s) => (
-                      <div
-                        class={`item-card session-item ${s.id === currentSession() ? "active" : ""}`}
-                        onClick={() => switchSession(s.id)}
-                      >
-                        <div class="item-body">
-                          <div class="item-title">{s.lastMessage || s.id.slice(0, 8)}</div>
-                          <div class="item-sub">
-                            {fmtRel(s.modifiedAt)} · {s.entries} messages
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          class="session-delete-btn"
-                          aria-label="delete session"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void deleteSession(s.id);
-                          }}
-                        >
-                          <FiTrash2 size="0.95em" />
-                        </button>
-                      </div>
-                    )}
-                  </For>
-                </>
-              )}
-            </For>
-            <Show when={!sessionGroups().length}>
-              <div class="empty-note">no sessions match</div>
-            </Show>
-          </div>
-
-          <div class="mt-auto">
-            {/* D15 预览入口。放在抽屉里而非顶栏：顶栏刚被精简过（去掉了设置
-                齿轮），不再往上堆图标。 */}
-            <div
-              class="settings-row"
-              onClick={() => {
-                setDrawerOpen(false);
-                void openPreview();
-              }}
-            >
-              <span class="settings-icon-chip">
-                <FiEye size="1.05em" />
-              </span>
-              <div class="settings-row-body">
-                <div class="settings-row-title">Preview</div>
-                <div class="settings-row-sub">render HTML/CSS/JS from the workspace</div>
-              </div>
-              <span class="settings-chevron">
-                <FiChevronRight size="1em" />
-              </span>
-            </div>
-            <div
-              class="settings-row"
-              onClick={() => {
-                setSettingsView("providers");
-                void refreshConfigured();
-                setDrawerOpen(false);
-                setSettingsOpen(true);
-              }}
-            >
-              <span class="settings-icon-chip">
-                <FiSettings size="1.05em" />
-              </span>
-              <div class="settings-row-body">
-                <div class="settings-row-title">Settings</div>
-                <div class="settings-row-sub">AI model · MCP servers · Skills</div>
-              </div>
-              <span class="settings-chevron">
-                <FiChevronRight size="1em" />
-              </span>
-            </div>
-          </div>
-        </SheetContent>
-      </Sheet>
-
-      <Sheet open={settingsOpen()} onOpenChange={setSettingsOpen}>
-        <SheetContent
-          side="right"
-          class="sheet-safe w-full max-w-md gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
-        >
-          <SheetHeader>
-            <SheetTitle class="text-base">Settings</SheetTitle>
-          </SheetHeader>
-          <div class="settings-tabs">
-            <button
-              class={`settings-tab ${settingsView() === "providers" || settingsView() === "provider" ? "active" : ""}`}
-              onClick={() => setSettingsView("providers")}
-            >
-              Providers
-            </button>
-            <button
-              class={`settings-tab ${settingsView() === "mcp" ? "active" : ""}`}
-              onClick={() => setSettingsView("mcp")}
-            >
-              MCP
-            </button>
-            <button
-              class={`settings-tab ${settingsView() === "skills" ? "active" : ""}`}
-              onClick={() => setSettingsView("skills")}
-            >
-              Skills
-            </button>
-            <button
-              class={`settings-tab ${settingsView() === "agent" ? "active" : ""}`}
-              onClick={() => {
-                setSettingsView("agent");
-                invoke<string>("approval_policy_get")
-                  .then((p) => setApprovalPolicy(p === "auto" ? "auto" : "ask"))
-                  .catch(() => {});
-                // 设备能力清单（含权限态）与审批策略同页，一起拉
-                void refreshNativeCaps();
-              }}
-            >
-              Agent
-            </button>
-          </div>
-
-          <Show when={settingsView() === "providers"}>
-            <div class="-mx-1 flex-1 overflow-y-auto px-1">
-              <div class="settings-subtitle">
-                Provider catalogs come from the pi-ai models registry. Tap a
-                provider to set its API key and pick a model.
-              </div>
-              <div class="flex flex-col gap-2">
-                <For each={providers()}>
-                  {(p) => (
-                    <div
-                      class="settings-row"
-                      onClick={() => {
-                        void chooseProvider(p.id);
-                        setSettingsView("provider");
-                      }}
-                    >
-                      <span class="settings-icon-chip">{providerIcon(p.id)}</span>
-                      <div class="settings-row-body">
-                        <div class="settings-row-title">
-                          {p.name}
-                          <Show when={currentModel()?.provider === p.id}>
-                            <span class="provider-badge">active</span>
-                          </Show>
-                        </div>
-                        <div class="settings-row-sub">
-                          {p.models.length} models ·{" "}
-                          {configured().has(p.id) ? "API key set" : "no key"}
-                        </div>
-                      </div>
-                      <span class="settings-chevron">
-                        <FiChevronRight size="1em" />
-                      </span>
-                    </div>
-                  )}
-                </For>
-              </div>
-              <div class="settings-footer">pi-mobile · sessions stay on this device</div>
-            </div>
-          </Show>
-
-          <Show when={settingsView() === "provider"}>
-            <div class="settings-section-title">{providerLabel(selProvider())}</div>
-            <div class="settings-subtitle">
-              Tap a model to make it the active model — applies immediately and
-              persists across restarts.
-            </div>
-            <Show when={OAUTH_PROVIDERS.has(selProvider())}>
-              <div class="item-card">
-                <div class="item-title">
-                  <FiLock size="0.95em" style={{ "vertical-align": "-0.12em" }} /> Subscription
-                  sign-in
-                </div>
-                <div class="item-sub">
-                  Opens the provider's login page in your browser and returns
-                  via the pimobile:// deep link or a local callback — no API
-                  key needed.
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="mt-1"
-                  disabled={busy()}
-                  onClick={() => {
-                    void invoke("pi_call_global", {
-                      fnName: "__pi_oauth_login",
-                      arg: selProvider(),
-                    }).catch((e) => push({ role: "status", text: `oauth login failed: ${e}` }));
-                    push({ role: "status", text: `signing in with ${providerLabel(selProvider())}…` });
-                  }}
-                >
-                  Sign in with {providerLabel(selProvider())}
-                </Button>
-              </div>
-            </Show>
-            <div class="-mx-1 flex-1 overflow-y-auto px-1">
-              <Show
-                when={!keySaved()}
-                fallback={
-                  <div class="item-card">
-                    <div class="item-title">
-                      <FiKey size="0.95em" style={{ "vertical-align": "-0.12em" }} /> API key
-                      configured
-                    </div>
-                    <div class="item-sub">
-                      tap <span class="underline">replace</span> below to change it
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      class="mt-1 h-7 text-xs text-muted-foreground"
-                      onClick={() => setKeySaved(false)}
-                    >
-                      Replace key
-                    </Button>
-                  </div>
-                }
-              >
-                <form class="mb-2 flex flex-col gap-1.5" onSubmit={saveProviderKey}>
-                  <input
-                    class="ask-input"
-                    type="text"
-                    placeholder={`${providerLabel(selProvider())} API key…`}
-                    value={providerKey()}
-                    onInput={(e) => setProviderKey(e.currentTarget.value)}
-                  />
-                  <Button variant="outline" size="sm" type="submit">
-                    Save key & load models
-                  </Button>
-                </form>
-              </Show>
-              <div class="flex items-center justify-between">
-                <span class="item-sub">{providerModels().length} models</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="h-7 text-xs"
-                  onClick={() => loadModels(selProvider())}
-                >
-                  <FiRotateCw size="0.9em" /> Refresh
-                </Button>
-              </div>
-              <Show when={loadingModels()}>
-                <div class="empty-note">loading models…</div>
-              </Show>
-              <For each={providerModels()}>
-                {(m) => (
-                  <div
-                    class={`item-card ${
-                      currentModel()?.provider === selProvider() && currentModel()?.id === m.id
-                        ? "active"
-                        : ""
-                    }`}
-                    onClick={() => selectModel(selProvider(), m)}
-                  >
-                    <div class="item-title">
-                      <Show
-                        when={currentModel()?.provider === selProvider() && currentModel()?.id === m.id}
-                      >
-                        <span class="model-check">
-                          <FiCheck size="0.9em" />
-                        </span>
-                      </Show>
-                      {m.name}
-                    </div>
-                    <div class="item-sub mcp-url">{m.id}</div>
-                  </div>
-                )}
-              </For>
-            </div>
-          </Show>
-
-          <Show when={settingsView() === "mcp"}>
-            <div class="settings-section-title">MCP Servers</div>
-            <div class="settings-subtitle">
-              Streamable-HTTP servers — tools register as mcp__server__tool and
-              always ask before running.
-            </div>
-            <div class="-mx-1 flex-1 overflow-y-auto px-1">
-              <div class="flex items-center justify-between">
-                <span />
-                <Button variant="ghost" size="sm" class="h-7 text-xs" onClick={reconnectMcp}>
-                  <FiRotateCw size="0.9em" /> Reconnect
-                </Button>
-              </div>
-              <For each={mcpServers()}>
-                {(s) => (
-                  <div class="item-card">
-                    <div class="item-title">
-                      <span
-                        class={`status-dot ${mcpReady().has(s.name) ? "ok" : "off"}`}
-                        title={mcpReady().has(s.name) ? "connected" : "not connected"}
-                      />
-                      {s.name}
-                    </div>
-                    <div class="item-sub mcp-url">{s.url}</div>
-                    <div class="item-sub">
-                      timeout {s.timeoutMs ?? 30000}ms
-                      <Show when={s.headers && Object.keys(s.headers ?? {}).length > 0}>
-                        {" · headers: "}
-                        {Object.keys(s.headers ?? {}).join(", ")}
-                      </Show>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      class="mt-1 h-7 text-xs text-muted-foreground"
-                      onClick={() => removeMcpServer(s.name)}
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                )}
-              </For>
-              <form onSubmit={addMcpServer} class="mt-2 flex flex-col gap-1.5">
-                <input
-                  class="ask-input"
-                  placeholder="name (e.g. docs)"
-                  value={mcpName()}
-                  onInput={(e) => setMcpName(e.currentTarget.value)}
-                />
-                <input
-                  class="ask-input"
-                  placeholder="https://…/mcp"
-                  value={mcpUrl()}
-                  onInput={(e) => setMcpUrl(e.currentTarget.value)}
-                />
-                <input
-                  class="ask-input"
-                  type="number"
-                  placeholder="timeout ms (default 30000)"
-                  value={mcpTimeout()}
-                  onInput={(e) => setMcpTimeout(e.currentTarget.value)}
-                />
-                <textarea
-                  class="ask-input"
-                  rows="2"
-                  placeholder={"headers (optional, one per line): Authorization: Bearer …"}
-                  value={mcpHeaders()}
-                  onInput={(e) => setMcpHeaders(e.currentTarget.value)}
-                />
-                <Button variant="outline" size="sm" type="submit">
-                  Add server
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="h-7 text-xs"
-                  onClick={() => setMcpPasteOpen(!mcpPasteOpen())}
-                >
-                  {"{ }"} Paste JSON
-                </Button>
-                <Show when={mcpPasteOpen()}>
-                  <textarea
-                    class="ask-input"
-                    rows="4"
-                    placeholder={'{"name":"docs","url":"https://…/mcp","timeoutMs":30000,"headers":{}} 或 {"mcpServers":{…}}'}
-                    value={mcpPaste()}
-                    onInput={(e) => setMcpPaste(e.currentTarget.value)}
-                  />
-                  <Button variant="secondary" size="sm" onClick={importMcpJson}>
-                    Import JSON
-                  </Button>
-                </Show>
-              </form>
-              <div class="item-sub mt-1">calls require approval · Reconnect applies config changes</div>
-            </div>
-          </Show>
-
-          <Show when={settingsView() === "skills"}>
-            <div class="settings-section-title">Skills</div>
-            <div class="settings-subtitle">
-              SKILL.md packages whose instructions are injected into the system
-              prompt — no code runs on this device.
-            </div>
-            <div class="-mx-1 flex-1 overflow-y-auto px-1">
-              <For each={skills()}>
-                {(s) => (
-                  <div class="item-card skill-row">
-                    <div class="skill-row-body">
-                      <div class="item-title">{s.name}</div>
-                      <Show when={s.description}>
-                        <div class="item-sub">{s.description}</div>
-                      </Show>
-                      <div class="item-sub mcp-url">
-                        v{s.version} · {s.enabled ? "injected" : "not injected"}
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-7 text-xs text-muted-foreground"
-                        onClick={() => removeSkill(s.id)}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                    <ToggleSwitch on={s.enabled} onChange={() => toggleSkill(s.id, !s.enabled)} />
-                  </div>
-                )}
-              </For>
-              <Show when={!skills().length}>
-                <div class="empty-note">no skills installed</div>
-              </Show>
-              <form onSubmit={installSkill} class="mt-2 flex flex-col gap-1.5">
-                <input
-                  class="ask-input"
-                  placeholder="https://github.com/owner/repo or SKILL.md URL"
-                  value={skillUrl()}
-                  onInput={(e) => setSkillUrl(e.currentTarget.value)}
-                />
-                <Button variant="outline" size="sm" type="submit" disabled={installingSkill()}>
-                  {installingSkill() ? "Installing…" : "Install skill"}
-                </Button>
-              </form>
-              <div class="item-sub mt-1">
-                SKILL.md instructions inject into the system prompt · disabled = not injected · no code runs
-              </div>
-            </div>
-          </Show>
-
-          <Show when={settingsView() === "agent"}>
-            <div class="-mx-1 flex-1 overflow-y-auto px-1">
-              <div class="settings-section-title">Agent behavior</div>
-              <div class="settings-subtitle">
-                Approval gates protect the on-device workspace. MCP tools always
-                ask regardless of this setting.
-              </div>
-              <div class="item-card flex items-center justify-between gap-3">
-                <div>
-                  <div class="item-title">Approve file changes</div>
-                  <div class="item-sub">
-                    {approvalPolicy() === "ask"
-                      ? "write / edit / mkdir ask before running"
-                      : "write / edit / mkdir run without asking"}
-                  </div>
-                </div>
-                <ToggleSwitch
-                  on={approvalPolicy() === "ask"}
-                  onChange={(next) => void setApprovalPolicyPersist(next ? "ask" : "auto")}
-                />
-              </div>
-              <div class="item-card">
-                <div class="item-title">Never approved without asking</div>
-                <div class="item-sub">
-                  bash-style command execution does not exist in this build — the
-                  agent can only touch the sandboxed workspace.
-                </div>
-              </div>
-
-              {/* 设备能力并入本页：审批策略管的是「工作区内的文件改动」，
-                  设备能力管的是「工作区外的真实用户数据」—— 两者都是 agent
-                  的权限边界，放同一页才不会让用户以为还有第二个开关组。
-                  清单与权限态的单一真源是 Rust 侧 native::CAPABILITIES。 */}
-              <div class="settings-section-title">Device access</div>
-              <div class="settings-subtitle">
-                What the agent can reach outside the sandboxed workspace. Reading
-                needs no prompt; anything that changes device state still asks.
-              </div>
-              <Show when={nativeErr()}>
-                <div class="item-card">
-                  <div class="item-title">Could not load capabilities</div>
-                  <div class="item-sub">{nativeErr()}</div>
-                </div>
-              </Show>
-              <For each={nativeCaps()}>
-                {(cap) => (
-                  <div class="item-card cap-item flex items-center justify-between gap-3">
-                    <div class="min-w-0">
-                      <div class="cap-item-title">{cap.title}</div>
-                      <div class="cap-item-tools">{cap.tools.join(", ")}</div>
-                      <div class="cap-item-detail">{cap.detail}</div>
-                      <Show when={!cap.supported}>
-                        <div class="cap-item-note">Not available on this platform</div>
-                      </Show>
-                    </div>
-                    <Show
-                      when={cap.supported && cap.needsPermission && cap.permission !== "granted"}
-                      fallback={
-                        <span class="item-sub">
-                          {cap.permission === "granted" ? "Allowed" : "—"}
-                        </span>
-                      }
-                    >
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        class="h-7 text-xs"
-                        onClick={() => void requestNativePermission(cap.id)}
-                      >
-                        {cap.permission === "denied" ? "Open Settings" : "Allow"}
-                      </Button>
-                    </Show>
-                  </div>
-                )}
-              </For>
-              <div class="settings-footer">
-                The agent never sends your location, clipboard or contacts
-                anywhere on its own — only to the model when a tool call reads it.
-              </div>
-            </div>
-          </Show>
-        </SheetContent>
-      </Sheet>
-
-      <Sheet open={modelPickerOpen()} onOpenChange={setModelPickerOpen}>
-        <SheetContent
-          side="bottom"
-          class="sheet-safe max-h-[70vh] gap-2 rounded-t-2xl p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
-        >
-          <SheetHeader>
-            <SheetTitle class="text-base">Model — {providerLabel(pickerProvider())}</SheetTitle>
-          </SheetHeader>
-          <div
-            class="settings-row"
-            onClick={() => {
-              setModelPickerOpen(false);
-              setSettingsView("providers");
-              void refreshConfigured();
-              setSettingsOpen(true);
-            }}
-          >
-            <span class="settings-icon-chip">
-              <FiCpu size="1.05em" />
-            </span>
-            <div class="settings-row-body">
-              <div class="settings-row-title">Change provider</div>
-              <div class="settings-row-sub">OpenAI · OpenRouter · DeepSeek · Gemini</div>
-            </div>
-            <span class="settings-chevron">
-              <FiChevronRight size="1em" />
-            </span>
-          </div>
-          <div class="-mx-1 flex-1 overflow-y-auto px-1">
-            <Show when={pickerModels().length > 0} fallback={<div class="empty-note">loading models…</div>}>
-              <For each={pickerModels()}>
-                {(m) => (
-                  <div
-                    class={`item-card model-row ${currentModel()?.id === m.id ? "active" : ""}`}
-                    onClick={() => selectModel(pickerProvider(), m)}
-                  >
-                    <div class="item-title">
-                      <Show when={currentModel()?.id === m.id}>
-                        <span class="model-check">
-                          <FiCheck size="0.9em" />
-                        </span>
-                      </Show>
-                      {m.name}
-                    </div>
-                    <div class="item-sub mcp-url">{m.id}</div>
-                  </div>
-                )}
-              </For>
-            </Show>
-          </div>
-        </SheetContent>
-      </Sheet>
-
-      <Sheet open={filesOpen()} onOpenChange={setFilesOpen}>
-        <SheetContent
-          side="left"
-          class="sheet-safe w-4/5 max-w-xs gap-3 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))]"
-        >
-          <SheetHeader>
-            <SheetTitle class="text-base">Workspace</SheetTitle>
-          </SheetHeader>
-          <Button variant="outline" size="sm" onClick={openFiles}>
-            <FiRotateCw size="0.9em" /> Refresh
-          </Button>
-          <Show
-            when={tree().length}
-            fallback={<div class="empty-note">workspace is empty</div>}
-          >
-            {/* @pierre/trees：虚拟滚动树（自带搜索/文件类型图标），点文件开预览 */}
-            <WorkspaceTree entries={tree()} onOpenFile={previewFile} />
-          </Show>
-        </SheetContent>
-      </Sheet>
-
-      <Show when={preview()}>
-        {(p) => {
-          const meta = tree().find((t) => t.path === p().path);
-          const lines = p().content.length ? p().content.split("\n").length : 0;
-          const fmtSize = (n?: number) =>
-            n == null
-              ? ""
-              : n < 1024
-                ? `${n} B`
-                : n < 1024 * 1024
-                  ? `${(n / 1024).toFixed(1)} KB`
-                  : `${(n / 1024 / 1024).toFixed(1)} MB`;
-          return (
-            <Dialog open={true} onOpenChange={(o) => !o && setPreview(null)}>
-              <DialogContent class="w-[95vw] max-w-2xl gap-2 p-4">
-                <DialogHeader>
-                  <DialogTitle class="truncate font-mono text-sm">{p().path}</DialogTitle>
-                  <DialogDescription>
-                    read-only · {lines} lines{meta ? ` · ${fmtSize(meta.size)}` : ""}
-                  </DialogDescription>
-                </DialogHeader>
-                <pre class="preview-body max-h-[65vh] overflow-auto">{p().content}</pre>
-                <div class="flex justify-end gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => copyText(p().content)}
-                  >
-                    <FiCopy size="0.9em" /> Copy
-                  </Button>
-                </div>
-              </DialogContent>
-            </Dialog>
-          );
+      <SessionDrawer
+        open={drawerOpen}
+        onOpenChange={setDrawerOpen}
+        onNewSession={sess.newSession}
+        sessionSearch={sess.sessionSearch}
+        setSessionSearch={sess.setSessionSearch}
+        sessionGroups={sess.sessionGroups}
+        currentSession={sess.currentSession}
+        onSwitchSession={sess.switchSession}
+        onDeleteSession={sess.deleteSession}
+        onOpenPreview={() => {
+          setDrawerOpen(false);
+          void previewState.openPreview();
         }}
-      </Show>
+        onOpenSettings={onOpenSettings}
+      />
 
-      {/* D15 预览。
+      <SettingsSheet
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        view={settingsView}
+        setView={setSettingsView}
+        onOpenAgentTab={onOpenAgentTab}
+        busy={busy}
+        providers={prov.providers}
+        currentModel={prov.currentModel}
+        configured={prov.configured}
+        onOpenProvider={onOpenProvider}
+        selProvider={prov.selProvider}
+        providerLabel={prov.providerLabel}
+        providerKey={prov.providerKey}
+        setProviderKey={prov.setProviderKey}
+        saveProviderKey={prov.saveProviderKey}
+        keySaved={prov.keySaved}
+        setKeySaved={prov.setKeySaved}
+        loadingModels={prov.loadingModels}
+        loadModels={prov.loadModels}
+        providerModels={prov.providerModels}
+        selectModel={prov.selectModel}
+        onOAuthLogin={onOAuthLogin}
+        mcpServers={mcp.mcpServers}
+        mcpReady={mcp.mcpReady}
+        onReconnectMcp={mcp.reconnectMcp}
+        onRemoveMcp={mcp.removeMcpServer}
+        mcpName={mcp.mcpName}
+        setMcpName={mcp.setMcpName}
+        mcpUrl={mcp.mcpUrl}
+        setMcpUrl={mcp.setMcpUrl}
+        mcpTimeout={mcp.mcpTimeout}
+        setMcpTimeout={mcp.setMcpTimeout}
+        mcpHeaders={mcp.mcpHeaders}
+        setMcpHeaders={mcp.setMcpHeaders}
+        addMcpServer={mcp.addMcpServer}
+        mcpPasteOpen={mcp.mcpPasteOpen}
+        setMcpPasteOpen={mcp.setMcpPasteOpen}
+        mcpPaste={mcp.mcpPaste}
+        setMcpPaste={mcp.setMcpPaste}
+        importMcpJson={mcp.importMcpJson}
+        skills={skills.skills}
+        onRemoveSkill={skills.removeSkill}
+        onToggleSkill={skills.toggleSkill}
+        skillUrl={skills.skillUrl}
+        setSkillUrl={skills.setSkillUrl}
+        installingSkill={skills.installingSkill}
+        installSkill={skills.installSkill}
+        approvalPolicy={approvalPolicy}
+        onSetApprovalPolicy={(next) => void setApprovalPolicyPersist(next)}
+        nativeCaps={nativeCaps}
+        nativeErr={nativeErr}
+        onRequestPermission={requestNativePermission}
+      />
 
-          刻意做成一整块可辨认的面板（标题 + 当前路径 + 可点击的关闭），而不是
-          把 iframe 塞进聊天流：预览里跑的是 **agent（LLM）写出来的 JS**，
-          如果它看起来像 app 自己的 UI，那就是一个现成的钓鱼面。
+      <ModelPicker
+        open={prov.modelPickerOpen}
+        onOpenChange={prov.setModelPickerOpen}
+        pickerProvider={prov.pickerProvider}
+        providerLabel={prov.providerLabel}
+        pickerModels={prov.pickerModels}
+        currentModel={prov.currentModel}
+        selectModel={prov.selectModel}
+        onChangeProvider={onChangePickerProvider}
+      />
 
-          sandbox 只给 allow-scripts + allow-forms：
-          * 不给 allow-same-origin → 预览页是 opaque origin，够不到 app 的 DOM
-          * 不给 allow-top-navigation → 不能把 app 导航走
-          * 不给 allow-popups → 不能开新窗口
-          网络是**故意**放开的（用户选择，见 D15）——那条风险本模块不拦，
-          能外泄的只有页面自己能生成的、或先经审批写进 workspace 的东西。 */}
-      <Show when={previewOpen()}>
-        <div class="preview-sheet">
-          <div class="preview-bar">
-            <span class="preview-badge">PREVIEW</span>
-            <select
-              class="preview-pick"
-              value={previewPath() ?? ""}
-              onChange={(e) => {
-                setPreviewPath(e.currentTarget.value || null);
-                setPreviewNonce((n) => n + 1);
-              }}
-            >
-              <Show when={!previewList().length}>
-                <option value="">no .html in workspace</option>
-              </Show>
-              <For each={previewList()}>{(p) => <option value={p}>{p}</option>}</For>
-            </select>
-            <button
-              type="button"
-              class="preview-btn"
-              onClick={() => setPreviewNonce((n) => n + 1)}
-              aria-label="reload"
-            >
-              <FiRefreshCw size="0.95em" />
-            </button>
-            {/* A3 逃生口：预览页里的同步死循环会冻住**整个 app**（iframe 与 app
-                共用 WebView 主线程，真机实测确认）。系统浏览器是独立进程，
-                页面再重也带不倒 app。
-                ⚠️ 它救不了已经卡死的现场（那时这个按钮也点不动），是**事前选择**。 */}
-            <button
-              type="button"
-              class="preview-btn"
-              onClick={() => {
-                const p = previewPath();
-                const port = previewPort();
-                if (p && port)
-                  void invoke("preview_open_external", { port, path: p }).catch((e) =>
-                    setPreviewErr(`open in browser: ${e}`),
-                  );
-              }}
-              aria-label="open in system browser"
-              title="open in system browser (safe if the page hangs)"
-            >
-              <FiExternalLink size="0.95em" />
-            </button>
-            <button
-              type="button"
-              class="preview-btn"
-              onClick={() => setPreviewOpen(false)}
-              aria-label="close preview"
-            >
-              <FiX size="0.95em" />
-            </button>
-          </div>
-          <Show when={previewErr()}>
-            <div class="preview-err">{previewErr()}</div>
-          </Show>
-          <Show when={previewSrc()} fallback={<div class="preview-err">nothing to preview yet — ask the agent to write an .html file into the workspace</div>}>
-            <iframe
-              class="preview-frame"
-              title="preview"
-              src={previewSrc()!}
-              sandbox="allow-scripts allow-forms"
-            />
-          </Show>
-        </div>
-      </Show>
+      <WorkspaceDrawer
+        open={filesOpen}
+        onOpenChange={setFilesOpen}
+        onRefresh={openFiles}
+        tree={tree}
+        onOpenFile={previewFile}
+      />
+
+      <FilePreviewDialog
+        preview={preview}
+        tree={tree}
+        onClose={() => setPreview(null)}
+      />
+
+      <PreviewPanel
+        open={previewState.previewOpen}
+        previewPath={previewState.previewPath}
+        previewList={previewState.previewList}
+        previewSrc={previewState.previewSrc}
+        previewErr={previewState.previewErr}
+        onPickPath={(path) => {
+          previewState.setPreviewPath(path);
+          previewState.setPreviewNonce((n) => n + 1);
+        }}
+        onReload={() => previewState.setPreviewNonce((n) => n + 1)}
+        onOpenExternal={() => {
+          const p = previewState.previewPath();
+          const port = previewState.previewPort();
+          if (p && port)
+            void invoke("preview_open_external", { port, path: p }).catch((e) =>
+              previewState.setPreviewErr(`open in browser: ${e}`),
+            );
+        }}
+        onClose={() => previewState.setPreviewOpen(false)}
+      />
     </main>
   );
 }

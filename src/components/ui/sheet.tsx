@@ -1,13 +1,13 @@
-import type { Component, ComponentProps, JSX, ValidComponent } from "solid-js";
-import { splitProps } from "solid-js";
-import * as DialogPrimitive from "@kobalte/core/dialog";
 import type {
   DialogDescriptionProps,
   DialogTitleProps,
 } from "@kobalte/core/dialog";
+import * as DialogPrimitive from "@kobalte/core/dialog";
 import type { PolymorphicProps } from "@kobalte/core/polymorphic";
 import type { VariantProps } from "class-variance-authority";
 import { cva } from "class-variance-authority";
+import type { Component, ComponentProps, JSX, ValidComponent } from "solid-js";
+import { splitProps } from "solid-js";
 import { cn } from "~/lib/utils";
 
 const Sheet = DialogPrimitive.Root;
@@ -78,6 +78,7 @@ const SheetContent = (props: SheetContentProps & Record<string, unknown>) => {
           style={{ top: "calc(0.75rem + env(safe-area-inset-top, 0px))" }}
         >
           <svg
+            aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="none"
@@ -155,11 +156,11 @@ const SheetDescription = <T extends ValidComponent = "p">(
 
 export {
   Sheet,
-  SheetTrigger,
   SheetClose,
   SheetContent,
-  SheetHeader,
-  SheetFooter,
-  SheetTitle,
   SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
 };
