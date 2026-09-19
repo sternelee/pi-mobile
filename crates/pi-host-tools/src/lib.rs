@@ -8,6 +8,15 @@
 //! 抽出的动机来自 `docs/POCKET-PI-NOTES.md` 的结论：工具实现在「薄 JS + 厚原生」
 //! 路线里是**已经沉没的成本**，应当可复用而不是重写。安全规则（越狱判定）只保留
 //! 这一份 —— 见 [`jail_path_in`]。
+//!
+//! 模块划分（两个**不同的 jail 根**，别混）：
+//!   · 本文件：workspace 根 —— agent 的文件工具（read/write/edit/…）；
+//!   · [`sessions_fs`]：sessions 根 —— pi `JsonlSessionRepo` 背后的 fs 通道
+//!     （带 `/pi-sessions` 虚拟前缀）。
+
+mod sessions_fs;
+
+pub use sessions_fs::{fs_err, fs_op, SESSIONS_VIRTUAL_ROOT};
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
