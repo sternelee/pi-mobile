@@ -11,7 +11,9 @@
 // ⚠️ 实现已移到 `pi-host-tools::http`（跨宿主复用，见 docs/POCKET-PI-NOTES.md）。
 // 本文件只保留同名转发，签名与行为不变；这个实现本来就是纯函数，所以零改动搬走。
 
-pub use pi_host_tools::http::{html_to_text, validate_url};
+// 只转出还有调用方的符号：`validate_url` 被 git.rs 的 remote 校验复用；
+// `html_to_text` 随实现一起走（它的测试也跟着搬了）
+pub use pi_host_tools::http::validate_url;
 
 /// hostcall "http" 入口：发起请求并返回 { status, contentType, body, truncated }。
 pub fn run(payload: &serde_json::Value) -> serde_json::Value {

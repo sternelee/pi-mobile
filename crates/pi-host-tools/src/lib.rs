@@ -18,6 +18,7 @@
 
 pub mod http;
 mod sessions_fs;
+pub mod skills;
 
 pub use sessions_fs::{fs_err, fs_op, SESSIONS_VIRTUAL_ROOT};
 

@@ -10,8 +10,15 @@
 //! 覆盖 github 主流场景，其余 git host 的 git URL 暂不支持。
 //! 供应链纪律：记录 source/version/checksum/version ref（更新 = 重装同 id）。
 
+//! ⚠️ 2026-09-19：**注入 half**（registry 读取 / SKILL.md 解析 / 预算裁剪）已移到
+//! `pi-host-tools::skills`；本文件只保留**安装器 half**（git2 拉取 / zip 解包 / sha256）。
+//! 切分线的理由写在那个模块的头部 —— 与「哪些能复用」是同一个判断。
+
+// 转发给 crate：loopback 的 `skills_config` 仍从 `crate::skills` 取，签名不变
+pub use pi_host_tools::skills::{enabled_for_injection, parse_skill_md, skills_dir};
+use pi_host_tools::skills::{load_registry, sanitize_id, save_registry};
+
 use std::io::Read;
-use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -20,30 +27,14 @@ const MAX_SKILL_BYTES: usize = 256 * 1024;
 /// 下载上限（zipball/原始文件）。
 const MAX_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
 
-fn skills_dir(data_dir: &str) -> PathBuf {
-    Path::new(data_dir).join("skills")
-}
+// ── skills_dir / registry_path / load_registry / save_registry 已移到
+// pi-host-tools::skills（本文件用 `use` 引进） ──
 
-fn registry_path(data_dir: &str) -> PathBuf {
-    skills_dir(data_dir).join("registry.json")
-}
+// ── 已移到 pi-host-tools::skills ──
 
-fn load_registry(data_dir: &str) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(registry_path(data_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-}
+// ── 已移到 pi-host-tools::skills ──
 
-fn save_registry(data_dir: &str, entries: &[serde_json::Value]) -> Result<(), String> {
-    let path = registry_path(data_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-    }
-    let json = serde_json::to_string(entries).map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(path, json).map_err(|e| format!("write registry.json: {e}"))
-}
+// ── 已移到 pi-host-tools::skills ──
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -55,52 +46,9 @@ fn hex(digest: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 解析 SKILL.md：frontmatter（name/description/command）+ 正文。
-/// `command: <slug>` 可选——声明后技能可作为自定义指令 `/slug` 调用
-/// （pi TUI 语义：/commit-it 这类命令式技能）。
-fn parse_skill_md(text: &str) -> Option<(String, String, Option<String>, String)> {
-    let t = text.trim_start();
-    let after_fence = t
-        .strip_prefix("---\n")
-        .or_else(|| t.strip_prefix("---\r\n"))?;
-    let (front, body) = after_fence.split_once("---")?;
-    let mut name = String::new();
-    let mut description = String::new();
-    let mut command: Option<String> = None;
-    for line in front.lines() {
-        if let Some((key, val)) = line.split_once(':') {
-            match key.trim() {
-                "name" => name = val.trim().to_string(),
-                "description" => description = val.trim().to_string(),
-                "command" => {
-                    let slug = sanitize_id(val.trim());
-                    if !slug.is_empty() {
-                        command = Some(slug);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    if name.is_empty() {
-        return None;
-    }
-    Some((name, description, command, body.trim().to_string()))
-}
+// ── parse_skill_md 已移到 pi-host-tools::skills ──
 
-fn sanitize_id(s: &str) -> String {
-    let out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    out.trim_matches('-').to_lowercase()
-}
+// ── sanitize_id 已移到 pi-host-tools::skills ──
 
 /// 从 zip 字节流中提取 SKILL.md 所在目录（取路径最浅的一个，平局取字典序最小）。
 /// 返回 (skill_id_from_dirname, skil_md_text, 其余资源文件 rel→bytes)。
@@ -330,50 +278,8 @@ pub fn remove(data_dir: &str, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// hostcall：启用中的技能全集（注入 system prompt 用）。
-/// 单技能超限截断；总预算 64KB —— 上下文成本计入 M3 用量可视化（D12）。
-pub fn enabled_for_injection(data_dir: &str) -> serde_json::Value {
-    const TOTAL_BUDGET: usize = 64 * 1024;
-    let mut out = Vec::new();
-    let mut total = 0usize;
-    for e in load_registry(data_dir) {
-        if e["enabled"].as_bool() != Some(true) {
-            continue;
-        }
-        let Some(id) = e["id"].as_str() else { continue };
-        let path = skills_dir(data_dir).join(id).join("SKILL.md");
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let Some((name, description, command, body)) = parse_skill_md(&text) else {
-            continue;
-        };
-        let mut clipped = body;
-        if clipped.len() > MAX_SKILL_BYTES {
-            clipped.truncate(MAX_SKILL_BYTES);
-        }
-        if total + clipped.len() > TOTAL_BUDGET {
-            clipped.truncate(TOTAL_BUDGET.saturating_sub(total));
-        }
-        total += clipped.len();
-        let mut item = serde_json::json!({
-            "id": id,
-            "name": name,
-            "description": description,
-            "content": clipped,
-        });
-        // 自定义指令形态（如 /commit-it）：声明了 command 的技能对 bundle
-        // 可命令寻址——展开逻辑在 bundle 侧（/slug args → 按 skill 执行）。
-        if let Some(cmd) = command {
-            item["command"] = serde_json::json!(cmd);
-        }
-        out.push(item);
-        if total >= TOTAL_BUDGET {
-            break;
-        }
-    }
-    serde_json::json!({ "skills": out })
-}
+// ── enabled_for_injection（注入 half）已移到 pi-host-tools::skills；
+// 本文件保留的是**安装器 half**：git2 拉取 / zip 解包 / sha256 / registry 写入 ──
 
 #[cfg(test)]
 mod tests {
@@ -469,61 +375,5 @@ mod tests {
         let (u, r) = resolve_download_url("https://example.com/SKILL.md").unwrap();
         assert_eq!(u, "https://example.com/SKILL.md");
         assert_eq!(r, "direct");
-    }
-
-    #[test]
-    fn command_frontmatter_exposed_to_injection() {
-        let dir = std::env::temp_dir().join(format!("pi-skills-cmd-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let d = dir.to_str().unwrap();
-
-        install_from_bytes(
-            d,
-            "https://x/c.md",
-            "HEAD",
-            b"---\nname: commit-pro\ndescription: Write good commits\ncommand: commit-it\n---\nBody",
-        )
-        .unwrap();
-        // 无 command 字段：不暴露命令
-        install_from_bytes(d, "https://x/d.md", "HEAD", SKILL_MD.as_bytes()).unwrap();
-
-        let injected = enabled_for_injection(d);
-        let skills = injected["skills"].as_array().unwrap();
-        let with_cmd = skills.iter().find(|s| s["id"] == "commit-pro").unwrap();
-        assert_eq!(with_cmd["command"], "commit-it");
-        let without = skills.iter().find(|s| s["id"] == "commit-helper").unwrap();
-        assert!(without.get("command").is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn injection_skips_disabled_and_missing_dirs() {
-        let dir = std::env::temp_dir().join(format!("pi-skills-inj-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let d = dir.to_str().unwrap();
-
-        install_from_bytes(d, "https://x/a.md", "HEAD", SKILL_MD.as_bytes()).unwrap();
-        install_from_bytes(
-            d,
-            "https://x/b.md",
-            "HEAD",
-            b"---\nname: disabled-one\ndescription: off\n---\noff body",
-        )
-        .unwrap();
-        toggle(d, "disabled-one", false).unwrap();
-
-        let injected = enabled_for_injection(d);
-        let skills = injected["skills"].as_array().unwrap();
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0]["id"], "commit-helper");
-        // registry 登记了但目录被手删：静默跳过不 panic
-        std::fs::remove_dir_all(skills_dir(d).join("commit-helper")).unwrap();
-        let injected = enabled_for_injection(d);
-        assert_eq!(injected["skills"].as_array().unwrap().len(), 0);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
