@@ -13,7 +13,10 @@
 //!   · 本文件：workspace 根 —— agent 的文件工具（read/write/edit/…）；
 //!   · [`sessions_fs`]：sessions 根 —— pi `JsonlSessionRepo` 背后的 fs 通道
 //!     （带 `/pi-sessions` 虚拟前缀）。
+//!
+//! 另有 [`http`]：agent 的 `fetch` 工具（SSRF 防护 + HTML 正文抽取），本来就无状态。
 
+pub mod http;
 mod sessions_fs;
 
 pub use sessions_fs::{fs_err, fs_op, SESSIONS_VIRTUAL_ROOT};

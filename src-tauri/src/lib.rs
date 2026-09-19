@@ -455,6 +455,8 @@ pub fn run() {
                 let _ = handle.emit("pi-agent-event", json);
             };
             pi_bun::loopback::set_event_sink(emit.clone());
+            // fetch 工具的日志汇（`pi-host-tools::http` 抽出去后不再直接依赖 logcat）
+            pi_host_tools::http::set_log_sink(pi_bun::logcat);
             approval::set_event_sink(emit.clone());
             ask_user::set_event_sink(emit);
 

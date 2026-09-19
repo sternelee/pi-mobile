@@ -9,3 +9,6 @@ publish = false
 [dependencies]
 regex = "1"
 serde_json = "1"
+# fetch 工具（`http` 模块）。rustls 而非 native-tls：不碰系统信任库 —— 这条在 Android
+# 上被 D16 的 OpenSSL/CA 加载问题反复咬过，Rust 侧统一走 webpki 内置根。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
