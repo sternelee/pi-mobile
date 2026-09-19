@@ -23,6 +23,7 @@ import { AssistantMessageEventStream } from "../../../node_modules/@earendil-wor
 //   callTool(callId,name,argsJson)    执行工具（同步返回；Rust 侧校验执行权）
 //   http(callId, paramsJson)          出网请求（需该 callId 已握手；实现在 Rust）
 //   mcpConfig()                       已配置的 MCP 服务器列表（宿主读文件）
+//   skillsConfig()                    启用中的技能（复用 App 的注入半）
 //   fs(op, payloadJson)               pi 的 12 个 fs 方法（会话持久化用）
 //   goalGet()                         持久目标（goal.json，由宿主持有）
 //   poll() -> json[]                  取走一批宿主事件
@@ -960,15 +961,34 @@ async function connectMcpServers() {
 // skills 这一项在 spike 里留空：它的安装/校验在 App 侧由 Rust 的 skills.rs 管
 // （git2 + zip + checksum），不属于本 spike 的范围 —— 见 README 的差距表。
 let agentsMdCache = null;
+let skillsCache = [];
 
 function composeSystemPrompt(base) {
   let prompt = base.trim();
   prompt += `\n\n# Todo list\n\nManage a task list to track multi-step progress (the \`todo\` tool):\n${TODO_PROMPT_GUIDELINES.map((g) => `- ${g}`).join("\n")}`;
+  // 段序与 App 的 applySystemPrompt 一致：todo → skills → AGENTS.md → goal
+  if (skillsCache.length) {
+    prompt += `\n\n# Skills\n\n${skillsCache
+      .map((skill) => `## ${skill.name} — ${skill.description}\n\n${skill.content}`)
+      .join("\n\n")}`;
+  }
   if (agentsMdCache) prompt += `\n\n# Project instructions (AGENTS.md)\n\n${agentsMdCache}`;
   if (currentGoal) {
     prompt += `\n\n# Current goal\n\nWork persistently toward this objective across turns until the user clears it: ${currentGoal}`;
   }
   return prompt;
+}
+
+/// 启用中的技能 → systemPrompt（注入逻辑在 Rust：复用 App 的 skills::enabled_for_injection，
+/// 所以「哪些技能被注入 / 截断预算」两边完全一致）。
+async function refreshSkills() {
+  try {
+    skillsCache = JSON.parse(host.skillsConfig()).skills ?? [];
+  } catch {
+    skillsCache = [];
+  }
+  if (agent) agent.state.systemPrompt = composeSystemPrompt(baseSystemPrompt);
+  outbox.push({ type: "skills_applied", count: skillsCache.length });
 }
 
 /// 启动后异步取 AGENTS.md 并重装 systemPrompt（与 App 的 refreshAgentsMd 同形）。
@@ -1276,6 +1296,7 @@ function boot(configJson) {
   // **都完成**才发 context_ready —— 否则第一轮 prompt 可能少看到 MCP 工具。
   void Promise.all([
     refreshAgentsMd().catch(() => {}),
+    refreshSkills().catch(() => {}),
     connectMcpServers().catch(() => {}),
   ]).finally(() => outbox.push({ type: "context_ready" }));
   // 恢复由宿主触发（`--resume` 时才调 restore），因为「哪个会话」是宿主的选择。

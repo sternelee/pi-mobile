@@ -112,12 +112,41 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 | `preview`（D15） | ❌ 不可移植 | 要搬 `preview.rs`（axum 静态服务 + 端口管理），且它的消费者是 WebView UI |
 | git 工具（D16） | ❌ 不可移植 | 要 git2 + vendored libgit2/openssl（就是 D16 在 Android 上卡住的那套） |
 | **MCP**（streamable-http） | ✅ 已对齐 | 客户端同构移植；出网改走 `host.http`（见下「MCP 的两处结构性差异」） |
-| skills 注入 | ❌ 未做 | 安装/校验在 `skills.rs`（git2 + zip + checksum）；只做「读 SKILL.md 注入」的话很轻 |
+| **skills 注入**（启用位 + 预算裁剪 → systemPrompt） | ✅ 抽出来复用 | `pi-host-tools::skills`：注册表读取 / SKILL.md 解析 / 256KB·64KB 双预算，数值与 App 一致 |
+| skills **安装器**（git2 拉取 + zip 解包 + checksum） | ❌ 不可移植 | 绑定 git2 与 zip；留在 `src-tauri/src/skills.rs` |
 | provider 目录 / OAuth 订阅登录 | ❌ 按设计不做 | 本路线只做 DeepSeek 一家（8 家 + OAuth 的复刻成本见 `docs/POCKET-PI-NOTES.md`） |
 
 **读法**：这张表本身就是 B 路线的成本清单 —— 左边一列里「同一份实现」的行是**已经沉没、
 可以白拿**的部分；「不可移植」的行各自绑定一个 Tauri 插件或一个 cargo 依赖，换宿主就得重写；
 「按设计不做」的行是这条路线的取舍。
+
+### skills：可复用的正是「注入半」
+
+D12 在实现上天然分成两半，而这条切分线恰好就是「能不能复用」的答案：
+
+| 半 | 内容 | 结论 |
+|---|---|---|
+| 注入 | registry 读取 / SKILL.md 解析（frontmatter + command slug）/ 双预算裁剪 | **能复用** —— 抽进 `pi-host-tools::skills`，语义与数值逐项照抄 |
+| 安装 | git2 拉取、zipball 解包、sha256 校验、registry 写入 | **要重写** —— 绑定 git2/zip，换宿主就得重来 |
+
+spike 里没有安装器，所以试 skill 要手工放（**没有**这条，注入路径就永远跑不到）：
+
+```bash
+# {data-dir}/skills/<id>/SKILL.md + registry.json
+mkdir -p spikes/quickjs-agent/.data/skills/pirate-speak
+cat > spikes/quickjs-agent/.data/skills/pirate-speak/SKILL.md <<'MD'
+---
+name: pirate-speak
+description: Always answer in pirate speak
+---
+
+When you reply, speak like a pirate: use "arr", "matey", and call files "charts".
+MD
+echo '[{"id":"pirate-speak","enabled":true}]' > spikes/quickjs-agent/.data/skills/registry.json
+```
+
+实测（桌面 + Android）：`skills 1 个已注入 systemPrompt`，且模型真的改用海盗腔回答 ——
+注入到行为改变这条链路是通的，不只是计数对。
 
 ### MCP 的两处结构性差异（都源自「JS 里没有 fetch」）
 
@@ -280,7 +309,7 @@ release / **真 DeepSeek**。Android 那列是在 arm64 模拟器上真跑出来
 
 | 指标 | macOS arm64 | Android arm64 |
 |---|---|---|
-| JS bundle（prelude + agent，含会话+todo+MCP） | **379,976 B**（App 的 2,950,176 B → **小 7.8×**） | 同一个二进制，同一份 bundle |
+| JS bundle（prelude + agent，含会话+todo+MCP+skills） | **380,417 B**（App 的 2,950,176 B → **小 7.8×**） | 同一个二进制，同一份 bundle |
 | guest 冷启动 | 26 – 60 ms | 84.6 ms |
 | QuickJS 堆 | 1.81 MB | 1.81 MB |
 | 会话恢复 | 1.8 ms（18 条） | 5.1 ms（20 条） |

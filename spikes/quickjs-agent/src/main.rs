@@ -246,6 +246,7 @@ fn run() -> Result<(), String> {
             goal_path: goal_path.clone(),
             mcp_config_path: mcp_config_path.clone(),
             allowed_origins: allowed_origins.clone(),
+            data_dir: data_dir.clone(),
         },
         guest::GuestOptions {
             model_label: args.model.clone(),
@@ -286,6 +287,10 @@ fn run() -> Result<(), String> {
                     Some("session_error") => {
                         println!("  [session] {}", event["error"].as_str().unwrap_or("?"))
                     }
+                    Some("skills_applied") => println!(
+                        "skills              {} 个已注入 systemPrompt",
+                        event["count"].as_u64().unwrap_or(0)
+                    ),
                     Some("mcp_connecting") => {
                         println!("  [mcp] 连接 {} …", event["server"].as_str().unwrap_or("?"))
                     }

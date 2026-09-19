@@ -2,6 +2,38 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第六轮）— ✅ skills 注入对齐（复用「注入半」）；bundle 对齐基本收官
+
+D12 的 skills 在实现上天然分两半，而这条切分线恰好就是「能不能复用」的答案：
+
+| 半 | 内容 | 结论 |
+|---|---|---|
+| **注入** | registry 读取 / SKILL.md 解析（frontmatter + command slug）/ 双预算裁剪 | **能复用** → 抽进 `pi-host-tools::skills`，语义与数值逐项照抄（单技能 256KB、总量 64KB） |
+| 安装 | git2 拉取 / zipball 解包 / sha256 / registry 写入 | **要重写**（绑定 git2+zip），留在 `src-tauri/src/skills.rs` |
+
+实测（桌面 + Android）：`skills 1 个已注入 systemPrompt`，且模型**真的改用海盗腔回答**
+（"Arr, this chart holds four files…"）—— 注入到行为改变这条链路是通的，不只是计数对。
+spike 里没有安装器，所以 README 里给了手工放 fixture 的配方（不放的话这条路径永远跑不到）。
+
+### 对齐进度（相对 bun 版的完整功能面）
+
+已对齐：文件工具 / fetch / todo / subagent / ask_user / MCP（双 transport）/ 审批 /
+会话持久化 / AGENTS.md / skills 注入 / goal 注入 / 自动压缩 / 控制面。
+不可移植（各自绑定 Tauri 插件或 cargo 依赖）：nativeTools / run_js / preview / git / skills 安装器。
+按设计不做：provider 目录与 OAuth（只做 DeepSeek）。
+仍缺的「可做未做」：goal autoContinue、`/plan`·`/btw` 命令面、会话切换（open/new/delete）。
+
+### 顺带
+
+- 工具面 13；bundle 380,417 B（App 2,950,176 B → 小 **7.8×**）
+- `pi-host-tools` 13 个测试（skills 注入半 4 个：command frontmatter / 启用位与缺失目录 /
+  parse_skill_md / sanitize_id），crate clippy/fmt 干净
+- src-tauri 39 测试（2 个注入测试随实现搬走），fmt 14（基线不变）、clippy **26**（比
+  改动前少 1：http_tool 那个 `unused_mut` 随实现进了 crate 并被修掉）
+- ⚠️ 又一次踩到 include_str 那个坑：改了 JS 但命令链被前面的补丁失败短路，没跑
+  build.sh，于是「跑的是旧 JS」——看到的现象是 skills 完全没注入。README 里那条
+  操作纪律值得再看一眼
+
 ## 2026-09-19（第五轮）— ✅ MCP 接入（streamable-http 双 transport 真跑通）+ 一个 SSRF 边界问题
 
 对齐表里最后一块「未做但可做」的：MCP。客户端与 bun 版同构移植，出网改走 `host.http`。

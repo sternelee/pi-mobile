@@ -202,6 +202,8 @@ pub struct HostDeps {
     /// MCP 服务器的授权源（`scheme://host:port`）。**由宿主从自己的配置读出来**，
     /// 不是 payload 字段 —— 否则 JS 自己给自己授权，SSRF 防护等于没有。
     pub allowed_origins: Vec<String>,
+    /// skills 注册表所在的数据目录（注入半要读它）。
+    pub data_dir: std::path::PathBuf,
 }
 
 /// guest 启动配置（与宿主依赖分开：这些是要交给 JS 的字符串/数值）。
@@ -363,6 +365,7 @@ fn mount_host(ctx: &Ctx<'_>, deps: &HostDeps) -> Result<(), String> {
     let goal_path = deps.goal_path.clone();
     let mcp_config_path = deps.mcp_config_path.clone();
     let allowed_origins = deps.allowed_origins.clone();
+    let data_dir_for_skills = deps.data_dir.clone();
     let host = Object::new(ctx.clone()).map_err(|e| format!("host object: {e}"))?;
 
     // log(line)
@@ -506,6 +509,20 @@ fn mount_host(ctx: &Ctx<'_>, deps: &HostDeps) -> Result<(), String> {
             .map_err(|e| format!("host.http: {e}"))?,
         )
         .map_err(|e| format!("host.http: {e}"))?;
+    }
+
+    // skillsConfig() -> 启用中的技能（复用 App 的注入半，见 pi-host-tools::skills）
+    {
+        let data_dir = data_dir_for_skills.clone();
+        host.set(
+            "skillsConfig",
+            Function::new(ctx.clone(), move || -> String {
+                pi_host_tools::skills::enabled_for_injection(&data_dir.to_string_lossy())
+                    .to_string()
+            })
+            .map_err(|e| format!("host.skillsConfig: {e}"))?,
+        )
+        .map_err(|e| format!("host.skillsConfig: {e}"))?;
     }
 
     // mcpConfig() -> 已配置的 MCP 服务器（宿主读文件，与 App 的 mcp_config 同分工）
