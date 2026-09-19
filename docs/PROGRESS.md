@@ -2,6 +2,55 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第四轮）— ✅ spike 功能点对齐 bun 版（11 个工具 / 4 个已对齐的插件 / 压缩）
+
+把 spike 的能力面往 `pi-bundle/agent-main.js` 靠。逐项表见 spike README（三类：已对齐 /
+不可移植及原因 / 按设计不做）。
+
+### 已对齐（真 DeepSeek + Android 双验）
+
+| 能力 | 落法 |
+|---|---|
+| **fetch** | 抽 `src-tauri/http_tool.rs` → `pi-host-tools::http`（纯函数零改动，SSRF 防护 + HTML→文本一起搬来）。**又一层白拿的复用** |
+| **AGENTS.md 注入** | 异步读（要过宿主握手）→ 重装 systemPrompt → `context_ready` 门控第一轮 prompt |
+| **auto-compaction** | 同策略（窗口 60% + 保留 8 条）；抽 `textOfContent` 归一化；水位在 `--resume` 时从历史取回 |
+| **subagent** | 内置 delegate/researcher/reviewer + `workspace/agents/*.md` 定义；**子代理的工具调用同样过宿主审批**（实测事件里逐条 `[approval] ls/read`） |
+| **ask_user** | 与本机 `ask_user.rs` 同契约，决策源换终端；与审批共用「id 出去、事件回来」骨架 |
+| 控制面 | `__spike.status/toolNames/history` 对齐 `__pi_status/__pi_tool_names/__pi_history` |
+
+工具面从 7 → **11**：`read write edit ls grep mkdir rm fetch todo subagent ask_user`。
+bundle 从 373KB → **375KB**（App 仍 2,950KB，小 7.9×）。
+
+实测（真 DeepSeek）：subagent 委托 researcher 跑完并回报；fetch 拿到 example.com 的
+HTTP 200；SSRF 防护拒掉 `127.0.0.1`（agent 还正确解释了为什么读不到）；ask_user 在
+`--yes` 下自动选首项、在交互模式读到 `2` 后去读了 `src/app.js`；压缩在
+`--compact-at 2000` 下真的触发了（摘要 29 条、保留 8 条，之后水位降到阈值以下正确地不再触发）。
+
+Android（arm64 模拟器）同样跑通：11 个工具、subagent、**fetch 真出网拿到 HTTP 200**、
+会话恢复 22 条 11.2ms、AGENTS.md 注入、goal 恢复。
+
+### ⚠️ 对齐时发现 **bun 版的一个潜 bug**
+
+`auto-compaction` 拼 transcript 时 `(m.content ?? []).filter(...)` —— **user 消息的
+content 是字符串**，没有 `.filter` → `TypeError: not a function`。本 spike 真跑压缩时撞上，
+加 `textOfContent` 归一化才通。bun 版同一段一样写，但阈值是 100 万 token 的 60%（≈60 万
+token）**实际跑不到**，所以一直没暴露。**未改 bun 版**（那是设备验证过的在跑代码，改它该由
+你定），仅记录。
+
+### 不可移植项（各自绑定一个 Tauri 插件或 cargo 依赖）
+
+nativeTools（Tauri 插件族）/ run_js（D14 隔离 runner）/ preview（axum + WebView 消费者）/
+git（git2 + vendored openssl，正是 D16 卡住的那套）/ MCP（客户端待搬，宿主侧已够）/
+skills 安装（git2 + zip + checksum）/ provider 目录与 OAuth（按设计只做 DeepSeek）。
+这张表的价值同上：换宿主时，这些行每一项都要重写。
+
+### 顺带
+
+`pi-host-tools` 现在有 7 个测试（新增 HTTP 的 SSRF / HTML / 体积上限 3 个），
+src-tauri 从 44 → 41（那 3 个测试随实现搬走了），fmt/clippy 基线不变（14 / 27）。
+另修一处抽出的依赖：`http` 模块原来直接调 Tauri 的 `logcat`，改成可插拔日志汇
+（宿主设 logcat，spike 默认 stderr）。
+
 ## 2026-09-19（第三轮）— ✅ spike 在 arm64 Android 上真机跑通（含会话恢复与审批）
 
 用户去跑真机前，先把能自己验的验到位：spike 交叉编译到 Android，并在 **arm64 模拟器**

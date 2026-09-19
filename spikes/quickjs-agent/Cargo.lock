@@ -615,6 +615,7 @@ name = "pi-host-tools"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "reqwest",
  "serde_json",
 ]
 

@@ -102,7 +102,7 @@ impl Sink {
 
     /// 取走一批事件，并把同一请求的连续增量合并成一条
     /// （等价于 pocket-pi 的 `coalesce_host_events`，也等价于 PLAN D5 的 16ms 合并）。
-    fn drain(&self) -> Vec<Value> {
+    pub fn drain(&self) -> Vec<Value> {
         let taken: Vec<Value> = std::mem::take(&mut *self.queue.lock().unwrap());
         let mut batch: Vec<Value> = Vec::new();
         let mut progress: Vec<(i64, usize)> = Vec::new(); // (id, index in batch)
@@ -166,11 +166,11 @@ pub fn engine_selftest() -> Result<String, String> {
             let eval_ms = started.elapsed().as_secs_f64() * 1000.0;
             let probe: String = ctx
                 .eval(
-                    "['boot','prompt','tick','drain','restore','sessionInfo']\
+                    "['boot','prompt','tick','drain','restore','sessionInfo','status','toolNames','history']\
                  .map((k) => typeof __spike[k]).join(',')",
                 )
                 .map_err(|e| describe(&ctx, e, "probe"))?;
-            if probe != "function,function,function,function,function,function" {
+            if probe != "function,function,function,function,function,function,function,function,function" {
                 return Err(format!("__spike 导出不全: {probe}"));
             }
             Ok(eval_ms)
@@ -180,7 +180,7 @@ pub fn engine_selftest() -> Result<String, String> {
             // RefCell 已被借出，里面再借会 panic（RefCell already borrowed，实测）。
             let usage = runtime.memory_usage();
             format!(
-                "QuickJS ok；bundle {} KB eval {:.0} ms；堆 {:.2} MB；__spike 6 个导出齐全",
+                "QuickJS ok；bundle {} KB eval {:.0} ms；堆 {:.2} MB；__spike 9 个导出齐全",
                 bundle.len() / 1024,
                 eval_ms,
                 usage.memory_used_size as f64 / 1_048_576.0
@@ -202,12 +202,14 @@ impl Guest {
         tools: HostTools,
         sink: Arc<Sink>,
         approvals: Arc<Approvals>,
+        asks: Arc<crate::ask_user::AskUser>,
         sessions_root: std::path::PathBuf,
         goal_path: std::path::PathBuf,
         workspace_label: &str,
         model_label: &str,
         system_prompt: &str,
         thinking_level: &str,
+        compact_at: u64,
     ) -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|e| format!("quickjs runtime: {e}"))?;
         // 显式给个上限：QuickJS 默认堆很小（512KB 级），bundle 解析会直接 OOM。
@@ -224,6 +226,7 @@ impl Guest {
                 sink.clone(),
                 tools.clone(),
                 Arc::clone(&approvals),
+                asks,
                 sessions_root,
                 goal_path,
             )?;
@@ -242,6 +245,7 @@ impl Guest {
                 "systemPrompt": system_prompt,
                 "workspace": workspace_label,
                 "goal": goal,
+                "compactAt": compact_at,
                 "tools": tool_definitions(),
             })
             .to_string();
@@ -312,6 +316,21 @@ impl Guest {
         })
     }
 
+    /// 宿主控制面（对齐 App 的 __pi_status / __pi_tool_names）。
+    pub fn status(&self) -> Result<Value, String> {
+        self.context.with(|ctx| {
+            let raw: String = call(&ctx, "status", ()).map_err(|e| format!("status: {e}"))?;
+            serde_json::from_str(&raw).map_err(|e| format!("status json: {e}"))
+        })
+    }
+
+    pub fn tool_names(&self) -> Result<Vec<String>, String> {
+        self.context.with(|ctx| {
+            let raw: String = call(&ctx, "toolNames", ()).map_err(|e| format!("toolNames: {e}"))?;
+            serde_json::from_str(&raw).map_err(|e| format!("toolNames json: {e}"))
+        })
+    }
+
     /// guest 堆用量（QuickJS 自己记账，不含 Rust/宿主内存）。
     /// 返回 (JS 侧在用字节, malloc 总量字节)。
     pub fn memory_usage(&self) -> (usize, usize) {
@@ -320,6 +339,7 @@ impl Guest {
     }
 
     /// 工具定义也要让 spike 的宿主能自己校验（与 JS 侧同源，避免两边漂移）。
+    #[allow(dead_code)]
     pub fn tool_count(&self) -> usize {
         tool_definitions().len()
     }
@@ -335,6 +355,7 @@ fn mount_host(
     sink: Arc<Sink>,
     tools: HostTools,
     approvals: Arc<Approvals>,
+    asks: Arc<crate::ask_user::AskUser>,
     sessions_root: std::path::PathBuf,
     goal_path: std::path::PathBuf,
 ) -> Result<(), String> {
@@ -460,6 +481,17 @@ fn mount_host(
         .map_err(|e| format!("host.ensureApproval: {e}"))?;
     }
 
+    // http(paramsJson) -> fetch 工具（SSRF 防护 + HTML→文本，实现在 pi-host-tools::http）
+    host.set(
+        "http",
+        Function::new(ctx.clone(), move |params: String| -> String {
+            let parsed: Value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
+            pi_host_tools::http::run(&parsed).to_string()
+        })
+        .map_err(|e| format!("host.http: {e}"))?,
+    )
+    .map_err(|e| format!("host.http: {e}"))?;
+
     // fs(op, payloadJson) -> pi 的 Result 形状（会话持久化用，jail 到 sessions 根）
     {
         let sessions_root = sessions_root.clone();
@@ -503,6 +535,20 @@ fn mount_host(
             .map_err(|e| format!("host.goalGet: {e}"))?,
         )
         .map_err(|e| format!("host.goalGet: {e}"))?;
+    }
+
+    // askUser(payloadJson) -> id（异步：答案经 poll 回来，与审批同一模式）
+    {
+        let asks = Arc::clone(&asks);
+        host.set(
+            "askUser",
+            Function::new(ctx.clone(), move |payload: String| -> i64 {
+                let parsed: Value = serde_json::from_str(&payload).unwrap_or_else(|_| json!({}));
+                asks.register(&parsed)
+            })
+            .map_err(|e| format!("host.askUser: {e}"))?,
+        )
+        .map_err(|e| format!("host.askUser: {e}"))?;
     }
 
     // poll() -> json[]

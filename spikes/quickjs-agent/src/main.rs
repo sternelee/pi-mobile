@@ -11,6 +11,7 @@
 //! 输出含三项指标（bundle 体积 / 冷启动 / 首 token 与整轮延迟），见 README。
 
 mod approval;
+mod ask_user;
 mod deepseek;
 mod guest;
 mod netcheck;
@@ -37,6 +38,7 @@ struct Args {
     resume: bool,
     goal: Option<String>,
     net_check: bool,
+    compact_at: u64,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -51,6 +53,7 @@ fn parse_args() -> Result<Args, String> {
     let mut resume = false;
     let mut goal: Option<String> = None;
     let mut net_check = false;
+    let mut compact_at = 0u64;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -67,6 +70,13 @@ fn parse_args() -> Result<Args, String> {
             "--quiet" => quiet = true,
             "--resume" => resume = true,
             "--net-check" => net_check = true,
+            "--compact-at" => {
+                compact_at = argv
+                    .next()
+                    .ok_or("--compact-at needs a value (tokens)")?
+                    .parse()
+                    .map_err(|e| format!("--compact-at: {e}"))?;
+            }
             "--goal" => goal = Some(argv.next().ok_or("--goal needs a value")?),
             // 审批的三种决策源：交互（默认）/ 全放行 / 全拒绝。后两者也让审批
             // 这条链路可以在无人值守下被验证（仍然走完整握手）。
@@ -98,6 +108,7 @@ fn parse_args() -> Result<Args, String> {
         resume,
         goal,
         net_check,
+        compact_at,
     })
 }
 
@@ -111,6 +122,16 @@ fn seed_workspace(root: &std::path::Path) -> Result<(), String> {
             "# Spike notes\n\nThis workspace belongs to spikes/quickjs-agent.\n",
         )
         .map_err(|e| format!("seed notes: {e}"))?;
+    }
+    // AGENTS.md 一并播种：它是「项目指令注入 systemPrompt」这条链路的被测对象，
+    // 不播种的话这条路径永远跑不到（与 App 的 refreshAgentsMd 同源）。
+    let agents = root.join("AGENTS.md");
+    if !agents.exists() {
+        std::fs::write(
+            &agents,
+            "# Project instructions\n\nThis workspace belongs to the quickjs-agent spike.\nKeep every file under 40 lines and prefer editing over rewriting.\n",
+        )
+        .map_err(|e| format!("seed AGENTS.md: {e}"))?;
     }
     let app = root.join("src/app.js");
     if !app.exists() {
@@ -142,6 +163,7 @@ fn run() -> Result<(), String> {
     seed_workspace(&args.workspace)?;
     let tools = HostTools::new(&args.workspace, &data_dir);
     let sink = std::sync::Arc::new(Sink::new(cfg));
+    let asks = std::sync::Arc::new(ask_user::AskUser::new(args.decision, sink.clone()));
     let approvals = std::sync::Arc::new(Approvals::new(
         &args.workspace,
         &data_dir,
@@ -192,6 +214,7 @@ fn run() -> Result<(), String> {
         tools,
         sink.clone(),
         approvals.clone(),
+        asks,
         sessions_dir.clone(),
         goal_path.clone(),
         &workspace_label.to_string_lossy(),
@@ -199,6 +222,7 @@ fn run() -> Result<(), String> {
         "You are a coding agent running inside a QuickJS guest on a mobile device. \
          You have file tools; use them instead of guessing. Answer briefly.",
         &args.thinking,
+        args.compact_at,
     )?;
     let boot_ms = boot_start.elapsed();
 
@@ -209,13 +233,45 @@ fn run() -> Result<(), String> {
         "quickjs heap        {:>8} bytes used / {} malloc",
         heap_used, heap_malloc
     );
+    // 工具清单从 guest 取（对齐 App 的 __pi_tool_names）：Rust 给定义、JS 补纯 JS 工具
+    let tools = guest.tool_names()?;
     println!(
-        "tools exposed       {:>8}  (Rust 文件工具 + JS 的 todo)",
-        guest.tool_count() + 1
+        "tools exposed       {:>8}  {}",
+        tools.len(),
+        tools.join(" ")
     );
     if let Ok(info) = guest.session_info() {
         if let Some(goal) = info["goal"].as_str() {
             println!("goal                {}", goal);
+        }
+    }
+
+    // ── 等 context_ready：AGENTS.md 是异步读的（要过宿主握手），别抢在它前面 prompt
+    {
+        let mut ready = false;
+        for _ in 0..500 {
+            for event in guest.tick()? {
+                match event["type"].as_str() {
+                    Some("context_ready") => ready = true,
+                    Some("agents_md_loaded") => {
+                        println!(
+                            "AGENTS.md           {} bytes",
+                            event["bytes"].as_u64().unwrap_or(0)
+                        )
+                    }
+                    Some("session_error") => {
+                        println!("  [session] {}", event["error"].as_str().unwrap_or("?"))
+                    }
+                    _ => {}
+                }
+            }
+            if ready {
+                break;
+            }
+            std::thread::sleep(TICK_INTERVAL);
+        }
+        if !ready {
+            return Err("context_ready 未到达（systemPrompt 可能没装完）".into());
         }
     }
 
@@ -255,6 +311,15 @@ fn run() -> Result<(), String> {
         if !restored {
             return Err("session restore did not complete (no session yet?)".into());
         }
+    }
+
+    // prompt 前的水位 —— 压缩阈值就是拿它判的，所以它必须可见
+    if let Ok(status) = guest.status() {
+        println!(
+            "context before      {} tokens / {} 阈值",
+            status["contextTokens"].as_u64().unwrap_or(0),
+            status["compactThreshold"].as_u64().unwrap_or(0)
+        );
     }
 
     // ── 一整轮：prompt → 工具 → 收尾 ────────────────────────────────────
@@ -312,6 +377,47 @@ fn run() -> Result<(), String> {
                         event["tier"].as_str().unwrap_or("?"),
                         event["summary"].as_str().unwrap_or("")
                     );
+                }
+                Some("compaction_check") => println!(
+                    "  [compact] check: 水位 {} / 阈值 {} / {} 条消息",
+                    event["tokens"].as_u64().unwrap_or(0),
+                    event["threshold"].as_u64().unwrap_or(0),
+                    event["messages"].as_u64().unwrap_or(0)
+                ),
+                Some("compaction_step") => println!(
+                    "  [compact] step: {}",
+                    event["step"].as_str().unwrap_or("?")
+                ),
+                Some("compaction_start") => println!(
+                    "  [compact] 开始：上下文 {} tokens / {} 条消息",
+                    event["tokens"].as_u64().unwrap_or(0),
+                    event["messages"].as_u64().unwrap_or(0)
+                ),
+                Some("compaction_done") => println!(
+                    "  [compact] 完成：摘要 {} 条，保留最近 {} 条",
+                    event["summarized"].as_u64().unwrap_or(0),
+                    event["kept"].as_u64().unwrap_or(0)
+                ),
+                Some("subagent_start") => println!(
+                    "  [subagent] {} ← {}",
+                    event["name"].as_str().unwrap_or("?"),
+                    event["task"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(64)
+                        .collect::<String>()
+                ),
+                Some("ask_user") => println!(
+                    "  [ask_user] {}  ({} 个选项)",
+                    event["question"].as_str().unwrap_or("?"),
+                    event["options"].as_array().map(|a| a.len()).unwrap_or(0)
+                ),
+                Some("subagent_end") => {
+                    println!(
+                        "  [subagent] {} 完成",
+                        event["name"].as_str().unwrap_or("?")
+                    )
                 }
                 Some("approval_resolved") => {
                     println!(
@@ -419,6 +525,12 @@ fn run() -> Result<(), String> {
     println!(
         "todos tracked       {}",
         info["todos"].as_u64().unwrap_or(0)
+    );
+    let status = guest.status()?;
+    println!(
+        "context tokens      {} / {} (compact 阈值)",
+        status["contextTokens"].as_u64().unwrap_or(0),
+        status["compactThreshold"].as_u64().unwrap_or(0)
     );
     println!("session files       {}", sessions_dir.display());
 

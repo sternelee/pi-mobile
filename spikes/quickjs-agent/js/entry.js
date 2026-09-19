@@ -21,6 +21,7 @@ import { AssistantMessageEventStream } from "../../../node_modules/@earendil-wor
 //   startModel(requestJson) -> id     发起一次模型请求（异步，结果经 poll 回来）
 //   ensureApproval(callId,name,args)  审批握手（同步返回 id，决策经 poll 回来）
 //   callTool(callId,name,argsJson)    执行工具（同步返回；Rust 侧校验执行权）
+//   http(paramsJson)                  fetch 工具（SSRF 防护 + 正文抽取，实现在 Rust）
 //   fs(op, payloadJson)               pi 的 12 个 fs 方法（会话持久化用）
 //   goalGet()                         持久目标（goal.json，由宿主持有）
 //   poll() -> json[]                  取走一批宿主事件
@@ -61,6 +62,7 @@ function modelFor(config) {
 // 只是「问 → 等 → 再执行」。执行权记在 callId 上，所以绕过这段代码也没用 ——
 // host.callTool 会拒绝没有握手的调用。
 const pendingApprovals = new Map();
+const pendingAsks = new Map();
 
 function requestApproval(toolCallId, name, args) {
   return new Promise((resolve, reject) => {
@@ -73,6 +75,87 @@ function requestApproval(toolCallId, name, args) {
     }
   });
 }
+
+// 内部读取（AGENTS.md、agents/*.md）也要走**同一套握手**：宿主侧的边界不能因为
+// 「这是框架自己在读文件」就绕开。callId 用内部前缀，与 agent 的 callId 不冲突。
+let internalCallSeq = 0;
+
+async function internalRead(path) {
+  const callId = `host-internal-${++internalCallSeq}`;
+  const args = { path };
+  await requestApproval(callId, "read", args);
+  const result = JSON.parse(host.callTool(callId, "read", JSON.stringify(args)));
+  if (result.isError) throw new Error(String(result.text || "read failed"));
+  return String(result.text || "");
+}
+
+/// fetch 工具：网络在 Rust 侧（SSRF 防护、30s 超时、256KB 上限、HTML→文本）。
+/// 只读，tier = auto（与 App 的 fetchTool 同档）。
+const fetchTool = {
+  name: "fetch",
+  label: "Fetch",
+  description:
+    "Fetch an http/https URL from the open web and return its body as text (HTML pages are converted to readable text, 30s timeout, large bodies truncated). Read-only — no approval needed. Args: {url, method?, headers?, body?}",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string" },
+      method: { type: "string" },
+      headers: { type: "object" },
+      body: { type: "string" },
+    },
+    required: ["url"],
+    additionalProperties: false,
+  },
+  executionMode: "sequential",
+  execute: async (toolCallId, params) => {
+    const callId = `fetch-${toolCallId}`;
+    await requestApproval(callId, "fetch", params);
+    const r = JSON.parse(host.http(JSON.stringify(params || {})));
+    if (r.error) return { content: [{ type: "text", text: `Fetch failed: ${r.error}` }], details: {} };
+    const meta = [`status ${r.status}`, r.contentType || "no content-type"];
+    if (r.truncated) meta.push("truncated at 256KB");
+    return { content: [{ type: "text", text: `[${meta.join(" · ")}]\n\n${r.body ?? ""}` }], details: {} };
+  },
+};
+
+/// agent 反问用户（pi-ask-user 原生化）：与审批同一套「id 出去、事件回来」。
+/// 无人值守时宿主按 --yes/--deny 自动作答，所以这条路径在自动化里也能验。
+const askUserTool = {
+  name: "ask_user",
+  label: "Ask User",
+  description:
+    "Ask the user a question with optional multiple-choice answers. Use when the user's intent is ambiguous, when a decision requires explicit input, or when multiple valid options exist. Ask exactly ONE focused question per call; before calling, gather context with tools and pass a short summary via context. The user must answer before the run continues.",
+  parameters: {
+    type: "object",
+    properties: {
+      question: { type: "string", description: "The question to ask the user" },
+      context: { type: "string", description: "Relevant context to show before the question" },
+      options: { type: "array", items: { type: "string" }, description: "Optional multiple-choice answers" },
+      allowMultiple: { type: "boolean" },
+      allowFreeform: { type: "boolean" },
+      allowComment: { type: "boolean" },
+    },
+    required: ["question"],
+    additionalProperties: false,
+  },
+  executionMode: "sequential",
+  execute: async (_toolCallId, params) => {
+    const id = host.askUser(
+      JSON.stringify({
+        question: params?.question ?? "",
+        context: params?.context ?? "",
+        options: params?.options ?? [],
+        allowFreeform: params?.allowFreeform ?? true,
+      }),
+    );
+    const reply = await new Promise((resolve) => pendingAsks.set(id, { resolve }));
+    if (reply.cancelled) {
+      return { content: [{ type: "text", text: "User cancelled the question (no answer)." }], details: {} };
+    }
+    return { content: [{ type: "text", text: String(reply.answer ?? "") }], details: {} };
+  },
+};
 
 function toolsFor(definitions) {
   return definitions.map((definition) => ({
@@ -251,6 +334,16 @@ async function restoreLatestSession() {
     .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     .map((e) => e.message);
   if (restoredMessages.length && agent) agent.state.messages = restoredMessages;
+  // 从恢复的历史里取回上下文水位 —— 不取的话 `--resume` 之后的**第一轮**永远
+  // 够不到压缩阈值（水位只在 assistant message_end 时才写，而 CLI 一进程一轮）。
+  // 语义等同 pi 的 getLastAssistantUsage：以最后一条 assistant 的 usage 为准。
+  // ⚠️ 这一条比 App 那份更严：那边 resume 后的第一轮同样处于盲区。
+  for (const message of [...restoredMessages].reverse()) {
+    if (message.role !== "assistant" || !message.usage) continue;
+    lastContextTokens =
+      message.usage.totalTokens ?? (message.usage.input ?? 0) + (message.usage.output ?? 0);
+    break;
+  }
   replayTodos(restoredMessages);
   outbox.push({
     type: "session_restore",
@@ -457,14 +550,245 @@ const todoTool = {
   execute: async (_toolCallId, args) => todoExecute(args?.action, args || {}),
 };
 
-// ── system prompt 组装：基础 + 持久目标 + todo 引导 ────────────────────
+// ── subagents（pi-subagents 移动原生化）────────────────────────────────
+//
+// 移植自 pi-bundle/agent-main.js：内置 delegate/researcher/reviewer，外加
+// workspace/agents/*.md 自定义定义（上游同格式：markdown + frontmatter）。
+// 子代理是**独立上下文 + 受限工具集**的嵌套 Agent，跑完把最终回复作为工具结果返回。
+// 关键性质（与本 spike 的桥天然契合）：子代理的工具调用也走 host.callTool，
+// 因此**同样受宿主审批分档管辖** —— 子代理写文件一样会弹审批。
+const BUILTIN_AGENTS = {
+  delegate: {
+    name: "delegate",
+    description: "General-purpose helper subagent; inherits the parent tool set (minus delegation)",
+    systemPromptMode: "append",
+    tools: ["read", "write", "edit", "ls", "grep"],
+    thinking: "low",
+    body: "You are a delegated agent. Execute the assigned task using the provided tools. Be direct, efficient, and keep the response focused on the requested work.",
+  },
+  researcher: {
+    name: "researcher",
+    description: "Read-only research subagent; investigates and reports findings with evidence",
+    systemPromptMode: "replace",
+    tools: ["read", "ls", "grep"],
+    thinking: "low",
+    body: "You are a research subagent. Investigate using read-only tools (read/ls/grep) and report findings with evidence. You do not guess; you verify from the code, tests, or docs. Be concise and structured.",
+  },
+  reviewer: {
+    name: "reviewer",
+    description: "Review specialist for diffs, plans, and proposed solutions",
+    systemPromptMode: "replace",
+    tools: ["read", "ls", "grep"],
+    thinking: "low",
+    body: "You are a disciplined review subagent. Inspect, evaluate, and report findings with evidence. Verify implementation matches intent, code handles edge cases, and tests cover changes. Report issues by severity.",
+  },
+};
+
+function parseAgentDef(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!m) return null;
+  const meta = {};
+  for (const line of m[1].split("\n")) {
+    const kv = line.match(/^(\w+):\s*(.*)$/);
+    if (kv) meta[kv[1].trim()] = kv[2].trim();
+  }
+  return {
+    name: meta.name,
+    description: meta.description ?? "custom subagent",
+    systemPromptMode: meta.systemPromptMode === "append" ? "append" : "replace",
+    tools: (meta.tools ?? "").split(",").map((x) => x.trim()).filter(Boolean),
+    thinking: meta.thinking ?? "minimal",
+    body: m[2].trim(),
+  };
+}
+
+async function loadAgentDefs() {
+  const defs = {};
+  for (const [name, def] of Object.entries(BUILTIN_AGENTS)) defs[name] = { ...def, name };
+  try {
+    const listing = await internalRead("agents");
+    if (listing && listing !== "(empty)") {
+      for (const line of listing.split("\n")) {
+        const file = line.replace(/^-\s*/, "").trim();
+        if (!file.endsWith(".md")) continue;
+        const def = parseAgentDef(await internalRead(`agents/${file}`));
+        if (def?.name) defs[def.name] = def;
+      }
+    }
+  } catch {
+    // workspace 里没有 agents/ 目录是常态，不是错误
+  }
+  return defs;
+}
+
+/// content 归一化成纯文本：字符串原样，content block 数组取 text 块。
+/// （user 消息是字符串、assistant 是 block 数组 —— 两种都要能吃。）
+function textOfContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c) => c?.type === "text")
+    .map((c) => c.text)
+    .join(" ");
+}
+
+/// 子代理可用工具：从主 agent 当前工具集里取子集，且**禁用嵌套委托**（递归防护）。
+function resolveSubTools(names) {
+  const available = agent?.state.tools ?? [];
+  return names
+    .filter((name) => name !== "subagent")
+    .map((name) => available.find((t) => t.name === name))
+    .filter(Boolean);
+}
+
+/// 一次「收结果」的嵌套 run（压缩摘要与子代理共用）。
+async function runNestedCollect(prompt, toolNames, systemPrompt, thinking) {
+  const sub = new Agent({
+    initialState: {
+      model: agent.state.model,
+      thinkingLevel: thinking ?? "minimal",
+      systemPrompt,
+      tools: resolveSubTools(toolNames),
+    },
+    streamFn: hostStream,
+    toolExecution: "sequential",
+  });
+  await sub.prompt(prompt);
+  const messages = sub.state.messages ?? [];
+  const last = [...messages].reverse().find((m) => m.role === "assistant");
+  return textOfContent(last?.content ?? []).trim();
+}
+
+const subagentTool = {
+  name: "subagent",
+  label: "Subagent",
+  description:
+    "Delegate a focused task to a named subagent. The subagent runs with its own context and a restricted tool set, then its final response is returned as this tool's result. Use for research, review, or self-contained subtasks that would otherwise pollute the main conversation. Available agents are listed in the error message when unknown.",
+  parameters: {
+    type: "object",
+    properties: {
+      agent: { type: "string", description: "Name of the subagent to run (e.g. delegate, researcher, reviewer)" },
+      task: { type: "string", description: "Complete, self-contained task description for the subagent" },
+    },
+    required: ["agent", "task"],
+    additionalProperties: false,
+  },
+  // 与上游一致：委托运行期间阻塞同回合其他工具
+  executionMode: "sequential",
+  execute: async (_toolCallId, params) => {
+    const fail = (text) => ({ content: [{ type: "text", text }], details: {} });
+    try {
+      const defs = await loadAgentDefs();
+      const def = defs[params.agent];
+      if (!def) {
+        return fail(`Unknown subagent "${params.agent}". Available: ${Object.keys(defs).join(", ")}`);
+      }
+      outbox.push({ type: "subagent_start", name: def.name, task: params.task });
+      const text = await runNestedCollect(
+        params.task,
+        def.tools,
+        def.systemPromptMode === "append" ? `${baseSystemPrompt}\n\n${def.body}` : def.body,
+        def.thinking,
+      );
+      outbox.push({ type: "subagent_end", name: def.name });
+      return { content: [{ type: "text", text: text || "(subagent returned no text)" }], details: {} };
+    } catch (error) {
+      outbox.push({ type: "subagent_end", name: params.agent });
+      return fail(`Error: ${error?.message ?? error}`);
+    }
+  },
+};
+
+// ── auto-compaction（会话 token 自动压缩）─────────────────────────────
+//
+// 与 App 同一策略：上下文水位超过窗口的 60% 时，把较早的消息压成一段摘要
+// （经只读嵌套 Agent 生成），保留最近 8 条；JSONL 仍保留完整历史。
+// `--compact-at <tokens>` 可显式给阈值 —— 否则真跑一轮永远够不到 100 万 token 的 60%，
+// 这条路径就没法验（可测性优先于「参数看起来多余」）。
+const COMPACT_RATIO = 0.6;
+const COMPACT_KEEP = 8;
+let lastContextTokens = 0;
+let compactThreshold = 0;
+
+async function autoCompactIfNeeded() {
+  const windowSize = agent?.state.model?.contextWindow ?? 128_000;
+  const threshold = compactThreshold || windowSize * COMPACT_RATIO;
+  const messages = agent.state.messages ?? [];
+  // 判据必须可见：压缩不触发时要能一眼看出是水位不够、阈值没传到、还是消息太少。
+  // （同 D16 的教训：先加自检，别围着推断改。）
+  outbox.push({
+    type: "compaction_check",
+    tokens: lastContextTokens,
+    threshold,
+    messages: messages.length,
+    keep: COMPACT_KEEP,
+  });
+  if (!lastContextTokens || lastContextTokens < threshold) return;
+  if (messages.length <= COMPACT_KEEP + 2) return;
+  outbox.push({ type: "compaction_start", tokens: lastContextTokens, messages: messages.length });
+  // 步骤标记：压缩是「压缩期间还能报点东西」的唯一路径，卡住时靠它定位
+  // （QuickJS 的 error.stack 是空的，JS 侧异常只能这样二分）。
+  const step = (n) => outbox.push({ type: "compaction_step", step: n });
+  step("collecting");
+  const older = messages.slice(0, -COMPACT_KEEP);
+  const keep = messages.slice(-COMPACT_KEEP);
+  const transcript = older
+    .map((m) => {
+      // ⚠️ user 消息的 content 是**字符串**，不是 content block 数组 —— 直接
+      // `.filter` 会 `not a function`。App 那份 bundle 同一段也这么写（见 README
+      // 「对齐时发现的问题」）：它的阈值是 100 万 token 的 60%，实际跑不到，所以一直没暴露。
+      const text = textOfContent(m.content);
+      return `${m.role}: ${text.slice(0, 600)}`;
+    })
+    .filter((line) => !line.endsWith(": "))
+    .join("\n");
+  step("summarizing");
+  const summary = await runNestedCollect(
+    `Summarize this conversation segment for continuation. Keep: user goals and decisions, file paths touched, key outcomes, open tasks. Be dense.\n\n${transcript.slice(0, 60_000)}`,
+    [],
+    "You compress conversation segments into dense continuation summaries.",
+    "minimal",
+  );
+  step("replacing");
+  agent.state.messages = [
+    {
+      role: "user",
+      content: `[auto-compacted] Summary of the earlier conversation:\n${summary}`,
+      timestamp: Date.now(),
+    },
+    ...keep,
+  ];
+  lastContextTokens = Math.round(lastContextTokens * 0.3);
+  outbox.push({ type: "compaction_done", summarized: older.length, kept: keep.length });
+}
+
+// ── system prompt 组装：基础 + skills 位置 + AGENTS.md + 目标 + todo 引导 ──
+//
+// 顺序与 App 的 applySystemPrompt 对齐（todo → skills → AGENTS.md → goal）。
+// skills 这一项在 spike 里留空：它的安装/校验在 App 侧由 Rust 的 skills.rs 管
+// （git2 + zip + checksum），不属于本 spike 的范围 —— 见 README 的差距表。
+let agentsMdCache = null;
+
 function composeSystemPrompt(base) {
   let prompt = base.trim();
   prompt += `\n\n# Todo list\n\nManage a task list to track multi-step progress (the \`todo\` tool):\n${TODO_PROMPT_GUIDELINES.map((g) => `- ${g}`).join("\n")}`;
+  if (agentsMdCache) prompt += `\n\n# Project instructions (AGENTS.md)\n\n${agentsMdCache}`;
   if (currentGoal) {
     prompt += `\n\n# Current goal\n\nWork persistently toward this objective across turns until the user clears it: ${currentGoal}`;
   }
   return prompt;
+}
+
+/// 启动后异步取 AGENTS.md 并重装 systemPrompt（与 App 的 refreshAgentsMd 同形）。
+async function refreshAgentsMd() {
+  try {
+    const text = await internalRead("AGENTS.md");
+    agentsMdCache = text.trim() ? text : null;
+  } catch {
+    agentsMdCache = null; // 没有 AGENTS.md 是常态
+  }
+  if (agent) agent.state.systemPrompt = composeSystemPrompt(baseSystemPrompt);
+  outbox.push({ type: "agents_md_loaded", bytes: agentsMdCache?.length ?? 0 });
 }
 
 let baseSystemPrompt = "";
@@ -678,6 +1002,14 @@ function tick() {
         decision: event.decision,
         reason: event.reason,
       });
+    } else if (event.type === "ask_user_decision") {
+      const waiting = pendingAsks.get(event.id);
+      if (!waiting) continue;
+      pendingAsks.delete(event.id);
+      waiting.resolve({ answer: event.answer, cancelled: Boolean(event.cancelled) });
+    } else if (event.type === "ask_user") {
+      // 交给宿主/UI 展示（App 里就是弹卡；CLI 由 Rust 在终端提问）
+      outbox.push({ type: "ask_user", question: event.question, options: event.options });
     } else if (event.type === "approval_request") {
       // 交给宿主/UI 展示；这里只让事件流里看得见（App 里就是弹卡那一刻）。
       outbox.push({
@@ -705,11 +1037,12 @@ function drain() {
 function boot(configJson) {
   const config = JSON.parse(configJson);
   const model = modelFor(config);
-  // Rust 提供的文件工具 + JS 侧的 todo（纯 JS 工具，与 App 同一分工）
-  const tools = [...toolsFor(config.tools || []), todoTool];
+  // Rust 提供的文件工具 + JS 侧的工具（fetch 走 Rust 的 http 通道；todo/subagent 纯 JS）
+  const tools = [...toolsFor(config.tools || []), fetchTool, todoTool, subagentTool, askUserTool];
   baseSystemPrompt = config.systemPrompt || "You are a coding agent on a mobile device.";
   workspaceForSessions = config.workspace || "/workspace";
   currentGoal = config.goal || null;
+  compactThreshold = config.compactAt || 0;
   agent = new Agent({
     initialState: {
       systemPrompt: composeSystemPrompt(baseSystemPrompt),
@@ -734,6 +1067,9 @@ function boot(configJson) {
         ensureSession()
           .then(() => persistMessage(event.message))
           .catch((error) => outbox.push({ type: "session_error", error: String(error?.message ?? error) }));
+        // 上下文水位（自动压缩阈值用）：assistant 的 usage.totalTokens 反映本轮请求规模
+        const usage = event.message?.usage;
+        if (usage) lastContextTokens = usage.totalTokens ?? (usage.input ?? 0) + (usage.output ?? 0);
       }
     } else if (event.type === "turn_end") {
       for (const result of event.toolResults ?? []) persistMessage(result);
@@ -744,6 +1080,10 @@ function boot(configJson) {
     outbox.push(compact);
   });
   outbox.push({ type: "agent_ready" });
+  // AGENTS.md 是异步读的（要过宿主握手），读完重装 systemPrompt 再放行第一轮 prompt
+  void refreshAgentsMd()
+    .catch(() => {})
+    .finally(() => outbox.push({ type: "context_ready" }));
   // 恢复由宿主触发（`--resume` 时才调 restore），因为「哪个会话」是宿主的选择。
 }
 
@@ -762,11 +1102,22 @@ function prompt(text) {
   ensureSession()
     .then((s) => s.appendMessage({ role: "user", content: text, timestamp: Date.now() }))
     .catch((error) => outbox.push({ type: "session_error", error: String(error?.message ?? error) }));
-  // 不 await：prompt() 的 continuation 挂在微任务队列上，由宿主泵。
-  void agent.prompt(text).then(
-    () => outbox.push({ type: "agent_end" }),
-    (error) => outbox.push({ type: "agent_error", message: String(error) }),
-  );
+  // 水位超阈值先压缩再提交（与 App 同序：压缩 → prompt）。
+  // 不 await：continuation 挂在微任务队列上，由宿主泵。
+  void autoCompactIfNeeded()
+    .catch((error) =>
+      // 带 stack：JS 侧的 TypeError 只看 message 定位不到行号（第一次就是这个坑）
+      outbox.push({
+        type: "session_error",
+        error: `compact: ${error?.message ?? error}\n${error?.stack ?? ""}`,
+      }),
+    )
+    .finally(() => {
+      agent.prompt(text).then(
+        () => outbox.push({ type: "agent_end" }),
+        (error) => outbox.push({ type: "agent_error", message: String(error) }),
+      );
+    });
 }
 
 /// 会话 id（宿主在结束时打印，便于下一轮 `--resume`）。
@@ -780,4 +1131,36 @@ function sessionInfo() {
   });
 }
 
-globalThis.__spike = { boot, prompt, tick, drain, restore, sessionInfo };
+// ── 宿主控制面（对齐 App 的 __pi_status / __pi_tool_names / __pi_history）──
+function status() {
+  return JSON.stringify({
+    phase: agent?.state.isStreaming ? "thinking" : agent ? "ready" : "idle",
+    busy: Boolean(agent?.state.isStreaming) || pendingModels.size > 0,
+    pendingModels: pendingModels.size,
+    pendingApprovals: pendingApprovals.size,
+    messages: agent?.state.messages.length ?? 0,
+    contextTokens: lastContextTokens,
+    compactThreshold: compactThreshold || (agent?.state.model?.contextWindow ?? 0) * COMPACT_RATIO,
+    errorMessage: agent?.state.errorMessage ?? null,
+  });
+}
+
+function toolNames() {
+  return JSON.stringify((agent?.state.tools ?? []).map((t) => t.name));
+}
+
+function history() {
+  return JSON.stringify({ sessionId, messages: agent?.state.messages ?? [] });
+}
+
+globalThis.__spike = {
+  boot,
+  prompt,
+  tick,
+  drain,
+  restore,
+  sessionInfo,
+  status,
+  toolNames,
+  history,
+};

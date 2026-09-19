@@ -86,6 +86,53 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 > mock 是**无状态**的：消息里没有 `role:"tool"` 就回一个 `read` 工具调用，有就回收尾
 > 文本。所以同一句话可以反复跑，每次都会走完整的两轮 + 一次真实工具执行。
 
+## 与 bun 版（`pi-bundle/agent-main.js`）的功能对齐
+
+逐项对齐的结果。**三类**：已对齐 / 不可移植（并说明原因）/ 按设计不做。
+
+| bun 版功能点 | 本 spike | 备注 |
+|---|---|---|
+| read/write/edit/ls/grep/mkdir/rm | ✅ 同一份实现 | `pi-host-tools`，Tauri 宿主共用 |
+| **fetch**（http/https + SSRF 防护 + HTML→文本） | ✅ 抽出来复用 | `pi-host-tools::http`（原 `src-tauri/http_tool.rs`，纯函数零改动） |
+| **todo**（4 态 + blockedBy + 回放重建） | ✅ 移植 | 语义逐项对齐，含 `todo_updated` 事件 |
+| **subagent**（delegate/researcher/reviewer + `agents/*.md`） | ✅ 移植 | 子代理的工具调用**同样过宿主审批** |
+| **ask_user**（多选 + 自由输入） | ✅ 移植 | 契约与 `ask_user.rs` 相同，决策源换成终端 |
+| **AGENTS.md 注入** | ✅ 对齐 | 异步读 + 重装 systemPrompt + `context_ready` 门控 |
+| **goal**（持久目标注入） | ⚠️ 部分 | 注入 + 持久化已对齐；**autoContinue 未做**（上游 Sisyphus 自动续跑） |
+| **auto-compaction** | ✅ 对齐 | 同阈值策略（窗口 60%）+ 保留 8 条；另见下方「发现的 bun 版潜 bug」 |
+| **会话持久化** | ✅ 同一份实现 | 同一个 `JsonlSessionRepo` + 同一份 Rust fs，pi-v4 格式互通 |
+| **审批**（分档 + diff + always） | ✅ 且更强 | 分档表照抄；额外多了「Rust 强制握手」（见「审批」一节） |
+| 控制面 `__pi_status` / `__pi_tool_names` / `__pi_history` | ✅ 对齐 | `__spike.status/toolNames/history` |
+| 会话切换 `__pi_open_session` / `__pi_new_session` | ❌ 未做 | 只有 `--resume` 取最新；切换要加一层「选哪个」 |
+| `/plan` `/btw` 嵌套 run | ❌ 未做 | 底座 `runNestedCollect` 已就位，缺的是命令面（那是 UI 驱动的东西） |
+| `nativeTools`（剪贴板/通知/定位/日历/通讯录/照片/天气） | ❌ **不可移植** | M6 走 Tauri 插件（ClipboardExt/NotificationExt/GeolocationExt…）。CLI 在桌面上没有这些能力，要验得在 App 里 |
+| `run_js`（D14 脚本沙箱） | ❌ 不可移植 | 要搬 `script.rs` 的隔离 runner + 能力授予 + per-run token（一套独立的安全核心） |
+| `preview`（D15） | ❌ 不可移植 | 要搬 `preview.rs`（axum 静态服务 + 端口管理），且它的消费者是 WebView UI |
+| git 工具（D16） | ❌ 不可移植 | 要 git2 + vendored libgit2/openssl（就是 D16 在 Android 上卡住的那套） |
+| **MCP**（streamable-http） | ❌ 未做 | `host.http` 已经够（Rust 侧全都有），缺客户端实现；bun 版是 fetch-based，搬过来要改成过宿主 |
+| skills 注入 | ❌ 未做 | 安装/校验在 `skills.rs`（git2 + zip + checksum）；只做「读 SKILL.md 注入」的话很轻 |
+| provider 目录 / OAuth 订阅登录 | ❌ 按设计不做 | 本路线只做 DeepSeek 一家（8 家 + OAuth 的复刻成本见 `docs/POCKET-PI-NOTES.md`） |
+
+**读法**：这张表本身就是 B 路线的成本清单 —— 左边一列里「同一份实现」的行是**已经沉没、
+可以白拿**的部分；「不可移植」的行各自绑定一个 Tauri 插件或一个 cargo 依赖，换宿主就得重写；
+「按设计不做」的行是这条路线的取舍。
+
+### 对齐时发现的 bun 版一个潜 bug
+
+`auto-compaction` 里拼 transcript 时写的是：
+
+```js
+const t = (m.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join(" ");
+```
+
+**user 消息的 `content` 是字符串**（`{role:"user", content:"…"}`），字符串没有 `.filter`
+→ `TypeError: not a function`。本 spike 在**真跑压缩**时一头撞上，改成先归一化
+（[`textOfContent`](js/entry.js) ）才通。
+
+bun 版同一段代码一样写，但它的阈值是「上下文窗口 100 万 token 的 60%」= 60 万 token，
+**实际跑不到**，所以这个 bug 一直没暴露。本 spike 加了 `--compact-at <tokens>` 才能把这条
+路径真的走一遍 —— 这也是为什么那个参数不是多余的。
+
 ## Android 真机
 
 spike 是**普通 CLI**，不需要 APK / Tauri / WebView —— 可以直接 `adb push` 到
@@ -301,7 +348,10 @@ spike 阶段先把语义对齐（`TODO_TRANSITIONS` 与 `replayTodos` 逐行对�
    启动时却 `fs::metadata("spikes/quickjs-agent/dist/agent.js")` 只为打印体积 ——
    桌面看不出来，**Android 上直接 FAIL**（真机没有仓库相对路径）。改成从编译期常量取。
    是「上设备」这一步把它逼出来的。
-6. **「等审批时没阻塞」这条指标要设计观测窗口**：管道输入是瞬时回答，等待窗口只有
+6. **改了 bundle 必须重建 Rust 二进制**：bundle 是 `include_str!` 编进去的，只跑
+   `js/build.sh` 不 `cargo build` 的话，跑的还是上一版 JS —— 我就这么"debug"了一轮：
+   代码已经修好，看到却还是旧错误。`android-build.sh` 里也同理（它是先 build.sh 再 cargo）。
+7. **「等审批时没阻塞」这条指标要设计观测窗口**：管道输入是瞬时回答，等待窗口只有
    微秒级，`ticks while waiting` 恒为 0，看不出任何东西。加 `--delay-approval`
    把窗口撑开才量得到（且它只在真有等待时打印——那一轮 agent 只调了只读工具，
    所以没有这行，不是 bug）。
