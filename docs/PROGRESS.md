@@ -2,6 +2,51 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第五轮）— ✅ MCP 接入（streamable-http 双 transport 真跑通）+ 一个 SSRF 边界问题
+
+对齐表里最后一块「未做但可做」的：MCP。客户端与 bun 版同构移植，出网改走 `host.http`。
+
+### 结果
+
+| 项 | 结果 |
+|---|---|
+| JSON transport | ✅ 真跑：initialize → notifications/initialized → tools/list → tools/call |
+| SSE transport | ✅ 真跑：**整轮 4.6s**，而 mock 故意让 `tools/call` 的流挂 3 秒（没走 first-event 就会撞 30s 超时） |
+| 工具注册 | 2 个 mock 工具 → 工具总数 **13**（`mcp__mock__echo` / `mcp__mock__add`） |
+| 审批档位 | ✅ `[approval] mcp__mock__add (ask)` —— D11「MCP 工具默认全部 ask」在生效 |
+| session 串接 | ✅ `mcp-session-id` 经 host.http 回传，后续请求都带上 |
+| Android | ✅ 经 LAN 连宿主 mock（`10.0.2.2:8901`），SSE 模式，13 个工具，ask 审批 |
+
+### 为 MCP 给 `pi-host-tools::http` 补的两个能力（对 fetch 透明）
+
+1. **响应头回传**（`headers` 字段）—— MCP 靠 `mcp-session-id` 串后续请求，原来只回
+   `{status, contentType, body, truncated}`。
+2. **`readMode: "first-event"`** —— MCP 的 SSE 允许一直挂着不关，缓冲读取会挂到 30s
+   超时；这个模式读到第一个完整 SSE 事件（空行分隔）就返回。
+
+### ⚠️ 顺带撞出一个真边界问题：SSRF 防护会拦住本地 MCP
+
+复用 `http_tool` 就**继承了它的 SSRF 策略**，而 MCP 服务器常常就在本机/局域网
+（实测 `mcp mock: blocked private address: 127.0.0.1`）。bun 版没这问题（原生 fetch
+没有 SSRF 防护）—— 也就是说**这条路线在安全上更严，但严到会误伤合法用法**。
+
+解法不是放宽 fetch（那是给「模型可能被诱导去够内网」设的），而是**给用户显式配置过的
+目标授权**：宿主从 `mcp.json` 读出各服务器的 `scheme://host:port`，传给 `host.http`，
+只有**同源**的 URL 才跳过私网拒绝。授权源由宿主从配置读、**不是 payload 字段**
+（否则 JS 自己就能给自己授权）。fetch 工具没有授权源，私网照旧一律拒。
+
+这条对将来把 MCP 搬进 App 一样成立：**只要 Rust 侧统一做出网，就得先回答这个问题**。
+
+### 顺带
+
+- 工具面 11 → **13**；bundle 375KB → **380KB**（App 仍 2,950KB，小 7.8×）。
+- `pi-host-tools` 9 个测试（新增授权源只认同源 / 响应头字段），crate 与 spike clippy/fmt
+  全干净，src-tauri 基线不变（41 测试 / fmt 14 / clippy 27）。
+- 重构：`Guest::start` 的 12 个参数收成 `HostDeps` + `GuestOptions`（clippy 的
+  `too_many_arguments` 只是触发器，本来也该这么分）。
+- 新增 `tools/mock-mcp.py`：JSON 与 SSE 两种模式，SSE 模式会先发一条无关通知再发响应
+  （验证「跳过通知找匹配 id」）。
+
 ## 2026-09-19（第四轮）— ✅ spike 功能点对齐 bun 版（11 个工具 / 4 个已对齐的插件 / 压缩）
 
 把 spike 的能力面往 `pi-bundle/agent-main.js` 靠。逐项表见 spike README（三类：已对齐 /

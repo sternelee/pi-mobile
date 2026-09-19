@@ -14,7 +14,7 @@
 | 1 | 上游 `pi-agent-core` 的 `Agent` 类能在 QuickJS 里跑（非重写） | ✅ 流式思考/文本、工具调用、多轮 |
 | 2 | 模型传输可以整个搬到 Rust，JS 里不要 HTTP/provider 栈 | ✅ 364KB bundle，0 个 provider SDK |
 | 3 | 工具可以直接**复用现有 Rust 实现**，不重写 | ✅ 与 Tauri 宿主同一份 `pi-host-tools` |
-| 4 | 体积/冷启动是否可接受 | ✅ bundle 小 8.1×，堆 1.8MB vs 87MB 的 .so |
+| 4 | 体积/冷启动是否可接受 | ✅ bundle 小 7.8×，堆 1.8MB vs 87MB 的 .so |
 | 5 | **审批**能在不阻塞 guest 的前提下完成往返 | ✅ 1000ms 等待里 guest 跑了 **334 拍** |
 | 6 | **会话持久化**能复用 App 的同一份实现 | ✅ pi-v4 JSONL 逐字段一致，`--resume` 1.8ms 恢复 18 条 |
 | 7 | **goal / todo 插件**能按 App 语义落地 | ✅ 目标注入 prompt；todo 四态 + 依赖校验 + 回放重建 |
@@ -79,6 +79,8 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 | `--yes` / `--deny` | 审批全放行 / 全拒绝（**仍走完整握手**，无人值守也能验证） |
 | `--delay-approval <ms>` | 延迟放行，用来观测「等待期间 guest 没被阻塞」 |
 | `--net-check` | 只验 dns / tls / engine 三层，不起 agent（真机自诊先用它） |
+| `--mcp-config <file>` | MCP 服务器配置（默认 `<data-dir>/mcp.json`）；其源会被自动授权给 `host.http` |
+| `--compact-at <tokens>` | 上下文水位到多少就压缩（默认窗口 60%；真跑一轮够不到，所以可显式给） |
 | `--data-dir <dir>` | 数据目录（真机上不能依赖仓库相对路径；run 脚本会显式传） |
 | （默认） | 审批在终端交互：`y` / `n` / `a`(always) / `d`(deny-all)，write/edit 带 diff |
 | `--model` / `--thinking` / `--workspace` / `--quiet` | 模型、思考档、工作区、静音 |
@@ -109,13 +111,38 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 | `run_js`（D14 脚本沙箱） | ❌ 不可移植 | 要搬 `script.rs` 的隔离 runner + 能力授予 + per-run token（一套独立的安全核心） |
 | `preview`（D15） | ❌ 不可移植 | 要搬 `preview.rs`（axum 静态服务 + 端口管理），且它的消费者是 WebView UI |
 | git 工具（D16） | ❌ 不可移植 | 要 git2 + vendored libgit2/openssl（就是 D16 在 Android 上卡住的那套） |
-| **MCP**（streamable-http） | ❌ 未做 | `host.http` 已经够（Rust 侧全都有），缺客户端实现；bun 版是 fetch-based，搬过来要改成过宿主 |
+| **MCP**（streamable-http） | ✅ 已对齐 | 客户端同构移植；出网改走 `host.http`（见下「MCP 的两处结构性差异」） |
 | skills 注入 | ❌ 未做 | 安装/校验在 `skills.rs`（git2 + zip + checksum）；只做「读 SKILL.md 注入」的话很轻 |
 | provider 目录 / OAuth 订阅登录 | ❌ 按设计不做 | 本路线只做 DeepSeek 一家（8 家 + OAuth 的复刻成本见 `docs/POCKET-PI-NOTES.md`） |
 
 **读法**：这张表本身就是 B 路线的成本清单 —— 左边一列里「同一份实现」的行是**已经沉没、
 可以白拿**的部分；「不可移植」的行各自绑定一个 Tauri 插件或一个 cargo 依赖，换宿主就得重写；
 「按设计不做」的行是这条路线的取舍。
+
+### MCP 的两处结构性差异（都源自「JS 里没有 fetch」）
+
+bun 版用 JS 原生 `fetch` 直连 MCP 服务器；本 spike 里所有出网都过 `host.http`，
+于是 `pi-host-tools::http` 为 MCP 补了两个能力（对 fetch 工具透明）：
+
+1. **响应头要能拿回来** —— MCP streamable-http 靠 `mcp-session-id` 串后续请求，
+   而 `host.http` 原本只回 `{status, contentType, body, truncated}`。现在多一个
+   `headers`。
+2. **`readMode: "first-event"`** —— MCP 的 SSE 响应**允许一直挂着不关**，默认的
+   缓冲读取会一路挂到 30s 超时。这个模式读到第一个完整 SSE 事件（空行分隔）就返回。
+   实测：mock 故意让 `tools/call` 的流挂 3 秒，整轮仍 4.6s 跑完；没有这个模式就会撞超时。
+
+#### ⚠️ 顺带撞出来的一个真边界问题：SSRF 防护会拦住本地 MCP
+
+复用 `http_tool` 给 MCP 用，就**继承了它的 SSRF 策略** —— 而 MCP 服务器常常就在
+本机或局域网（实测报错 `mcp mock: blocked private address: 127.0.0.1`）。
+bun 版没这个问题（原生 fetch 没有 SSRF 防护）。
+
+**解法不是放宽 fetch**（那是给「模型可能被诱导去够内网」设的），而是
+**给用户显式配置过的目标授权**：宿主从自己那份 `mcp.json` 读出各服务器的
+`scheme://host:port`，传给 `host.http`；只有**同源**的 URL 才跳过私网拒绝。
+授权源由宿主从配置读，**不是 payload 字段** —— 否则 JS 自己就能给自己授权。
+
+对 `fetch` 工具这条策略不变：它没有授权源，私网一律拒绝（实测仍拒 `127.0.0.1`）。
 
 ### 对齐时发现的 bun 版一个潜 bug
 
@@ -253,7 +280,7 @@ release / **真 DeepSeek**。Android 那列是在 arm64 模拟器上真跑出来
 
 | 指标 | macOS arm64 | Android arm64 |
 |---|---|---|
-| JS bundle（prelude + agent，含会话+todo） | **364,730 B**（App 的 2,950,176 B → **小 8.1×**） | 同一个二进制，同一份 bundle |
+| JS bundle（prelude + agent，含会话+todo+MCP） | **379,976 B**（App 的 2,950,176 B → **小 7.8×**） | 同一个二进制，同一份 bundle |
 | guest 冷启动 | 26 – 60 ms | 84.6 ms |
 | QuickJS 堆 | 1.81 MB | 1.81 MB |
 | 会话恢复 | 1.8 ms（18 条） | 5.1 ms（20 条） |
@@ -265,7 +292,8 @@ release / **真 DeepSeek**。Android 那列是在 arm64 模拟器上真跑出来
 | 整轮（4 次模型请求 + 3 次工具） | 4.4 s | — |
 | 产物体积 | 7.92 MB（未 strip） | **9.49 MB / 6.73 MB strip 后**（App 是 87MB 的 .so） |
 
-体积差从 9.3× 变成 8.1×，是因为这里**又多了会话与 todo 的能力**（316KB → 364KB）；
+体积差从 9.3× 一路收到 7.8×，是因为每一轮对齐都往这里加了真能力
+（316KB → 364KB → 375KB → 380KB：会话 + todo → fetch/subagent/ask_user/压缩 → MCP）；
 App 那 2.95MB 里仍有 8 家 provider + OAuth + 全部产品层。
 
 ## 三个能力点是怎么落的

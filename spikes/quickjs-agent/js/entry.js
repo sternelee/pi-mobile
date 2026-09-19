@@ -21,7 +21,8 @@ import { AssistantMessageEventStream } from "../../../node_modules/@earendil-wor
 //   startModel(requestJson) -> id     发起一次模型请求（异步，结果经 poll 回来）
 //   ensureApproval(callId,name,args)  审批握手（同步返回 id，决策经 poll 回来）
 //   callTool(callId,name,argsJson)    执行工具（同步返回；Rust 侧校验执行权）
-//   http(paramsJson)                  fetch 工具（SSRF 防护 + 正文抽取，实现在 Rust）
+//   http(callId, paramsJson)          出网请求（需该 callId 已握手；实现在 Rust）
+//   mcpConfig()                       已配置的 MCP 服务器列表（宿主读文件）
 //   fs(op, payloadJson)               pi 的 12 个 fs 方法（会话持久化用）
 //   goalGet()                         持久目标（goal.json，由宿主持有）
 //   poll() -> json[]                  取走一批宿主事件
@@ -111,7 +112,7 @@ const fetchTool = {
   execute: async (toolCallId, params) => {
     const callId = `fetch-${toolCallId}`;
     await requestApproval(callId, "fetch", params);
-    const r = JSON.parse(host.http(JSON.stringify(params || {})));
+    const r = JSON.parse(host.http(callId, JSON.stringify(params || {})));
     if (r.error) return { content: [{ type: "text", text: `Fetch failed: ${r.error}` }], details: {} };
     const meta = [`status ${r.status}`, r.contentType || "no content-type"];
     if (r.truncated) meta.push("truncated at 256KB");
@@ -762,6 +763,197 @@ async function autoCompactIfNeeded() {
   outbox.push({ type: "compaction_done", summarized: older.length, kept: keep.length });
 }
 
+// ── MCP 适配器（pi-mcp-adapter 移动原生化，仅 streamable-http）──────────
+//
+// 移植自 pi-bundle/agent-main.js，**唯一的结构差异**：那里用 JS 原生 fetch，
+// 这里没有 fetch —— 全部出网走 `host.http(callId, params)`。两个后果：
+//   1. 流式响应要用 `readMode: "first-event"`：MCP 的 SSE 可能一直挂着不关，
+//      默认的缓冲模式会一路挂到 30s 超时；
+//   2. 响应头要能从宿主拿回来（`mcp-session-id` 靠它串后续请求）。
+// 这两条都是为 MCP 给 `pi-host-tools::http` 加的，对 fetch 工具透明。
+const MCP_PROTOCOL_VERSION = "2025-06-18";
+
+function mcpClient(name, url, headers, timeoutMs) {
+  let nextId = 1;
+  let sessionId = null;
+  const timeout = timeoutMs > 0 ? timeoutMs : 30_000;
+  let callSeq = 0;
+
+  function post(body, readMode) {
+    const callId = `mcp-${name}-${++callSeq}`;
+    return { callId, payload: { url, method: "POST", headers: { ...(headers ?? {}) }, body, readMode } };
+  }
+
+  async function rpc(method, params) {
+    const id = nextId++;
+    const body = JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} });
+    const hdrs = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    };
+    const { callId, payload } = post(body);
+    payload.headers = hdrs;
+    payload.timeoutMs = timeout;
+    void payload.timeoutMs; // 宿主侧超时固定 30s；这里保留字段以便将来透传
+
+    // 握手用工具名 = 具体 MCP 工具名，档位由 Rust 的 tier_for("mcp__…") 决定（ask）
+    const approveAs = method === "tools/call" ? `mcp__${name}__${params?.name ?? ""}` : `mcp__${name}__*`;
+    await requestApproval(callId, approveAs, params ?? {});
+
+    const res = JSON.parse(host.http(callId, JSON.stringify(payload)));
+    if (res.error) throw new Error(`mcp ${name}: ${res.error}`);
+    const sid = res.headers?.["mcp-session-id"];
+    if (sid) sessionId = sid;
+    if (!res.ok && res.status >= 400) throw new Error(`mcp ${name}: HTTP ${res.status}`);
+    const ct = res.contentType ?? "";
+    let message;
+    if (ct.includes("text/event-stream")) {
+      message = readSseResponse(res.body ?? "", id, name);
+    } else {
+      message = JSON.parse(res.body ?? "{}");
+    }
+    if (message.error) throw new Error(`mcp ${name}.${method}: ${message.error.message ?? "error"}`);
+    return message.result;
+  }
+
+  /// 从**已读回**的 SSE 文本里找匹配 id 的响应（跳过通知）。
+  /// 与 bun 版逐行等价，只是读流那半在 Rust 侧完成了（readMode=first-event）。
+  function readSseResponse(body, id, server) {
+    const normalized = body.replace(/\r\n/g, "\n");
+    for (const chunk of normalized.split("\n\n")) {
+      const data = chunk
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n");
+      if (!data) continue;
+      let msg;
+      try {
+        msg = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (msg.id === id) return msg;
+    }
+    throw new Error(`mcp ${server}: stream ended without response (id ${id})`);
+  }
+
+  async function notify(method) {
+    const { callId, payload } = post(JSON.stringify({ jsonrpc: "2.0", method }));
+    payload.headers = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    };
+    await requestApproval(callId, `mcp__${name}__*`, {});
+    try {
+      host.http(callId, JSON.stringify(payload));
+    } catch {
+      // 通知的应答常是 202 空体，失败无所谓（与 bun 版一致）
+    }
+  }
+
+  return {
+    name,
+    async connect() {
+      await rpc("initialize", {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "pi-mobile-spike", version: "0.1.0" },
+      });
+      await notify("notifications/initialized");
+    },
+    async listTools() {
+      const result = await rpc("tools/list", {});
+      return (result?.tools ?? []).map((t) => ({
+        name: t.name,
+        description: t.description ?? "",
+        inputSchema: t.inputSchema ?? { type: "object", properties: {} },
+      }));
+    },
+    async callTool(toolName, args) {
+      const result = await rpc("tools/call", { name: toolName, arguments: args ?? {} });
+      const text = (result?.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text)
+        .join("\n");
+      return { text, isError: Boolean(result?.isError) };
+    },
+  };
+}
+
+function jsonSchemaToObj(schema) {
+  // MCP inputSchema 即 JSON Schema；属性描述透传给模型
+  const props = schema?.properties ?? {};
+  const required = schema?.required ?? Object.keys(props);
+  const out = { type: "object", properties: {}, required, additionalProperties: false };
+  for (const [key, val] of Object.entries(props)) {
+    out.properties[key] = {
+      type: val.type ?? "string",
+      ...(val.description ? { description: val.description } : {}),
+    };
+  }
+  return out;
+}
+
+function mcpTool(server, tool) {
+  const fullName = `mcp__${server.name}__${tool.name}`;
+  return {
+    name: fullName,
+    label: `${server.name}: ${tool.name}`,
+    description: `${tool.description}\n(via MCP server "${server.name}")`,
+    parameters: jsonSchemaToObj(tool.inputSchema),
+    executionMode: "sequential",
+    // 工具本身不再自己判审批：上面 rpc() 里已经按 mcp__ 档做过握手，
+    // 而且出网那一步由宿主卡（host.http 要求同一 callId 已授权）。
+    execute: async (_toolCallId, params) => {
+      try {
+        const r = await server.client.callTool(tool.name, params);
+        return { content: [{ type: "text", text: r.text }], details: {} };
+      } catch (error) {
+        return { content: [{ type: "text", text: `Error: ${error?.message ?? error}` }], details: {} };
+      }
+    },
+  };
+}
+
+/// boot 后异步连接所有已配置的 MCP 服务器并注册工具（幂等：先剔除旧 mcp__ 工具）。
+async function connectMcpServers() {
+  try {
+    const cfg = JSON.parse(host.mcpConfig());
+    const servers = cfg.servers ?? [];
+    if (!servers.length) {
+      outbox.push({ type: "mcp_tools_registered", count: 0 });
+      return;
+    }
+    const mcpTools = [];
+    for (const server of servers) {
+      try {
+        outbox.push({ type: "mcp_connecting", server: server.name });
+        const client = mcpClient(server.name, server.url, server.headers, server.timeoutMs);
+        await client.connect();
+        const toolDefs = await client.listTools();
+        for (const tool of toolDefs) mcpTools.push(mcpTool({ name: server.name, client }, tool));
+        outbox.push({
+          type: "mcp_ready",
+          server: server.name,
+          tools: toolDefs.map((t) => t.name),
+        });
+      } catch (error) {
+        outbox.push({ type: "mcp_error", server: server.name, error: String(error?.message ?? error) });
+      }
+    }
+    if (agent) {
+      const existing = (agent.state.tools ?? []).filter((t) => !t.name.startsWith("mcp__"));
+      agent.state.tools = [...existing, ...mcpTools];
+    }
+    outbox.push({ type: "mcp_tools_registered", count: mcpTools.length });
+  } catch (error) {
+    outbox.push({ type: "mcp_error", server: "(config)", error: String(error?.message ?? error) });
+  }
+}
+
 // ── system prompt 组装：基础 + skills 位置 + AGENTS.md + 目标 + todo 引导 ──
 //
 // 顺序与 App 的 applySystemPrompt 对齐（todo → skills → AGENTS.md → goal）。
@@ -1080,10 +1272,12 @@ function boot(configJson) {
     outbox.push(compact);
   });
   outbox.push({ type: "agent_ready" });
-  // AGENTS.md 是异步读的（要过宿主握手），读完重装 systemPrompt 再放行第一轮 prompt
-  void refreshAgentsMd()
-    .catch(() => {})
-    .finally(() => outbox.push({ type: "context_ready" }));
+  // 启动期的两件异步事：读 AGENTS.md（重装 systemPrompt）+ 连 MCP（注册工具）。
+  // **都完成**才发 context_ready —— 否则第一轮 prompt 可能少看到 MCP 工具。
+  void Promise.all([
+    refreshAgentsMd().catch(() => {}),
+    connectMcpServers().catch(() => {}),
+  ]).finally(() => outbox.push({ type: "context_ready" }));
   // 恢复由宿主触发（`--resume` 时才调 restore），因为「哪个会话」是宿主的选择。
 }
 

@@ -17,6 +17,7 @@ use rquickjs::{Context, Ctx, Function, Object, Runtime};
 use serde_json::{json, Value};
 
 use crate::approval::Approvals;
+use crate::ask_user::AskUser;
 use crate::deepseek::{self, DeepSeekConfig, StreamEvent};
 use pi_host_tools::HostTools;
 
@@ -188,6 +189,30 @@ pub fn engine_selftest() -> Result<String, String> {
         })
 }
 
+/// 宿主依赖（guest 能碰到的一切外部资源）。收成结构体而不是七个参数 ——
+/// 以后加一个通道不必再动所有调用点。
+pub struct HostDeps {
+    pub tools: HostTools,
+    pub sink: Arc<Sink>,
+    pub approvals: Arc<Approvals>,
+    pub asks: Arc<AskUser>,
+    pub sessions_root: std::path::PathBuf,
+    pub goal_path: std::path::PathBuf,
+    pub mcp_config_path: std::path::PathBuf,
+    /// MCP 服务器的授权源（`scheme://host:port`）。**由宿主从自己的配置读出来**，
+    /// 不是 payload 字段 —— 否则 JS 自己给自己授权，SSRF 防护等于没有。
+    pub allowed_origins: Vec<String>,
+}
+
+/// guest 启动配置（与宿主依赖分开：这些是要交给 JS 的字符串/数值）。
+pub struct GuestOptions {
+    pub model_label: String,
+    pub system_prompt: String,
+    pub thinking_level: String,
+    pub workspace_label: String,
+    pub compact_at: u64,
+}
+
 pub struct Guest {
     runtime: Runtime,
     context: Context,
@@ -197,20 +222,8 @@ pub struct Guest {
 
 impl Guest {
     /// 建 guest：注入 host 面 → 跑 prelude → 跑 bundle → boot 配置。
-    #[allow(clippy::too_many_arguments)]
-    pub fn start(
-        tools: HostTools,
-        sink: Arc<Sink>,
-        approvals: Arc<Approvals>,
-        asks: Arc<crate::ask_user::AskUser>,
-        sessions_root: std::path::PathBuf,
-        goal_path: std::path::PathBuf,
-        workspace_label: &str,
-        model_label: &str,
-        system_prompt: &str,
-        thinking_level: &str,
-        compact_at: u64,
-    ) -> Result<Self, String> {
+    pub fn start(deps: HostDeps, options: GuestOptions) -> Result<Self, String> {
+        let sink = Arc::clone(&deps.sink);
         let runtime = Runtime::new().map_err(|e| format!("quickjs runtime: {e}"))?;
         // 显式给个上限：QuickJS 默认堆很小（512KB 级），bundle 解析会直接 OOM。
         runtime.set_memory_limit(256 * 1024 * 1024);
@@ -218,34 +231,25 @@ impl Guest {
 
         let prelude = include_str!("../js/prelude.js");
         let bundle = include_str!("../dist/agent.js");
-        let goal_path_inner = goal_path.clone();
 
         context.with(|ctx| -> Result<(), String> {
-            mount_host(
-                &ctx,
-                sink.clone(),
-                tools.clone(),
-                Arc::clone(&approvals),
-                asks,
-                sessions_root,
-                goal_path,
-            )?;
+            mount_host(&ctx, &deps)?;
             ctx.eval::<(), _>(prelude)
                 .map_err(|e| describe(&ctx, e, "prelude"))?;
             ctx.eval::<(), _>(bundle)
                 .map_err(|e| describe(&ctx, e, "bundle"))?;
 
-            let goal = std::fs::read_to_string(&goal_path_inner)
+            let goal = std::fs::read_to_string(&deps.goal_path)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .and_then(|value| value["objective"].as_str().map(str::to_owned));
             let config = json!({
-                "model": model_label,
-                "thinkingLevel": thinking_level,
-                "systemPrompt": system_prompt,
-                "workspace": workspace_label,
+                "model": options.model_label,
+                "thinkingLevel": options.thinking_level,
+                "systemPrompt": options.system_prompt,
+                "workspace": options.workspace_label,
                 "goal": goal,
-                "compactAt": compact_at,
+                "compactAt": options.compact_at,
                 "tools": tool_definitions(),
             })
             .to_string();
@@ -257,7 +261,7 @@ impl Guest {
             runtime,
             context,
             sink,
-            tools,
+            tools: deps.tools,
         })
     }
 
@@ -350,15 +354,15 @@ impl Guest {
 }
 
 /// 注入 `globalThis.host`：guest 能看到的**全部**宿主能力。
-fn mount_host(
-    ctx: &Ctx<'_>,
-    sink: Arc<Sink>,
-    tools: HostTools,
-    approvals: Arc<Approvals>,
-    asks: Arc<crate::ask_user::AskUser>,
-    sessions_root: std::path::PathBuf,
-    goal_path: std::path::PathBuf,
-) -> Result<(), String> {
+fn mount_host(ctx: &Ctx<'_>, deps: &HostDeps) -> Result<(), String> {
+    let sink = Arc::clone(&deps.sink);
+    let tools = deps.tools.clone();
+    let approvals = Arc::clone(&deps.approvals);
+    let asks = Arc::clone(&deps.asks);
+    let sessions_root = deps.sessions_root.clone();
+    let goal_path = deps.goal_path.clone();
+    let mcp_config_path = deps.mcp_config_path.clone();
+    let allowed_origins = deps.allowed_origins.clone();
     let host = Object::new(ctx.clone()).map_err(|e| format!("host object: {e}"))?;
 
     // log(line)
@@ -481,16 +485,45 @@ fn mount_host(
         .map_err(|e| format!("host.ensureApproval: {e}"))?;
     }
 
-    // http(paramsJson) -> fetch 工具（SSRF 防护 + HTML→文本，实现在 pi-host-tools::http）
-    host.set(
-        "http",
-        Function::new(ctx.clone(), move |params: String| -> String {
-            let parsed: Value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
-            pi_host_tools::http::run(&parsed).to_string()
-        })
-        .map_err(|e| format!("host.http: {e}"))?,
-    )
-    .map_err(|e| format!("host.http: {e}"))?;
+    // http(callId, paramsJson) -> 出网请求（SSRF 防护 + HTML→文本，实现在
+    // pi-host-tools::http）。**要求该 callId 先完成审批握手** —— 与 host.callTool 同一条
+    // 规矩：JS 侧实现的工具（fetch / MCP）自己动手发请求，所以执行权要卡在「拿到网络」
+    // 这一步，否则改写 JS 就能绕过审批直接出网。
+    {
+        let approvals = Arc::clone(&approvals);
+        host.set(
+            "http",
+            Function::new(
+                ctx.clone(),
+                move |call_id: String, params: String| -> String {
+                    if let Err(denied) = approvals.ensure_granted(&call_id, "http") {
+                        return json!({ "error": denied }).to_string();
+                    }
+                    let parsed: Value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
+                    pi_host_tools::http::run_authorized(&parsed, &allowed_origins).to_string()
+                },
+            )
+            .map_err(|e| format!("host.http: {e}"))?,
+        )
+        .map_err(|e| format!("host.http: {e}"))?;
+    }
+
+    // mcpConfig() -> 已配置的 MCP 服务器（宿主读文件，与 App 的 mcp_config 同分工）
+    {
+        let config_path = mcp_config_path.clone();
+        host.set(
+            "mcpConfig",
+            Function::new(ctx.clone(), move || -> String {
+                std::fs::read_to_string(&config_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .unwrap_or_else(|| json!({ "servers": [] }))
+                    .to_string()
+            })
+            .map_err(|e| format!("host.mcpConfig: {e}"))?,
+        )
+        .map_err(|e| format!("host.mcpConfig: {e}"))?;
+    }
 
     // fs(op, payloadJson) -> pi 的 Result 形状（会话持久化用，jail 到 sessions 根）
     {

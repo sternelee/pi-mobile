@@ -39,6 +39,11 @@ pub enum Tier {
 /// 分档表 —— 与 `src-tauri/src/approval.rs` 的 ASK/ALWAYS_ASK 保持一致
 /// （这里只有 spike 已暴露的工具；多出来的名字留着给后续对齐用）。
 pub fn tier_for(tool: &str) -> Tier {
+    // MCP 工具（`mcp__<server>__<tool>`）：外部服务器提供的能力，**默认全部 ask**
+    // （D11）。它们由 JS 侧执行（经 host.http），执行权靠 host.http 的握手卡住。
+    if tool.starts_with("mcp__") {
+        return Tier::Ask;
+    }
     const ASK: &[&str] = &["write", "edit", "mkdir", "bash", "git_commit"];
     const ALWAYS_ASK: &[&str] = &["git_pull", "rm"];
     if ALWAYS_ASK.contains(&tool) {
@@ -273,6 +278,23 @@ impl Approvals {
                     String::new(),
                 )
             }
+            other if other.starts_with("mcp__") => {
+                // MCP 工具的参数没有统一形状，展示成一行紧凑 JSON 让人能判断
+                let compact = serde_json::to_string(args).unwrap_or_default();
+                let cut = compact
+                    .char_indices()
+                    .nth(160)
+                    .map(|(i, _)| i)
+                    .unwrap_or(compact.len());
+                (
+                    format!(
+                        "MCP {other} {}{}",
+                        &compact[..cut],
+                        if cut < compact.len() { "…" } else { "" }
+                    ),
+                    String::new(),
+                )
+            }
             other => (format!("{other} {rel}"), String::new()),
         }
     }
@@ -374,6 +396,9 @@ mod tests {
         assert_eq!(tier_for("edit"), Tier::Ask);
         assert_eq!(tier_for("mkdir"), Tier::Ask);
         assert_eq!(tier_for("rm"), Tier::AlwaysAsk);
+        // MCP 工具默认 ask（D11）
+        assert_eq!(tier_for("mcp__deepwiki__read_wiki"), Tier::Ask);
+        assert_eq!(tier_for("mcp__anything__x"), Tier::Ask);
         assert_eq!(tier_for("git_pull"), Tier::AlwaysAsk);
     }
 

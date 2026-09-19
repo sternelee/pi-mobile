@@ -24,6 +24,12 @@ use guest::{Guest, Sink};
 use pi_host_tools::HostTools;
 use serde_json::Value;
 
+/// 基础 system prompt。AGENTS.md / 目标 / todo 引导由 JS 侧组装（见 composeSystemPrompt），
+/// 与 App 的分工一致。
+const SYSTEM_PROMPT: &str =
+    "You are a coding agent running inside a QuickJS guest on a mobile device. \
+     You have file tools; use them instead of guessing. Answer briefly.";
+
 const HARD_TIMEOUT: Duration = Duration::from_secs(180);
 const TICK_INTERVAL: Duration = Duration::from_millis(2);
 
@@ -39,6 +45,7 @@ struct Args {
     goal: Option<String>,
     net_check: bool,
     compact_at: u64,
+    mcp_config: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -54,6 +61,7 @@ fn parse_args() -> Result<Args, String> {
     let mut goal: Option<String> = None;
     let mut net_check = false;
     let mut compact_at = 0u64;
+    let mut mcp_config: Option<PathBuf> = None;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -70,6 +78,11 @@ fn parse_args() -> Result<Args, String> {
             "--quiet" => quiet = true,
             "--resume" => resume = true,
             "--net-check" => net_check = true,
+            "--mcp-config" => {
+                mcp_config = Some(PathBuf::from(
+                    argv.next().ok_or("--mcp-config needs a value")?,
+                ))
+            }
             "--compact-at" => {
                 compact_at = argv
                     .next()
@@ -109,6 +122,7 @@ fn parse_args() -> Result<Args, String> {
         goal,
         net_check,
         compact_at,
+        mcp_config,
     })
 }
 
@@ -210,19 +224,36 @@ fn run() -> Result<(), String> {
         .workspace
         .canonicalize()
         .unwrap_or_else(|_| args.workspace.clone());
+    // MCP 服务器的授权源：从宿主自己那份配置读出 `scheme://host:port`。
+    // SSRF 防护对 fetch 必须严格，但用户显式配置的 MCP 目标（常在本地/局域网）
+    // 应当被授权 —— 判据是「配置过」而不是「放宽防护」。
+    let mcp_config_path = args
+        .mcp_config
+        .clone()
+        .unwrap_or_else(|| data_dir.join("mcp.json"));
+    let allowed_origins = mcp_server_origins(&mcp_config_path);
+    if !allowed_origins.is_empty() {
+        println!("mcp origins  {}", allowed_origins.join(" "));
+    }
+
     let guest = Guest::start(
-        tools,
-        sink.clone(),
-        approvals.clone(),
-        asks,
-        sessions_dir.clone(),
-        goal_path.clone(),
-        &workspace_label.to_string_lossy(),
-        &args.model,
-        "You are a coding agent running inside a QuickJS guest on a mobile device. \
-         You have file tools; use them instead of guessing. Answer briefly.",
-        &args.thinking,
-        args.compact_at,
+        guest::HostDeps {
+            tools,
+            sink: sink.clone(),
+            approvals: approvals.clone(),
+            asks,
+            sessions_root: sessions_dir.clone(),
+            goal_path: goal_path.clone(),
+            mcp_config_path: mcp_config_path.clone(),
+            allowed_origins: allowed_origins.clone(),
+        },
+        guest::GuestOptions {
+            model_label: args.model.clone(),
+            system_prompt: SYSTEM_PROMPT.to_string(),
+            thinking_level: args.thinking.clone(),
+            workspace_label: workspace_label.to_string_lossy().into_owned(),
+            compact_at: args.compact_at,
+        },
     )?;
     let boot_ms = boot_start.elapsed();
 
@@ -232,13 +263,6 @@ fn run() -> Result<(), String> {
     println!(
         "quickjs heap        {:>8} bytes used / {} malloc",
         heap_used, heap_malloc
-    );
-    // 工具清单从 guest 取（对齐 App 的 __pi_tool_names）：Rust 给定义、JS 补纯 JS 工具
-    let tools = guest.tool_names()?;
-    println!(
-        "tools exposed       {:>8}  {}",
-        tools.len(),
-        tools.join(" ")
     );
     if let Ok(info) = guest.session_info() {
         if let Some(goal) = info["goal"].as_str() {
@@ -262,6 +286,30 @@ fn run() -> Result<(), String> {
                     Some("session_error") => {
                         println!("  [session] {}", event["error"].as_str().unwrap_or("?"))
                     }
+                    Some("mcp_connecting") => {
+                        println!("  [mcp] 连接 {} …", event["server"].as_str().unwrap_or("?"))
+                    }
+                    Some("mcp_ready") => println!(
+                        "  [mcp] {} 就绪：{}",
+                        event["server"].as_str().unwrap_or("?"),
+                        event["tools"]
+                            .as_array()
+                            .map(|list| list
+                                .iter()
+                                .filter_map(|t| t.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" "))
+                            .unwrap_or_default()
+                    ),
+                    Some("mcp_error") => println!(
+                        "  [mcp] {} 失败：{}",
+                        event["server"].as_str().unwrap_or("?"),
+                        event["error"].as_str().unwrap_or("?")
+                    ),
+                    Some("mcp_tools_registered") => println!(
+                        "  [mcp] 共注册 {} 个 mcp__ 工具",
+                        event["count"].as_u64().unwrap_or(0)
+                    ),
                     _ => {}
                 }
             }
@@ -274,6 +322,14 @@ fn run() -> Result<(), String> {
             return Err("context_ready 未到达（systemPrompt 可能没装完）".into());
         }
     }
+    // 工具清单从 guest 取（对齐 App 的 __pi_tool_names）。**放在 context_ready 之后**：
+    // MCP 工具是那期间异步注册的，boot 时就打印会漏掉它们。
+    let tools = guest.tool_names()?;
+    println!(
+        "tools exposed       {:>8}  {}",
+        tools.len(),
+        tools.join(" ")
+    );
 
     // ── 会话恢复（--resume）：把最新会话的消息灌回 agent ────────────────
     if args.resume {
@@ -548,6 +604,26 @@ fn run() -> Result<(), String> {
 
     println!("\nOK");
     Ok(())
+}
+
+/// 从 mcp.json 里取所有服务器的源（给 `http` 通道的授权列表用）。
+fn mcp_server_origins(path: &std::path::Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    config["servers"]
+        .as_array()
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(|server| server["url"].as_str())
+                .filter_map(pi_host_tools::http::origin_of)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn ms(duration: Duration) -> f64 {
