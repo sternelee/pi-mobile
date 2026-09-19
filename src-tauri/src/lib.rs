@@ -10,6 +10,7 @@ mod mcp;
 mod native;
 mod oauth;
 mod pi_bun;
+mod qjs;
 mod preview;
 mod script;
 mod sessions;
@@ -455,6 +456,8 @@ pub fn run() {
                 let _ = handle.emit("pi-agent-event", json);
             };
             pi_bun::loopback::set_event_sink(emit.clone());
+            // B 路线（QuickJS）的事件汇：agent 事件经它投成 pi-agent-event
+            qjs::set_event_sink(emit.clone());
             // fetch 工具的日志汇（`pi-host-tools::http` 抽出去后不再直接依赖 logcat）
             pi_host_tools::http::set_log_sink(pi_bun::logcat);
             approval::set_event_sink(emit.clone());

@@ -99,7 +99,7 @@ fn runtime_lock() -> &'static Mutex<Option<PiBunRuntime>> {
 static LOG_PATH: OnceLock<String> = OnceLock::new();
 
 /// 由 `agent_init` 调用：把日志落到 data_dir 下。
-pub fn set_log_dir(data_dir: &str) {
+pub(crate) fn set_log_dir(data_dir: &str) {
     let _ = LOG_PATH.set(format!("{data_dir}/pi-bun.log"));
 }
 
@@ -346,6 +346,11 @@ fn run_probe(label: &str, script: &str, url: &str, slot: &str, budget: std::time
 
 /// 初始化 agent：配置注入 + bundle 加载（同步 kick，立即返回）。
 pub fn agent_init(data_dir: &str) -> Result<(), String> {
+    // 运行时开关（`PI_AGENT_RUNTIME` 或 `{data_dir}/runtime.txt`）：默认 bun，
+    // 选 qjs 时整条链走 QuickJS（src-tauri/src/qjs/），UI 与命令契约不变。
+    if crate::qjs::resolve_runtime(data_dir) == crate::qjs::Runtime::QuickJs {
+        return crate::qjs::agent_init(data_dir);
+    }
     // 先立日志通道：真机排障只能靠文件（各平台 stdout/logcat 都不可靠，
     // 缘由见 set_log_dir 注释）。之后的每条 logcat 都会落盘。
     set_log_dir(data_dir);
@@ -506,6 +511,9 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
 
 /// 向 agent 提交一条 prompt（kick；结果经 agent_event 异步流回）。
 pub fn agent_prompt(text: &str) -> Result<String, String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::agent_prompt(text);
+    }
     let arg = serde_json::to_string(text).map_err(|e| format!("serialize: {e}"))?;
     let (r, err) = evaluate_blocking(&format!("globalThis.__pi_prompt({arg})"), "pi:prompt")?;
     if err {
@@ -516,6 +524,9 @@ pub fn agent_prompt(text: &str) -> Result<String, String> {
 
 /// 轮询 agent 状态（busy/lastError/queued）。
 pub fn agent_status() -> Result<String, String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::agent_status();
+    }
     let (r, err) = evaluate_blocking("globalThis.__pi_status()", "pi:status")?;
     if err {
         return Err(format!("status eval threw: {r}"));
@@ -525,6 +536,9 @@ pub fn agent_status() -> Result<String, String> {
 
 /// 重启恢复：取 bundle 内已恢复的历史消息（boot 时从最新 JSONL 会话回放）。
 pub fn agent_history() -> Result<String, String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::agent_history();
+    }
     let (r, err) = evaluate_blocking("globalThis.__pi_history()", "pi:history")?;
     if err {
         return Err(format!("history eval threw: {r}"));
@@ -537,6 +551,9 @@ pub fn agent_history() -> Result<String, String> {
 /// __pi_session_open_result。不得直接 eval 挂 I/O 的 Promise——waitForPromise
 /// 会阻塞 VM 线程，而 fs hostcall 恰需该线程 tick → 桥死锁（smoke2 同款教训）。
 pub fn session_open(id: &str) -> Result<(), String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::session_open(id);
+    }
     let arg = serde_json::to_string(id).map_err(|e| format!("serialize: {e}"))?;
     let (r, err) = evaluate_blocking(
         &format!("globalThis.__pi_open_session({arg})"),
@@ -576,6 +593,9 @@ pub fn session_open(id: &str) -> Result<(), String> {
 
 /// 新建空白会话（下一个 prompt 落新 JSONL）。
 pub fn session_new() -> Result<(), String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::session_new();
+    }
     let (r, err) = evaluate_blocking("globalThis.__pi_new_session()", "pi:session-new")?;
     if err {
         return Err(format!("session new threw: {r}"));
@@ -585,6 +605,9 @@ pub fn session_new() -> Result<(), String> {
 
 /// 中止当前 agent 运行（UI 停止按钮）。
 pub fn agent_stop() -> Result<(), String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::agent_stop();
+    }
     let (r, err) = evaluate_blocking("globalThis.__pi_stop()", "pi:stop")?;
     if err {
         return Err(format!("stop eval threw: {r}"));
@@ -594,6 +617,9 @@ pub fn agent_stop() -> Result<(), String> {
 
 /// M4：热重连 MCP 服务器（改配置后无需重启 App）。
 pub fn mcp_reconnect() -> Result<(), String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::mcp_reconnect();
+    }
     let (r, err) = evaluate_blocking("globalThis.__pi_mcp_reconnect()", "pi:mcp-reconnect")?;
     if err {
         return Err(format!("mcp reconnect eval threw: {r}"));
@@ -606,6 +632,9 @@ pub fn mcp_reconnect() -> Result<(), String> {
 /// Promise 落定（smoke2 已验证），plan/btw 的嵌套 Agent 运行期间事件仍经
 /// loopback 流动。
 pub fn call_string_global(fn_name: &str, arg: &str) -> Result<String, String> {
+    if crate::qjs::is_quickjs() {
+        return crate::qjs::call_string_global(fn_name, arg);
+    }
     let f = serde_json::to_string(fn_name).map_err(|e| format!("serialize: {e}"))?;
     let a = serde_json::to_string(arg).map_err(|e| format!("serialize: {e}"))?;
     let (r, err) = evaluate_blocking(&format!("globalThis[{f}]({a})"), "pi:call-global")?;

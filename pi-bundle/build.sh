@@ -132,3 +132,23 @@ if grep -qE '^(import|export) ' pi-bundle/dist/agent.js; then
 fi
 
 echo "OK pi-bundle/dist/agent.js ($(wc -c < pi-bundle/dist/agent.js) bytes)"
+
+# ── QuickJS 版 agent（B 路线，src-tauri/src/qjs/ 用）─────────────────────
+# 与上面那条**不同**的后处理：QuickJS 里也没有模块系统，但这里不需要 __require 垫片
+# —— agent-qjs.js 的 import 图里没有 node 内建（只有 pi-agent-core 的 agent/session
+# 与 pi-ai 的 event-stream），所以 `--format=iife` 直接就是 classic script。
+# 这条支线的产物由 include_str! 编进 Rust，运行期不需要 dist/ 存在。
+bun build pi-bundle/agent-qjs.js \
+  --format=iife --target=browser \
+  --outfile pi-bundle/dist/agent-qjs.js --minify-whitespace
+
+if grep -qE '^[[:space:]]*(import|export)[[:space:](]' pi-bundle/dist/agent-qjs.js; then
+  echo "ERROR: agent-qjs.js 里残留模块语法（QuickJS 只吃 classic script）" >&2
+  grep -nE '^[[:space:]]*(import|export)[[:space:](]' pi-bundle/dist/agent-qjs.js | head -5 >&2
+  exit 1
+fi
+if grep -q 'import\.meta' pi-bundle/dist/agent-qjs.js; then
+  echo "ERROR: agent-qjs.js 里残留 import.meta" >&2
+  exit 1
+fi
+echo "OK pi-bundle/dist/agent-qjs.js ($(wc -c < pi-bundle/dist/agent-qjs.js) bytes)"

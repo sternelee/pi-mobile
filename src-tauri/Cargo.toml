@@ -69,9 +69,15 @@ git2 = { version = "0.20", default-features = false, features = [
 # Tauri 之外的宿主也能复用同一份实现 —— 见 `spikes/quickjs-agent`（QuickJS 宿主）
 # 与 `docs/POCKET-PI-NOTES.md`。loopback.rs 只保留同名转发，行为不变。
 pi-host-tools = { path = "../crates/pi-host-tools" }
+# B 路线（qjs）：QuickJS 版 agent 运行时。预生成绑定只覆盖常见平台，
+# android/ios 要现场生成（见下面的 target 段；配方与 spike 的 tools/*-build.sh 一致）。
+rquickjs = "0.12"
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rquickjs = { version = "0.12", features = ["bindgen"] }
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
