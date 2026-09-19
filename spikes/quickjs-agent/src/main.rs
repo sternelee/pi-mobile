@@ -13,6 +13,7 @@
 mod approval;
 mod deepseek;
 mod guest;
+mod netcheck;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -35,6 +36,7 @@ struct Args {
     decision: DecisionSource,
     resume: bool,
     goal: Option<String>,
+    net_check: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -48,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
     let mut decision = DecisionSource::Prompt;
     let mut resume = false;
     let mut goal: Option<String> = None;
+    let mut net_check = false;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -63,6 +66,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--quiet" => quiet = true,
             "--resume" => resume = true,
+            "--net-check" => net_check = true,
             "--goal" => goal = Some(argv.next().ok_or("--goal needs a value")?),
             // 审批的三种决策源：交互（默认）/ 全放行 / 全拒绝。后两者也让审批
             // 这条链路可以在无人值守下被验证（仍然走完整握手）。
@@ -93,6 +97,7 @@ fn parse_args() -> Result<Args, String> {
         decision,
         resume,
         goal,
+        net_check,
     })
 }
 
@@ -125,6 +130,11 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = parse_args()?;
     let cfg = deepseek::DeepSeekConfig::from_env()?;
+
+    // 真机自诊断：只验网络与引擎，不起 agent、不发对话请求
+    if args.net_check {
+        return netcheck::run(&cfg);
+    }
 
     // 数据目录放 .data（备份根 + policy.json + sessions），与 workspace 分开
     // —— 与 App 内布局一致。

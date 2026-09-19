@@ -138,6 +138,47 @@ impl Sink {
     }
 }
 
+/// 引擎层自检：不挂 host、不发请求，只回答「QuickJS 起得来吗 / bundle 能 eval 吗 /
+/// `__spike` 的导出齐不齐」。真机上把「引擎」与「网络」分开判断用（见 netcheck.rs）。
+pub fn engine_selftest() -> Result<String, String> {
+    let runtime = Runtime::new().map_err(|e| format!("quickjs runtime: {e}"))?;
+    runtime.set_memory_limit(256 * 1024 * 1024);
+    let context = Context::full(&runtime).map_err(|e| format!("quickjs context: {e}"))?;
+    let prelude = include_str!("../js/prelude.js");
+    let bundle = include_str!("../dist/agent.js");
+
+    context
+        .with(|ctx| -> Result<f64, String> {
+            ctx.eval::<(), _>(prelude)
+                .map_err(|e| describe(&ctx, e, "prelude"))?;
+            let started = Instant::now();
+            ctx.eval::<(), _>(bundle)
+                .map_err(|e| describe(&ctx, e, "bundle"))?;
+            let eval_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let probe: String = ctx
+                .eval(
+                    "['boot','prompt','tick','drain','restore','sessionInfo']\
+                 .map((k) => typeof __spike[k]).join(',')",
+                )
+                .map_err(|e| describe(&ctx, e, "probe"))?;
+            if probe != "function,function,function,function,function,function" {
+                return Err(format!("__spike 导出不全: {probe}"));
+            }
+            Ok(eval_ms)
+        })
+        .map(|eval_ms| {
+            // ⚠️ memory_usage() 要在 context.with **之外**取：with 期间 runtime 的
+            // RefCell 已被借出，里面再借会 panic（RefCell already borrowed，实测）。
+            let usage = runtime.memory_usage();
+            format!(
+                "QuickJS ok；bundle {} KB eval {:.0} ms；堆 {:.2} MB；__spike 6 个导出齐全",
+                bundle.len() / 1024,
+                eval_ms,
+                usage.memory_used_size as f64 / 1_048_576.0
+            )
+        })
+}
+
 pub struct Guest {
     runtime: Runtime,
     context: Context,

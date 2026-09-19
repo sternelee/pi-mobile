@@ -72,6 +72,19 @@ adb push "${ENV_FILE}" "${REMOTE_DIR}/env.sh" > /dev/null 2>&1 || {
 }
 adb shell "chmod 600 ${REMOTE_DIR}/env.sh"
 
+# ── 先自检（真机上最想知道「是网不通还是引擎没起来」）────────────────────
+# 只花约 300ms（DNS + 一次 GET /models + 引擎自检），失败就直接停在这里，
+# 不会让你对着一个转圈的 agent 猜。SKIP_NETCHECK=1 可跳过。
+if [[ -z "${SKIP_NETCHECK:-}" ]]; then
+  echo "===> net-check（先分层确认网络与引擎）"
+  adb shell "cd /data/local/tmp && . ${REMOTE_DIR}/env.sh && ${REMOTE_BIN} --net-check" || {
+    echo >&2
+    echo "error: net-check 没过 —— 按上面 dns/tls/engine 哪一行失败定位（SKIP_NETCHECK=1 可跳过）" >&2
+    exit 1
+  }
+  echo
+fi
+
 # ── 跑 ──────────────────────────────────────────────────────────────────
 # workspace / data 都放在设备上 spike 自己的目录里（默认值是仓库相对路径，真机没有）
 ARGS=("$@")

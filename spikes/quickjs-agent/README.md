@@ -78,6 +78,8 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 | `--resume` | 从最新会话恢复（消息灌回 agent + todo 状态重建） |
 | `--yes` / `--deny` | 审批全放行 / 全拒绝（**仍走完整握手**，无人值守也能验证） |
 | `--delay-approval <ms>` | 延迟放行，用来观测「等待期间 guest 没被阻塞」 |
+| `--net-check` | 只验 dns / tls / engine 三层，不起 agent（真机自诊先用它） |
+| `--data-dir <dir>` | 数据目录（真机上不能依赖仓库相对路径；run 脚本会显式传） |
 | （默认） | 审批在终端交互：`y` / `n` / `a`(always) / `d`(deny-all)，write/edit 带 diff |
 | `--model` / `--thinking` / `--workspace` / `--quiet` | 模型、思考档、工作区、静音 |
 
@@ -102,9 +104,24 @@ python3 spikes/quickjs-agent/tools/mock-deepseek.py 8899 0.0.0.0 &
 MOCK=1 bash spikes/quickjs-agent/tools/android-run.sh --prompt "…"
 ```
 
-`android-run.sh` 会把 workspace/data 放到设备上的 `/data/local/tmp/pi-spike/`，
-所以第二轮加 `--resume` 就能在设备上验会话恢复。不带 `--yes/--deny` 时是本目录默认的
-**交互审批**：`adb shell` 有 pty，可以直接在终端敲 `y`/`n`/`a`/`d`。
+`android-run.sh` 会**先跑一次自检**（`--net-check`，约 300ms），再执行正式那轮；
+workspace/data 放在设备上的 `/data/local/tmp/pi-spike/`，所以第二轮加 `--resume`
+就能在设备上验会话恢复。不带 `--yes/--deny` 时是本目录默认的**交互审批**：
+`adb shell` 有 pty，可以直接在终端敲 `y`/`n`/`a`/`d`。
+
+### `--net-check`：失败时先分层，别对着转圈的 agent 猜
+
+真机上失败，第一件要回答的是**哪一层坏了**。所以有个只验分层、不起 agent 的模式：
+
+```
+$ ./quickjs-agent-spike --net-check
+  dns     ok       13.5 ms  api.deepseek.com → 120.233.185.134, …
+  tls     ok      125.6 ms  api.deepseek.com (HTTP 401) — 证书由编译进来的 webpki 根校验，未用系统信任库
+  engine  ok      147.3 ms  QuickJS ok；bundle 356 KB eval 138 ms；堆 1.71 MB；__spike 6 个导出齐全
+```
+
+三层刻意分开：`dns` / `tls` 是网络，`engine` 完全不碰网络。所以 DNS 挂掉时
+engine 那行照样 `ok` —— 一眼看出「引擎是好的，是网不通」。任一失败非零退出。
 
 ### 已验证的（静态）
 
@@ -146,7 +163,8 @@ MOCK=1 bash spikes/quickjs-agent/tools/android-run.sh --prompt "…"
 
 1. **DNS/出网**：rustls 走 `std::net` 的 `getaddrinfo` → Android Bionic 解析器读的是
    系统属性，理论上没问题；但**这正是 pi-mobile 在 iOS 上被 bun 的 c-ares 坑到的地方**
-   （c-ares 读不到 `/etc/resolv.conf`）。这条是本 spike 在真机上最值得看的点。
+   （c-ares 读不到 `/etc/resolv.conf`）。这条是本 spike 在真机上最值得看的点 ——
+   上机先跑 `--net-check`，它会把 DNS 与 TLS 分开报。
 2. **`/data/local/tmp` 可执行**：adb shell 里正常，但如果以后塞进 APK，则需要
    INTERNET 权限 + 不能从 data 分区 exec（那是另一套问题）。
 3. 冷启动与堆占用是否与 macOS 同量级（QuickJS 无 JIT，Android 上 arm64 也是解释执行，
