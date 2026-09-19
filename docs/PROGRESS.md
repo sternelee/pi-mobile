@@ -2,6 +2,81 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第二轮）— ✅ spike 加会话持久化 + 审批 + goal/todo 插件；真 DeepSeek 全量验证
+
+在第一轮 spike 上补四个能力。**全部真模型验证**（`DEEPSEEK_API_KEY` 在本机 `~/.zshrc`，
+非交互 shell 不 source，所以第一轮没找到）。仍在分支 `spike/quickjs-agent`。
+
+### ① 审批：分档由 Rust 持有并**强制**
+
+分档表照抄 `approval.rs`（auto / ask / always_ask，`rm` 永不降级）。比 App 现有实现
+多的一条：**工具执行的唯一入口 `host.callTool(callId,…)` 要求该 callId 先完成审批
+握手**，与档位无关 —— JS 忘了问、或被改写后故意不问，一律执行不了
+（同 D14「边界强制在 Rust 侧」）。JS 侧因此零策略代码。
+
+决策源可换（spike 是终端 stdin，App 是 WebView 经 Tauri 命令），**协议同一套**：
+`approval_request` 事件出去、`approval_decision` 回来。
+
+实测一轮三档同现：
+```
+[approval] ls → allow (auto) / read → allow (auto)
+[approval] rm (always_ask) — delete src/app.js — 1 file(s) in 0 dir(s), 33 bytes
+[approval] edit (ask) — edit notes.md（带 unified diff）
+```
+**非阻塞有数字**：`--delay-approval 1000` 时 guest 跑了 **334 拍**（tick 计数器），
+即等用户决策期间 VM 线程照常跑 —— M1 踩过的「VM 线程上等 I/O」坑没复现。
+
+拒绝路径也验了：`--deny` 下 agent 明确说「不会换别的工具绕过同样的改动」。
+
+### ② 会话持久化：**复用 App 的同一份实现**
+
+上游 `JsonlSessionRepo` + `Session`，fs 后端在 Rust（`host.fs` → 新抽的
+`pi-host-tools::sessions_fs`，即 `loopback.rs` 那 12 个 fs 方法，262 行同样脚本切片
+抽出）。接法照搬 `agent-main.js`（设备验证过的那份）。
+
+产物 **pi-v4 逐字段一致**，与 App 的会话文件可互相打开：
+```
+{"kind":"header","version":4,"id":"01a0b726-…","createdAt":…,"cwd":"…"}
+{"kind":"entry","lane":"main","type":"message","id":"…","message":{…}}
+```
+`--resume` 恢复 18 条消息 **1.8 ms**，且 agent **不调工具**就答出上一轮创建的文件
+（证明上下文真回来了，不是假装）。
+
+### ③ goal / todo 插件
+
+- **goal**：宿主持有 `goal.json`，JS 只拼进 systemPrompt 的 `# Current goal`（同 App 分工）。
+- **todo**：4 态状态机 + `blockedBy` 依赖校验（未知/墓碑/自阻塞/成环）+ 6 动作 +
+  `todo_updated` 事件；状态不写磁盘，从会话消息的 `details` 快照回放重建。
+  ⚠️ 是**移植**不是共享，跟 App 那份平行（README 里标了）。
+
+### 指标（macOS arm64 / release / 真 DeepSeek）
+
+| 指标 | 本轮 | 第一轮 |
+|---|---|---|
+| JS bundle | **364,730 B**（含会话+todo） | 316,378 B |
+| guest 冷启动 | 26 – 60 ms | 48 – 150 ms |
+| QuickJS 堆 | 1.81 MB | 1.59 MB |
+| 会话恢复 18 条 | 1.8 ms | — |
+| 首增量（真网络） | 402 – 929 ms | 本地 mock 2 – 14 ms |
+| 整轮（4 请求 + 3 工具） | 4.4 s | — |
+
+App 的 bundle 是 2,950,176 B → 仍小 **8.1×**。
+
+### 结论修正
+
+第一轮说「B 的真实增量 = 重写 pi-ai 传输层 + 重建产品层」。这一轮把它落成一张
+**能复用 / 要重写**的清单（README 末尾）：工具层与会话层**能复用**（零改动），
+审批层与插件层**要重写**（协议与语义可照搬），provider 传输**要重写**。
+
+### ⚠️ 本轮踩的坑（都记在 spike README）
+
+1. **会话静默不落盘**：两个原因叠加 —— 宿主漏了「建 sessions 根目录」（App 在
+   `lib.rs` 启动时建），且我照抄 `joinPath` 时**多拼了一次** `SESSIONS_ROOT`。
+   靠「给 fs 通道加失败日志」才定位（第一版只看到 `FileError`，不知哪一步哪个路径）。
+2. **deny 路径在指标里隐形**：被拒调用提前 return 不记 span，已补 `denied_calls`。
+3. **JS 事件精简器丢了 `delta`** → 「模型答了但屏幕空白」。
+4. **mock 在工具调用前发了 `[DONE]`** → 工具调用整段丢失。mock 也要当被测代码写。
+
 ## 2026-09-19 — ✅ PocketPi/PocketJS 调研 + B 方案（QuickJS 薄 JS）spike 跑通（分支 spike/quickjs-agent）
 
 两件事：先调研社区同类实现，再把调研里最有价值的那条路线做成可运行的 spike。

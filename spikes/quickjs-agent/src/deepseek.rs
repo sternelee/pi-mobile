@@ -125,12 +125,20 @@ pub fn convert_messages(context: &Value) -> Vec<Value> {
                 entry.insert("role".into(), json!("assistant"));
                 entry.insert(
                     "content".into(),
-                    if text.is_empty() { Value::Null } else { json!(text) },
+                    if text.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(text)
+                    },
                 );
                 // DeepSeek：assistant 必须带 reasoning_content（无则空串）
                 entry.insert(
                     "reasoning_content".into(),
-                    json!(if thinking.is_empty() { String::new() } else { thinking }),
+                    json!(if thinking.is_empty() {
+                        String::new()
+                    } else {
+                        thinking
+                    }),
                 );
                 if !tool_calls.is_empty() {
                     entry.insert("tool_calls".into(), json!(tool_calls));
@@ -143,7 +151,11 @@ pub fn convert_messages(context: &Value) -> Vec<Value> {
             }
             Some("toolResult") => {
                 let text = text_of(message.get("content"));
-                let text = if text.is_empty() { "(no tool output)".to_string() } else { text };
+                let text = if text.is_empty() {
+                    "(no tool output)".to_string()
+                } else {
+                    text
+                };
                 out.push(json!({
                     "role": "tool",
                     "content": text,
@@ -288,7 +300,10 @@ pub fn complete(
     let status = response.status();
     if !status.is_success() {
         let text = response.text().unwrap_or_default();
-        return Err(format!("HTTP {status}: {}", text.chars().take(400).collect::<String>()));
+        return Err(format!(
+            "HTTP {status}: {}",
+            text.chars().take(400).collect::<String>()
+        ));
     }
 
     let mut thinking = String::new();
@@ -311,7 +326,10 @@ pub fn complete(
             continue;
         }
         let chunk: Value = serde_json::from_str(data).map_err(|e| {
-            format!("bad SSE chunk ({e}): {}", data.chars().take(200).collect::<String>())
+            format!(
+                "bad SSE chunk ({e}): {}",
+                data.chars().take(200).collect::<String>()
+            )
         })?;
         if let Some(u) = chunk.get("usage").filter(|u| !u.is_null()) {
             usage = parse_usage(u);
@@ -450,7 +468,8 @@ mod tests {
         assert_eq!(messages[2]["tool_calls"][0]["id"], "c1");
         assert_eq!(messages[2]["tool_calls"][0]["type"], "function");
         assert_eq!(
-            messages[2]["tool_calls"][0]["function"]["arguments"], "{\"path\":\"a.txt\"}"
+            messages[2]["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":\"a.txt\"}"
         );
         // toolResult → role:"tool" + tool_call_id
         assert_eq!(messages[3]["role"], "tool");

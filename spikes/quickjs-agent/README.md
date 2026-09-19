@@ -1,21 +1,25 @@
 # quickjs-agent spike —— B 方案的可运行验证
 
 > 「**薄 JS + 厚原生**」：pi-agent-core 的 Agent 类跑在 **QuickJS** guest 里，
-> 模型传输（DeepSeek 一家）与全部工具实现都在 **Rust**。
+> 模型传输（DeepSeek 一家）、工具、会话 fs、审批策略全在 **Rust**。
 > 背景与取舍见 [docs/POCKET-PI-NOTES.md](../../docs/POCKET-PI-NOTES.md)；
 > 本目录是那份笔记 §4「建议的下一步」里那个 spike。
 
 **这是一次实验，不是产品代码。** 它不进 CI、不进 App 构建、不改变 D1。
-结论见文末「结论」。
 
 ## 它验证了什么
 
 | # | 命题 | 结果 |
 |---|---|---|
-| 1 | 上游 `pi-agent-core` 的 `Agent` 类能在 QuickJS 里跑（非重写） | ✅ 真跑了：流式思考/文本、工具调用、多轮 |
-| 2 | 模型传输可以整个搬到 Rust，JS 里不要 HTTP/provider 栈 | ✅ 316KB bundle，0 个 provider SDK |
+| 1 | 上游 `pi-agent-core` 的 `Agent` 类能在 QuickJS 里跑（非重写） | ✅ 流式思考/文本、工具调用、多轮 |
+| 2 | 模型传输可以整个搬到 Rust，JS 里不要 HTTP/provider 栈 | ✅ 364KB bundle，0 个 provider SDK |
 | 3 | 工具可以直接**复用现有 Rust 实现**，不重写 | ✅ 与 Tauri 宿主同一份 `pi-host-tools` |
-| 4 | 体积/冷启动是否可接受 | ✅ 见下表 |
+| 4 | 体积/冷启动是否可接受 | ✅ bundle 小 8.1×，堆 1.8MB vs 87MB 的 .so |
+| 5 | **审批**能在不阻塞 guest 的前提下完成往返 | ✅ 1000ms 等待里 guest 跑了 **334 拍** |
+| 6 | **会话持久化**能复用 App 的同一份实现 | ✅ pi-v4 JSONL 逐字段一致，`--resume` 1.8ms 恢复 18 条 |
+| 7 | **goal / todo 插件**能按 App 语义落地 | ✅ 目标注入 prompt；todo 四态 + 依赖校验 + 回放重建 |
+
+**全部用真 DeepSeek 验证过**，不是只跑 mock。
 
 ## 结构
 
@@ -23,30 +27,31 @@
 spikes/quickjs-agent/
 ├── js/
 │   ├── prelude.js   QuickJS 缺什么补什么（实测清单在文件头）
-│   ├── entry.js     agent 本体：Agent + 自定义 streamFn + 工具壳
+│   ├── entry.js     agent 本体：Agent + streamFn + 工具壳 + 会话 + todo
 │   └── build.sh     bun build --format=iife → dist/agent.js（+ 模块语法硬校验）
 ├── src/
 │   ├── main.rs      CLI、循环、指标打印
 │   ├── guest.rs     rquickjs 宿主：注入 host 面、tick + 泵微任务、度量
+│   ├── approval.rs  审批：分档表 + 异步握手 + 终端决策源 + diff
 │   └── deepseek.rs  模型传输：请求编码 + SSE 解析（对齐 pi-ai openai-completions）
 ├── tools/
-│   └── mock-deepseek.py  脚本化 SSE mock（无 key 也能端到端跑通）
-└── crates/pi-host-tools（仓根）  抽出来的工具实现，Tauri 宿主共用同一份
+│   └── mock-deepseek.py  无状态 SSE mock（无 key 也能端到端跑通）
+└── crates/pi-host-tools（仓根）  抽出来的实现，Tauri 宿主共用同一份
 ```
 
-数据流（与 pocket-pi 同构）：
+数据流：
 
 ```
 Rust 主循环                            QuickJS guest
   │ boot(config) ─────────────────────────▶ __spike.boot
-  │ prompt(text) ────────────────────────▶ __spike.prompt  → agent.prompt()
+  │ prompt(text) ────────────────────────▶ __spike.prompt → agent.prompt()
   │                                          └ streamFn → host.startModel(json) ─┐
-  │ ◀──────────────────────────────────────────────────────────────────────────────┘
-  │ 模型线程：HTTP + SSE ─→ 事件队列
-  │ tick() ─────────────────────────────▶ __spike.tick（poll 取事件→喂流）
+  │ 模型线程：HTTP + SSE ─→ 事件队列 ◀─────────────────────────────────────────────┘
+  │ tick() ─────────────────────────────▶ __spike.tick（poll 取事件 → 喂流）
   │ execute_pending_job() ×N ──────────────▶ 跑微任务（await 继续）
+  │                                        └ 工具：host.ensureApproval → host.callTool
+  │ 审批线程：stdin/diff ─→ 事件队列      （Rust 侧校验执行权，JS 绕过无效）
   │ ◀── drain() 取 agent 事件 ──────────────┘
-  │ 工具：host.callTool(name,args) ───────▶ pi-host-tools（同步执行）
 ```
 
 ## 跑起来
@@ -58,95 +63,165 @@ bash spikes/quickjs-agent/js/build.sh
 # 2a. 不出网、不花钱的端到端（推荐先跑这个）
 python3 spikes/quickjs-agent/tools/mock-deepseek.py 8899 &
 DEEPSEEK_API_KEY=mock DEEPSEEK_BASE_URL=http://127.0.0.1:8899 \
-  cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
-  --prompt "Read notes.md and tell me what is in the workspace."
-
-# 2b. 真打 DeepSeek
-DEEPSEEK_API_KEY=sk-… \
   cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- --prompt "…"
 
-# 可选参数：--model / --thinking / --workspace / --quiet
+# 2b. 真打 DeepSeek
+export DEEPSEEK_API_KEY=sk-…
+cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
+  --goal "Keep the workspace tidy" \
+  --prompt "Track as multi-step: (1) create src/pick.js, (2) note it in notes.md."
 ```
+
+| 参数 | 作用 |
+|---|---|
+| `--goal <text>` | 写入 `goal.json`（宿主持有），注入 system prompt 的 `# Current goal` |
+| `--resume` | 从最新会话恢复（消息灌回 agent + todo 状态重建） |
+| `--yes` / `--deny` | 审批全放行 / 全拒绝（**仍走完整握手**，无人值守也能验证） |
+| `--delay-approval <ms>` | 延迟放行，用来观测「等待期间 guest 没被阻塞」 |
+| （默认） | 审批在终端交互：`y` / `n` / `a`(always) / `d`(deny-all)，write/edit 带 diff |
+| `--model` / `--thinking` / `--workspace` / `--quiet` | 模型、思考档、工作区、静音 |
 
 > mock 是**无状态**的：消息里没有 `role:"tool"` 就回一个 `read` 工具调用，有就回收尾
 > 文本。所以同一句话可以反复跑，每次都会走完整的两轮 + 一次真实工具执行。
 
 ## 实测数字
 
-macOS arm64 / release / 本地 mock（所以「首 token」是**纯开销**，不含网络）：
+macOS arm64 / release / **真 DeepSeek**：
 
 | 指标 | 值 |
 |---|---|
-| JS bundle（prelude + agent） | **316,378 B**；对照 `pi-bundle/dist/agent.js` **2,950,176 B** → **小 9.3×** |
-| guest 冷启动（Runtime + prelude + bundle eval + boot） | **48 – 150 ms**（首次跑偏慢，热态 ~50ms） |
-| QuickJS 堆 | **1.59 MB** 在用 / 1.90 MB malloc（bun 路线是 87MB 的 .so） |
-| prompt → 首个增量 | **2 – 14 ms** |
-| 工具调用（读 63B 文件，走 `pi-host-tools`） | **0.1 – 5 ms** |
-| 整轮（2 次模型请求 + 1 次工具） | **63 – 161 ms** |
-| token 计账 | 1800 in / 80 out（含 `prompt_cache_hit_tokens` 的 cacheRead 拆分） |
+| JS bundle（prelude + agent，含会话+todo） | **364,730 B**；App 的 `pi-bundle/dist/agent.js` **2,950,176 B** → **小 8.1×** |
+| guest 冷启动 | **26 – 60 ms**（Runtime + prelude + 364KB bundle eval + boot） |
+| QuickJS 堆 | **1.81 MB** 在用 / 2.16 MB malloc（App 是 87MB 的 .so） |
+| 会话恢复（18 条消息） | **1.8 ms** |
+| 首增量（真网络） | 402 – 929 ms |
+| 工具调用（本地 fs） | 0.0 – 1.5 ms |
+| 审批等待期间的 tick 数 | **334 拍 / 1000 ms** |
+| 整轮（4 次模型请求 + 3 次工具） | 4.4 s |
 
-bundle 小的原因：**pi-ai 的 provider 栈整段被 tree-shake 掉**——JS 只 import 一个
-`AssistantMessageEventStream` 类（事件流的队列实现），而 `@anthropic-ai/sdk`、
-`@aws-sdk/client-bedrock-runtime`、`@google/genai`、`openai` 这些一个都不进图。
+体积差从 9.3× 变成 8.1×，是因为这里**又多了会话与 todo 的能力**（316KB → 364KB）；
+App 那 2.95MB 里仍有 8 家 provider + OAuth + 全部产品层。
 
-## 复用 Tauri 宿主的那份工具实现
+## 三个能力点是怎么落的
 
-工具实现从 `src-tauri/src/pi_bun/loopback.rs` 抽到 `crates/pi-host-tools`
-（root 显式传入，不再读模块级 `OnceLock`），`loopback.rs` 保留同名转发：
+### 审批：分档由 Rust 持有，JS 没有策略
 
-- 签名与错误文案逐字不变 —— `src-tauri` 的 44 个测试全绿，含
-  `pi_bun::loopback::tests::write_backup_and_revert_roundtrip`；
-- crate 自带 2 个测试（越狱判定三类拒绝 + 备份/回滚/树/预览往返）；
-- **没有任何一处 lint 债务增加**：`cargo fmt --check` 14 处、`cargo clippy -D warnings`
-  27 个错误，与改动前的 HEAD 完全一致（这些存量问题见「已知问题」）。
+分档表**照抄** `src-tauri/src/approval.rs`（`read/ls/grep` → auto、
+`write/edit/mkdir/bash/git_commit` → ask、`rm/git_pull` → **always_ask 永不降级**）。
 
-## 与 pi-mobile 现有实现的差异（刻意为之）
+比 App 现有实现更进一步的一点：**工具执行的唯一入口 `host.callTool(callId, …)`
+要求该 callId 先完成审批握手**，与档位无关。所以「JS 忘了问」或「JS 被改写后
+故意不问」都执行不了 —— 与 D14「边界强制在 Rust 侧」同一思路。JS 侧因此不需要
+任何策略代码，只是「问 → 等 → 执行」。
 
-| 维度 | bun 路线（`pi-bundle/agent-main.js`） | 本 spike |
+决策源可换：spike 是终端，App 里是 WebView 经 Tauri 命令。**协议一样**
+（`approval_request` 事件出去、`approval_decision` 事件回来），换的只是谁回答。
+
+非阻塞是真的：提示在独立线程读 stdin，guest 的 tick 循环照常跑。真机上这就是
+「审批卡在等用户时 UI 不冻结」。
+
+### 会话持久化：复用 App 的同一份实现
+
+用上游 `JsonlSessionRepo` + `Session`，fs 后端全在 Rust
+（`host.fs` → `pi-host-tools::sessions_fs`）。接法照搬 `pi-bundle/agent-main.js`
+（设备验证过的那份）：净化 undefined → `appendMessage`；assistant 在 `message_end`
+落盘、toolResult 在 `turn_end` 落盘；恢复时 `findEntries` 按 seq 升序回放。
+
+产物与 App **逐字段一致**（pi-v4）：
+
+```
+.data/sessions/--Users-...-workspace--/2026-09-19T00-52-14-479Z_01a0b726-….jsonl
+  {"kind":"header","version":4,"id":"01a0b726-…","createdAt":…,"cwd":"…"}
+  {"kind":"entry","lane":"main","type":"message","id":"…","message":{…}}
+```
+
+即两条路线的会话文件可以互相打开。
+
+### goal / todo 插件
+
+- **goal**：目标由宿主持有（`goal.json`，将来换成 App 的 `goal.rs`），JS 只把它拼进
+  systemPrompt 的 `# Current goal` —— 与 App 同一分工。
+- **todo**：4 态状态机（`pending/in_progress/completed/deleted`）+ `blockedBy` 依赖
+  校验（未知/墓碑/自阻塞/成环）+ 6 动作 + `todo_updated` 事件。状态**不写磁盘**，
+  从会话消息的 `details` 快照回放重建 —— 上游同款哲学。
+
+⚠️ todo 是**移植**不是共享：真正的产品形态应让两个 bundle import 同一份实现。
+spike 阶段先把语义对齐（`TODO_TRANSITIONS` 与 `replayTodos` 逐行对照 App 那份）。
+
+## 复用 Tauri 宿主的那两份实现
+
+`crates/pi-host-tools` 现在是两个**不同的 jail 根**：
+
+| 模块 | jail 根 | 内容 |
 |---|---|---|
-| JS 引擎 | bun + JSC（87MB .so） | QuickJS（bundle 316KB + 引擎 ~1MB 级） |
-| provider | 8 家 + OAuth + prompt caching | **1 家**（DeepSeek），Rust 手写协议 |
-| 工具 | 经 loopback HTTP → Rust | **直接**调 Rust（同一份 `pi-host-tools`） |
-| 会话 | pi `JsonlSessionRepo` + JSONL 落盘 | 无（内存态） |
-| 审批 | approval.rs 状态机 + diff + 回滚 | 无（工具直通） |
-| 循环驱动 | Rust eval + kick/poll | Rust tick + `execute_pending_job`（泵微任务） |
-| 取消 | `agent.abort()` | 无（prelude 里的 AbortController 是空壳） |
+| `lib.rs` | workspace | agent 文件工具（read/write/edit/ls/mkdir/rm/grep）+ 写前备份/回滚 |
+| `sessions_fs.rs` | sessions | pi `JsonlSessionRepo` 背后的 12 个 fs 方法（`/pi-sessions` 虚拟前缀） |
 
-前两项是本路线的**取舍**而非疏漏：provider 与产品层要么用 Rust 重写，要么就不要。
+两份都是**脚本按行切片**从 `loopback.rs` 抽出（字符串未手抄），`loopback.rs` 保留
+同名转发，签名与错误文案逐字不变：
+
+- `src-tauri` 44 个测试全绿，含 `write_backup_and_revert_roundtrip`；
+- crate 自带 4 个测试（越狱三类拒绝、会话 fs 往返、pi 错误形状、备份/回滚往返）；
+- **零新增 lint 债务**：`cargo fmt --check` 14 处、`cargo clippy -D warnings` 27 个
+  错误，与改动前的 HEAD 完全一致（stash 对照验证）。
+
+## 踩过的坑（都是真跑出来的，不是推的）
+
+1. **会话静默不落盘**：`repo.create` 一路 ENOENT。两个原因叠加，都靠「给 fs 通道加
+   失败日志」才定位（第一版 JS 只看到 `FileError`，不知道是哪一步、哪个路径）：
+   - 宿主漏了「建 sessions 根目录」这条职责（App 在 `lib.rs` 启动时建）；
+   - 我照抄 `joinPath` 时**多拼了一次** `SESSIONS_ROOT`，叠出
+     `/pi-sessions/pi-sessions/…`。App 那版返回 `'/' + joined`，parts 里已含根。
+2. **deny 路径在指标里是隐形的**：被拒的调用提前 return，不记 span。已补
+   `denied_calls` 记账，否则「拒绝生效了」这件事在报告里看不到。
+3. **事件精简器丢了 `delta`**：JS 侧把 `message_update` 压成 `{kind}` 时漏了
+   `delta`，表现是「模型答了但屏幕空白」。
+4. **mock 自己在工具调用前发了 `[DONE]`**：宿主解析器读到 `[DONE]` 直接收工，
+   工具调用整段丢失。mock 也要当被测代码写。
+5. **「等审批时没阻塞」这条指标要设计观测窗口**：管道输入是瞬时回答，等待窗口只有
+   微秒级，`ticks while waiting` 恒为 0，看不出任何东西。加 `--delay-approval`
+   把窗口撑开才量得到（且它只在真有等待时打印——那一轮 agent 只调了只读工具，
+   所以没有这行，不是 bug）。
 
 ## 已知问题 / 未验证
 
-- **未打真 DeepSeek**：本机没有 API key，真模型那一轮**没跑过**。mock 验证的是
-  协议形状与整条链，不是 DeepSeek 的真实兼容性。跑法见上面 2b。
 - **未在 iOS/Android 上构建**：rquickjs 是纯 C、无 JIT，跨平台编译预期简单
-  （pocketjs 已在 iOS/Android 上跑过 QuickJS），但本 spike 只跑了 macOS。
+  （PocketJS 已在两端跑过 QuickJS），但本 spike 只跑了 macOS。
   且 `rquickjs` **不要开 `bindgen` feature**：本机 PATH 里 NDK 的 clang 排在
   Apple clang 前面，bindgen 会拿 NDK 的 include 路径去找 `stdio.h` 而失败（实测）。
-- **`transformMessages` 没实现**：pi-ai 在发请求前会做 provider 归一化（孤儿
-  toolCall 修补、空 assistant 丢弃等）。本 spike 只做了三种角色 + 空 assistant 丢弃。
-  长时间多轮后可能撞到边界。
-- **流式 toolCall 的增量没有中途解析**：pi-ai 用 `partial-json` 让 UI 能提前看到
-  正在生成的参数；这里只在 `finish_reason` 之后整体解析。UI 体感有差别。
-- **无重试、无取消、无会话、无审批**：spike 边界内。
-- **`cargo fmt`/`clippy` 的存量问题与本 spike 无关，但值得一提**：`main` 分支现状
-  就有 14 处 fmt diff 与 27 个 clippy 错误（`git stash` 对照验证过），本目录零新增。
-  更重要的是 **CI 已经连续多个提交全红**，且 `rust` job 卡在 `cargo fmt` 这第一步
-  ——后面的 `clippy` 与 `test` 从未在 CI 上执行过。详见 `docs/PROGRESS.md`
-  2026-09-19 条目的「顺带发现 ①」。
+- **`transformMessages` 没实现**：pi-ai 发请求前会做 provider 归一化（孤儿
+  toolCall 修补、连续 toolResult 合并等）。本 spike 只做了三种角色 + 空 assistant
+  丢弃，长时间多轮后可能撞到边界。
+- **流式 toolCall 参数没有中途解析**：pi-ai 用 `partial-json` 让 UI 提前看到正在
+  生成的参数；这里只在 `finish_reason` 之后整体解析。
+- **无重试、无取消、无自动压缩**：`agent.abort()` 没接（prelude 里的
+  AbortController 是空壳），上下文超窗不压缩。
+- **goal 的 autoContinue 没做**：App 里 pi-goal 还有「目标未达成自动续跑（带上限）」，
+  这里只有目标注入与持久化。
+- **todo 是与 App 平行的移植**（见上），后续若两条路线并存应收敛成一份。
+- `cargo fmt`/`clippy` 的存量问题与本 spike 无关，但 **CI 已连续多个提交全红**，
+  且 `rust` job 卡在 `cargo fmt` 这第一步 —— 后面的 clippy 与 test 从未在 CI 上
+  执行过。详见 `docs/PROGRESS.md` 2026-09-19 条目的「顺带发现 ①」。
 
 ## 结论
 
-三条命题都成立，且成本比预期低：
+七条命题都成立。加上这一轮的能力（审批 / 会话 / goal / todo）之后，结论比第一轮更清楚：
 
-1. **QuickJS 能承载上游 agent**。pocket-pi 用 0.81、这里用 0.84.4，都不用改
-   pi-agent-core 一行代码 —— 只要提供 `streamFn` 与工具壳。
-2. **体积差的 9.3 倍全部来自 provider 栈**。这是「上游 100% 保真」在 bun 路线里
-   的隐性账单：provider 目录、SDK monorepo、OAuth 流程都进了 bundle。
-3. **工具这一半我们早就付过了**。抽 crate 只花了机械劳动，`loopback.rs` 的行为
-   与测试完全不变 —— 说明 B 路线的真实增量只在「provider 传输 + 产品层」。
+**B 路线的 JS 侧确实可以很薄**（364KB、无 provider SDK、无 fs、无 HTTP、无策略），
+但**每一层能力都需要在 Rust 侧重新长出来**。这一轮做的每一件事都在印证同一句话：
 
-**但这不等于应该切 B。** 本 spike 未触及的正是 A 路线已经交付的东西：会话持久化、
-审批与回滚、8 家 provider 的 quirk、OAuth 订阅登录。切 B 的实际工作量是
-「用 Rust 重写 pi-ai 的传输层 + 重建产品层」，不是「换个 JS 引擎」。
+> 切 B 的真实增量是「用 Rust 重写 pi-ai 传输层 + 重建产品层」，不是「换个 JS 引擎」。
 
-下一步若要做，见 `docs/POCKET-PI-NOTES.md` §4 的三个方向与触发条件。
+同时这一轮补上了第一轮缺的那半个答案，也就是一张「能复用 / 要重写」的清单：
+
+| 层 | 结论 |
+|---|---|
+| 工具实现 | **能复用**（同一份 `pi-host-tools`，零改动） |
+| 会话层 | **能复用**（同一份 `JsonlSessionRepo` + 同一份 Rust fs，格式互通） |
+| 审批层 | **要重写**（协议可照搬，但策略持有者与决策源都要按新形态重建） |
+| 插件层 | **要重写**（语义可照搬，实现要收敛成两份 bundle 共享的一份） |
+| provider 传输 | **要重写**（pi-ai 的 8 家 + OAuth + caching 得用 Rust 复刻） |
+
+如果哪天要评估是否切 B，这张表比体积数字更有用。
+
+是否切换以及触发条件，见 `docs/POCKET-PI-NOTES.md` §4。

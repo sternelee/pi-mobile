@@ -9,13 +9,14 @@
 //! 线程模型：`Runtime`/`Context` 非 `Send`，整个 guest 只在调用线程上碰；
 //! 模型线程与 guest 之间只共享一个 `Mutex<Vec<Value>>` 事件队列。
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rquickjs::{Context, Ctx, Function, Object, Runtime};
 use serde_json::{json, Value};
 
+use crate::approval::Approvals;
 use crate::deepseek::{self, DeepSeekConfig, StreamEvent};
 use pi_host_tools::HostTools;
 
@@ -32,8 +33,14 @@ pub struct Sink {
     pub model_spans: Mutex<Vec<(i64, Duration)>>,
     /// 每次工具调用的耗时。
     pub tool_spans: Mutex<Vec<(String, Duration)>>,
+    /// 被审批**拒绝**（或没握手）的调用 —— 拒绝路径也要可见。
+    pub denied_calls: Mutex<Vec<String>>,
     /// 累计 token 用量（prompt / completion）。
     pub tokens: Mutex<(u64, u64)>,
+    /// 是否有审批在等（决定 tick 循环要不要计「等待期间跑了几拍」）。
+    approval_pending: AtomicBool,
+    /// 等待审批期间 guest 又跑了几拍 —— 证明没阻塞 VM 线程。
+    ticks_while_waiting: Mutex<u64>,
 }
 
 impl Sink {
@@ -46,8 +53,29 @@ impl Sink {
             first_delta: Mutex::new(None),
             model_spans: Mutex::new(Vec::new()),
             tool_spans: Mutex::new(Vec::new()),
+            denied_calls: Mutex::new(Vec::new()),
             tokens: Mutex::new((0, 0)),
+            approval_pending: AtomicBool::new(false),
+            ticks_while_waiting: Mutex::new(0),
         }
+    }
+
+    /// 是否有审批在等（决定 tick 循环要不要计「等待期间跑了几拍」）。
+    pub fn set_pending_approval(&self, pending: bool) {
+        self.approval_pending.store(pending, Ordering::SeqCst);
+    }
+
+    pub fn pending_approval(&self) -> bool {
+        self.approval_pending.load(Ordering::SeqCst)
+    }
+
+    /// 审批等待期间由 tick 循环累加 —— 它不为 0 就说明 VM 线程没被 stdin 卡住。
+    pub fn bump_tick_while_waiting(&self) {
+        *self.ticks_while_waiting.lock().unwrap() += 1;
+    }
+
+    pub fn ticks_while_waiting(&self) -> u64 {
+        *self.ticks_while_waiting.lock().unwrap()
     }
 
     fn mark_turn_start(&self) {
@@ -68,7 +96,7 @@ impl Sink {
         }
     }
 
-    fn push(&self, event: Value) {
+    pub fn push(&self, event: Value) {
         self.queue.lock().unwrap().push(event);
     }
 
@@ -119,9 +147,14 @@ pub struct Guest {
 
 impl Guest {
     /// 建 guest：注入 host 面 → 跑 prelude → 跑 bundle → boot 配置。
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         tools: HostTools,
         sink: Arc<Sink>,
+        approvals: Arc<Approvals>,
+        sessions_root: std::path::PathBuf,
+        goal_path: std::path::PathBuf,
+        workspace_label: &str,
         model_label: &str,
         system_prompt: &str,
         thinking_level: &str,
@@ -133,16 +166,32 @@ impl Guest {
 
         let prelude = include_str!("../js/prelude.js");
         let bundle = include_str!("../dist/agent.js");
+        let goal_path_inner = goal_path.clone();
 
         context.with(|ctx| -> Result<(), String> {
-            mount_host(&ctx, sink.clone(), tools.clone())?;
-            ctx.eval::<(), _>(prelude).map_err(|e| describe(&ctx, e, "prelude"))?;
-            ctx.eval::<(), _>(bundle).map_err(|e| describe(&ctx, e, "bundle"))?;
+            mount_host(
+                &ctx,
+                sink.clone(),
+                tools.clone(),
+                Arc::clone(&approvals),
+                sessions_root,
+                goal_path,
+            )?;
+            ctx.eval::<(), _>(prelude)
+                .map_err(|e| describe(&ctx, e, "prelude"))?;
+            ctx.eval::<(), _>(bundle)
+                .map_err(|e| describe(&ctx, e, "bundle"))?;
 
+            let goal = std::fs::read_to_string(&goal_path_inner)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|value| value["objective"].as_str().map(str::to_owned));
             let config = json!({
                 "model": model_label,
                 "thinkingLevel": thinking_level,
                 "systemPrompt": system_prompt,
+                "workspace": workspace_label,
+                "goal": goal,
                 "tools": tool_definitions(),
             })
             .to_string();
@@ -150,7 +199,12 @@ impl Guest {
             Ok(())
         })?;
 
-        Ok(Self { runtime, context, sink, tools })
+        Ok(Self {
+            runtime,
+            context,
+            sink,
+            tools,
+        })
     }
 
     fn spike<'js>(&self, ctx: &Ctx<'js>, name: &str) -> Result<Function<'js>, String> {
@@ -158,7 +212,9 @@ impl Guest {
             .globals()
             .get("__spike")
             .map_err(|e| format!("__spike missing: {e}"))?;
-        spike.get(name).map_err(|e| format!("__spike.{name} missing: {e}"))
+        spike
+            .get(name)
+            .map_err(|e| format!("__spike.{name} missing: {e}"))
     }
 
     pub fn prompt(&self, text: &str) -> Result<(), String> {
@@ -170,16 +226,39 @@ impl Guest {
 
     /// 一拍：送事件进 guest → 泵微任务队列 → 取回 agent 事件。
     pub fn tick(&self) -> Result<Vec<Value>, String> {
+        // 有审批在等时记一拍：这个计数不为 0，就证明 stdin 没把 VM 线程堵住。
+        if self.sink.pending_approval() {
+            self.sink.bump_tick_while_waiting();
+        }
         self.context.with(|ctx| -> Result<Vec<Value>, String> {
             let tick: Function = self.spike(&ctx, "tick")?;
-            tick.call::<_, ()>(()).map_err(|e| describe(&ctx, e, "tick"))?;
+            tick.call::<_, ()>(())
+                .map_err(|e| describe(&ctx, e, "tick"))?;
             // 没有这一步，agent.prompt() 的 await 永远不会继续（QuickJS 的 job queue
             // 不会自己跑）—— 相当于 pocket-pi 的 guest.drain_jobs()。
             while ctx.execute_pending_job() {}
             let drain: Function = self.spike(&ctx, "drain")?;
-            let raw: String = drain.call::<_, String>(()).map_err(|e| describe(&ctx, e, "drain"))?;
-            let parsed: Value = serde_json::from_str(&raw).map_err(|e| format!("drain json: {e}"))?;
+            let raw: String = drain
+                .call::<_, String>(())
+                .map_err(|e| describe(&ctx, e, "drain"))?;
+            let parsed: Value =
+                serde_json::from_str(&raw).map_err(|e| format!("drain json: {e}"))?;
             Ok(parsed["events"].as_array().cloned().unwrap_or_default())
+        })
+    }
+
+    /// `--resume`：让 guest 从最新会话恢复（消息灌回 agent + todo 状态重建）。
+    pub fn restore(&self) -> Result<(), String> {
+        self.context
+            .with(|ctx| call::<()>(&ctx, "restore", ()).map_err(|e| format!("restore: {e}")))
+    }
+
+    /// 会话信息（id / 消息数 / todo 数 / goal）—— 收尾时打印，便于下一轮 resume。
+    pub fn session_info(&self) -> Result<Value, String> {
+        self.context.with(|ctx| {
+            let raw: String =
+                call(&ctx, "sessionInfo", ()).map_err(|e| format!("sessionInfo: {e}"))?;
+            serde_json::from_str(&raw).map_err(|e| format!("sessionInfo json: {e}"))
         })
     }
 
@@ -187,10 +266,7 @@ impl Guest {
     /// 返回 (JS 侧在用字节, malloc 总量字节)。
     pub fn memory_usage(&self) -> (usize, usize) {
         let usage = self.runtime.memory_usage();
-        (
-            usage.memory_used_size as usize,
-            usage.malloc_size as usize,
-        )
+        (usage.memory_used_size as usize, usage.malloc_size as usize)
     }
 
     /// 工具定义也要让 spike 的宿主能自己校验（与 JS 侧同源，避免两边漂移）。
@@ -204,7 +280,14 @@ impl Guest {
 }
 
 /// 注入 `globalThis.host`：guest 能看到的**全部**宿主能力。
-fn mount_host(ctx: &Ctx<'_>, sink: Arc<Sink>, tools: HostTools) -> Result<(), String> {
+fn mount_host(
+    ctx: &Ctx<'_>,
+    sink: Arc<Sink>,
+    tools: HostTools,
+    approvals: Arc<Approvals>,
+    sessions_root: std::path::PathBuf,
+    goal_path: std::path::PathBuf,
+) -> Result<(), String> {
     let host = Object::new(ctx.clone()).map_err(|e| format!("host object: {e}"))?;
 
     // log(line)
@@ -244,7 +327,10 @@ fn mount_host(ctx: &Ctx<'_>, sink: Arc<Sink>, tools: HostTools) -> Result<(), St
                         sink.push(payload);
                     };
                     let outcome = deepseek::complete(&sink.cfg, &request, &mut emit);
-                    sink.model_spans.lock().unwrap().push((id, started.elapsed()));
+                    sink.model_spans
+                        .lock()
+                        .unwrap()
+                        .push((id, started.elapsed()));
                     match outcome {
                         Ok(result) => {
                             if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
@@ -272,21 +358,101 @@ fn mount_host(ctx: &Ctx<'_>, sink: Arc<Sink>, tools: HostTools) -> Result<(), St
     {
         let tools = tools.clone();
         let sink = sink.clone();
+        let approvals = Arc::clone(&approvals);
         host.set(
             "callTool",
-            Function::new(ctx.clone(), move |name: String, args: String| -> String {
-                let started = Instant::now();
-                let parsed: Value = serde_json::from_str(&args).unwrap_or_else(|_| json!({}));
-                let result = match tools.run_tool(&name, &parsed) {
-                    Ok(text) => json!({ "text": text, "isError": false, "terminate": false }),
-                    Err(error) => json!({ "text": error, "isError": true, "terminate": false }),
-                };
-                sink.tool_spans.lock().unwrap().push((name, started.elapsed()));
-                result.to_string()
-            })
+            Function::new(
+                ctx.clone(),
+                move |call_id: String, name: String, args: String| -> String {
+                    // 执行权的**唯一**判定点（见 approval.rs 模块头 ①）：
+                    // 没握过手就不执行，与档位无关。
+                    if let Err(denied) = approvals.ensure_granted(&call_id, &name) {
+                        // 被拒的调用也要记账，否则「拒绝路径」在指标里是隐形的。
+                        sink.denied_calls.lock().unwrap().push(name.clone());
+                        return json!({ "text": denied, "isError": true, "terminate": false })
+                            .to_string();
+                    }
+                    let started = Instant::now();
+                    let parsed: Value = serde_json::from_str(&args).unwrap_or_else(|_| json!({}));
+                    let result = match tools.run_tool(&name, &parsed) {
+                        Ok(text) => json!({ "text": text, "isError": false, "terminate": false }),
+                        Err(error) => json!({ "text": error, "isError": true, "terminate": false }),
+                    };
+                    sink.tool_spans
+                        .lock()
+                        .unwrap()
+                        .push((name, started.elapsed()));
+                    result.to_string()
+                },
+            )
             .map_err(|e| format!("host.callTool: {e}"))?,
         )
         .map_err(|e| format!("host.callTool: {e}"))?;
+    }
+
+    // ensureApproval(callId, name, argsJson) -> approvalId（异步：决策经 poll 回来）
+    //
+    // JS 在**每次**工具调用前调它（包括只读工具）—— 策略不在 JS 侧，Rust 按档位
+    // 决定是立刻放行还是问用户。返回值只用于对上号，执行权记在 callId 上。
+    {
+        let approvals = Arc::clone(&approvals);
+        host.set(
+            "ensureApproval",
+            Function::new(
+                ctx.clone(),
+                move |call_id: String, name: String, args: String| -> i64 {
+                    let parsed: Value = serde_json::from_str(&args).unwrap_or_else(|_| json!({}));
+                    approvals.request(&call_id, &name, &parsed)
+                },
+            )
+            .map_err(|e| format!("host.ensureApproval: {e}"))?,
+        )
+        .map_err(|e| format!("host.ensureApproval: {e}"))?;
+    }
+
+    // fs(op, payloadJson) -> pi 的 Result 形状（会话持久化用，jail 到 sessions 根）
+    {
+        let sessions_root = sessions_root.clone();
+        host.set(
+            "fs",
+            Function::new(ctx.clone(), move |op: String, payload: String| -> String {
+                let mut request: Value =
+                    serde_json::from_str(&payload).unwrap_or_else(|_| json!({}));
+                if let Some(object) = request.as_object_mut() {
+                    object.insert("op".into(), json!(op));
+                }
+                let response = pi_host_tools::fs_op(&sessions_root, &request);
+                // 宿主侧的 fs 失败必须可见 —— 否则 JS 只看到一个 FileError，
+                // 排查时不知道是哪一步、哪个路径（第一版会话没落盘就是这么瞎着的）。
+                if response["ok"] != json!(true) {
+                    eprintln!(
+                        "[fs] {op} {} failed: {}",
+                        request["path"].as_str().unwrap_or("?"),
+                        response["error"]["message"].as_str().unwrap_or("?")
+                    );
+                }
+                response.to_string()
+            })
+            .map_err(|e| format!("host.fs: {e}"))?,
+        )
+        .map_err(|e| format!("host.fs: {e}"))?;
+    }
+
+    // goalGet() -> 持久目标（goal.json 由宿主持有；JS 只负责拼进 systemPrompt）
+    {
+        let goal_path = goal_path.clone();
+        host.set(
+            "goalGet",
+            Function::new(ctx.clone(), move || -> String {
+                std::fs::read_to_string(&goal_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                    .and_then(|value| value["objective"].as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            })
+            .map_err(|e| format!("host.goalGet: {e}"))?,
+        )
+        .map_err(|e| format!("host.goalGet: {e}"))?;
     }
 
     // poll() -> json[]
@@ -370,15 +536,47 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["pattern"], "additionalProperties": false
             }
         }),
+        json!({
+            "name": "mkdir",
+            "label": "Make directory",
+            "description": "Create a directory (and parents) inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"], "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "rm",
+            "label": "Remove",
+            "description": "Delete a file or directory inside the workspace. Directories need recursive: true, which cannot be undone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "recursive": { "type": "boolean" }
+                },
+                "required": ["path"], "additionalProperties": false
+            }
+        }),
     ]
 }
 
-fn call<'js, R>(ctx: &Ctx<'js>, name: &str, args: impl rquickjs::function::IntoArgs<'js>) -> Result<R, String>
+fn call<'js, R>(
+    ctx: &Ctx<'js>,
+    name: &str,
+    args: impl rquickjs::function::IntoArgs<'js>,
+) -> Result<R, String>
 where
     R: rquickjs::FromJs<'js>,
 {
-    let spike: Object = ctx.globals().get("__spike").map_err(|e| format!("__spike missing: {e}"))?;
-    let function: Function = spike.get(name).map_err(|e| format!("__spike.{name} missing: {e}"))?;
+    let spike: Object = ctx
+        .globals()
+        .get("__spike")
+        .map_err(|e| format!("__spike missing: {e}"))?;
+    let function: Function = spike
+        .get(name)
+        .map_err(|e| format!("__spike.{name} missing: {e}"))?;
     function.call(args).map_err(|e| describe(ctx, e, name))
 }
 
@@ -405,6 +603,9 @@ fn describe(ctx: &Ctx<'_>, error: rquickjs::Error, tag: &str) -> String {
     if stack.is_empty() {
         format!("{tag}: {rendered}")
     } else {
-        format!("{tag}: {rendered}\n{}", stack.lines().take(6).collect::<Vec<_>>().join("\n"))
+        format!(
+            "{tag}: {rendered}\n{}",
+            stack.lines().take(6).collect::<Vec<_>>().join("\n")
+        )
     }
 }
