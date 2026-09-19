@@ -1,0 +1,16 @@
+[package]
+name = "quickjs-agent-spike"
+version = "0.1.0"
+edition = "2021"
+description = "spike：pi-agent-core 跑在 QuickJS guest 里，模型传输与工具都在 Rust（薄 JS + 厚原生）"
+license = "MIT"
+publish = false
+
+[dependencies]
+# QuickJS 绑定。**不要开 `bindgen` feature** —— 本机 PATH 里 Android NDK 的 clang
+# 排在 Apple clang 前面，bindgen 会拿到 NDK 的 include 路径去找 stdio.h 而失败
+# （2026-09-19 实测）。预生成绑定够用。
+rquickjs = "0.12"
+pi-host-tools = { path = "../../crates/pi-host-tools" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
+serde_json = "1"

@@ -2,6 +2,84 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19 — ✅ PocketPi/PocketJS 调研 + B 方案（QuickJS 薄 JS）spike 跑通（分支 spike/quickjs-agent）
+
+两件事：先调研社区同类实现，再把调研里最有价值的那条路线做成可运行的 spike。
+**未合并 main**，全部在分支 `spike/quickjs-agent` 上。
+
+### ① 调研（新增 `docs/POCKET-PI-NOTES.md`）
+
+- **pocket-pi 不是移动端项目**：跑在 Waveshare ESP32-P4/S3 上，另一个 macOS
+  模拟器。PLAN.md 第 8 行把它列为「职责划分范式」的启发来源没错，但**它的运行时
+  选型与我们的 D1 相反** —— 这一点之前没记进文档，已补。
+- 它的方案是「薄 JS + 厚原生」：QuickJS guest 里只跑 `pi-agent-core` 的 Agent 类，
+  pi-ai 只 import 一个 `AssistantMessageEventStream`；模型传输（4 家 provider，
+  ≈42KB Rust）与工具（≈61KB Rust）全在原生侧。bundle **318KB**。
+- **它反驳了我们淘汰 QuickJS 的理由**：`LIBPI-BUN-NOTES.md` §3 记的是「QuickJS 无
+  fetch/Streams，需自建 Web API 数年」。pocket-pi 不补 Web API，而是把需要网络的
+  那层整个搬到 Rust；prelude 只 polyfill 了 7 个东西。
+- **Claude Code 已经没有 JS 运行时可移植了**：1.0.128 还是 `bin/cli.js`（node≥18），
+  当前 2.1.277 的主包只有 184KB/7 文件，真身是 8 个平台包里的**原生二进制**
+  （darwin-arm64 = 217,662,576 B 单个可执行文件），平台只有 linux/win32/darwin，
+  **没有 android/ios**；官方 agent SDK 用 `child_process` spawn 它，同包
+  `extractFromBunfs.js` 注释确认是 `bun build --compile` 产物。iOS 禁 fork/exec
+  → 这条路是死的。
+- 完整版 `pi-coding-agent` 是 JS（21.9MB/1056 文件，node≥22.19，要 pi-tui + exec）。
+  逐条核对后的真实阻塞项：`photon-node` **不是**阻塞（纯 WASM），clipboard 可选，
+  硬阻塞是「Node 运行时 + 终端 + iOS 上的 shell」。Node-on-mobile 现状：
+  `nodejs-mobile` 最后提交 **2021-10**（事实停更）；唯一还活的是
+  `puerts/backend-nodejs`（2025-07，从 nodejs/node 源码构建 libnode 给 iOS/Android）。
+
+### ② B 方案 spike（`spikes/quickjs-agent/`）
+
+rquickjs 宿主 + DeepSeek 一家传输（Rust）+ **复用现有 Rust 工具**。三条命题都成立：
+
+| 指标 | 值 | 对照 |
+|---|---|---|
+| JS bundle | **316,378 B** | bun 路线 2,950,176 B → **小 9.3×** |
+| guest 冷启动 | 48 – 150 ms | — |
+| QuickJS 堆 | 1.59 MB | bun 路线 87MB .so |
+| prompt → 首增量 | 2 – 14 ms | 本地 mock，纯开销 |
+| 工具调用 | 0.1 – 5 ms | 走 `pi-host-tools` |
+| 整轮（2 请求 + 1 工具） | 63 – 161 ms | — |
+
+- **上游零改动**：pi-agent-core 0.84.4 的 Agent 类在 QuickJS 里直接跑，只提供
+  `streamFn` + 工具壳（pocket-pi 用 0.81 也是这样）。
+- **9.3 倍体积差全部来自 provider 栈**：只 import 一个事件流类，`@anthropic-ai/sdk` /
+  `@aws-sdk/client-bedrock-runtime` / `@google/genai` / `openai` 一个都不进图。
+- **工具那一半我们早就付过了**：把 `loopback.rs` 的工具实现抽成
+  `crates/pi-host-tools`（root 显式传入），`loopback.rs` 保留同名转发，**签名与错误
+  文案逐字不变** → src-tauri 44 个测试全绿（含 `write_backup_and_revert_roundtrip`）。
+- **零新增 lint 债务**：`cargo fmt --check` 14 处 / `cargo clippy -D warnings` 27 个
+  错误，与改动前的 HEAD 完全一致（stash 对照验证）。
+
+**没验的**：本机无 DeepSeek key，**真模型那一轮没跑过**（用无状态 SSE mock 验证协议
+形状与整条链）；**未在 iOS/Android 上构建**；无会话/审批/重试/取消。
+
+**结论**：不必因此切 D1。B 的真实增量是「用 Rust 重写 pi-ai 传输层 + 重建产品层」，
+不是「换个 JS 引擎」——而 A 已交付的会话持久化、审批回滚、8 家 provider quirk、
+OAuth 登录，spike 一个都没碰。触发条件与三个方向见 `POCKET-PI-NOTES.md` §4。
+
+### ⚠️ 顺带发现（未改动，记录在案）
+
+1. **CI 已连续多个提交全红，且是「卡在第一步」**（查 GitHub Actions API 确认，
+   最新 run 35058739402 / 415b0a0）：
+   - `rust (ubuntu/macos)` → 挂在 **`cargo fmt`**，后面的 **`cargo clippy` 与
+     `cargo test` 从未执行**（本地补测：27 个 clippy 错误、44 个测试通过）；
+   - `lint` → `bun run lint`（biome）失败；
+   - `android-cross-check` → `cargo check --target aarch64-linux-android` 失败；
+   - `desktop-build` → `bun tauri build --no-bundle` 失败（3 平台）。
+
+   即**四个 job 无一通过**，且至少从 2026-09-15 的提交起就这样。这件事本身比它
+   揭出来的 lint 问题更值得处理：现在「CI 绿」不是可用信号，测试与 clippy 实际上
+   处于无门禁状态。本地 `git stash` 对照确认这些 fmt/clippy 问题全部是存量，
+   与本次改动无关（本次零新增）。
+2. `jail_path_in(root, "")` **通过校验并解析为 workspace 根**。配合
+   `rm {path:"", recursive:true}` 会指向整个 workspace（需显式 recursive 才会走到
+   `remove_dir_all`）。抽取前后行为一致，已在新 crate 的测试里钉住现状并注释标记。
+3. `loopback.rs` 里 `rm` 非空目录的错误文案中间夹着约 30 个空格（源码里字符串跨行
+   续行留下的），会原样发给模型。抽取时**逐字保留**未改。
+
 ## 2026-09-16 — ✅ UI 代码库拆分 + 事件 payload 类型化；遗留 3 处小 bug 记录
 
 纯重构日：零行为变化，typecheck / build / biome 全绿（biome errors 53→42，
