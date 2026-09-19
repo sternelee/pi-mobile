@@ -157,33 +157,66 @@ engine 那行照样 `ok` —— 一眼看出「引擎是好的，是网不通」
    且变量名是 **`BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android`**（下划线；bash 的
    `export` 也不接受带横线的名字）。
 
-### 真机上还没验的
+### 已在 arm64 Android 上**真跑过**（模拟器 API 32 / arm64-v8a）
 
-静态检查过了，但**「能编译」不等于「能跑」**。上设备后重点看这几条（按可疑程度排）：
+不是只做静态检查 —— 下面这些是真在 Android 上执行出来的：
 
-1. **DNS/出网**：rustls 走 `std::net` 的 `getaddrinfo` → Android Bionic 解析器读的是
-   系统属性，理论上没问题；但**这正是 pi-mobile 在 iOS 上被 bun 的 c-ares 坑到的地方**
-   （c-ares 读不到 `/etc/resolv.conf`）。这条是本 spike 在真机上最值得看的点 ——
-   上机先跑 `--net-check`，它会把 DNS 与 TLS 分开报。
-2. **`/data/local/tmp` 可执行**：adb shell 里正常，但如果以后塞进 APK，则需要
-   INTERNET 权限 + 不能从 data 分区 exec（那是另一套问题）。
-3. 冷启动与堆占用是否与 macOS 同量级（QuickJS 无 JIT，Android 上 arm64 也是解释执行，
-   预期接近）。
+```
+$ ./quickjs-agent-spike --net-check
+  dns     ok       32.3 ms  api.deepseek.com → 120.232.219.129, …
+  tls     ok      143.1 ms  api.deepseek.com (HTTP 401) — 证书由编译进来的 webpki 根校验
+  engine  ok      264.4 ms  QuickJS ok；bundle 356 KB eval 250 ms；堆 1.71 MB
+```
+
+完整一轮（真 DeepSeek，8 次模型请求 / 6 次工具调用）：`src/hello.js` 被创建、
+`notes.md` 被改写、**会话 JSONL 落在设备上**
+（`/data/local/tmp/pi-spike/data/sessions/…jsonl`，13.9 KB）；第二轮 `--resume`
+**恢复 20 条消息 5.1 ms**，且 agent 不调工具就答出上一轮创建的文件。
+
+| 指标 | Android（模拟器） | macOS |
+|---|---|---|
+| guest 冷启动 | 84.6 ms | 26 – 60 ms |
+| bundle eval（引擎自检里单列） | 250 ms | 138 ms |
+| 会话恢复 20 条 | 5.1 ms | 1.8 ms（18 条） |
+| QuickJS 堆 | 1.81 MB | 1.81 MB |
+| DNS | 32.3 ms | 13.5 ms |
+| TLS 握手 + HTTP | 143.1 ms | 125.6 ms |
+
+结论：**Android 上每一层都成立**，包括最可疑的 DNS（`getaddrinfo` 走 Bionic，
+不是 bun 在 iOS 上踩的 c-ares 那条路）与 TLS（根证书编译进来，不碰系统信任库）。
+
+> 模拟器本身有个坑：本机 SDK 的 swiftshader 库签名坏了（`libGLESv2.dylib` /
+> `libEGL.dylib` 报 code signature 错），`-gpu swiftshader_indirect` 起不来。
+> 可用的组合是 **`-gpu host -feature -Vulkan`**：
+> ```
+> $ANDROID_HOME/emulator/emulator -avd Pixel_3a_API_32_arm64-v8a \
+>     -no-window -no-audio -no-boot-anim -gpu host -feature -Vulkan -no-snapshot
+> ```
+
+### 真机（你的设备）上仍要看的一条
+
+`/data/local/tmp` 可执行在 adb shell 下正常；但如果以后把这条路塞进 APK，则是另一套
+问题：需要 INTERNET 权限、且不能从 data 分区 exec（得改成 JNI 加载 .so）。
+
 
 ## 实测数字
 
-macOS arm64 / release / **真 DeepSeek**：
+release / **真 DeepSeek**。Android 那列是在 arm64 模拟器上真跑出来的
+（见「Android 真机」一节）：
 
-| 指标 | 值 |
-|---|---|
-| JS bundle（prelude + agent，含会话+todo） | **364,730 B**；App 的 `pi-bundle/dist/agent.js` **2,950,176 B** → **小 8.1×** |
-| guest 冷启动 | **26 – 60 ms**（Runtime + prelude + 364KB bundle eval + boot） |
-| QuickJS 堆 | **1.81 MB** 在用 / 2.16 MB malloc（App 是 87MB 的 .so） |
-| 会话恢复（18 条消息） | **1.8 ms** |
-| 首增量（真网络） | 402 – 929 ms |
-| 工具调用（本地 fs） | 0.0 – 1.5 ms |
-| 审批等待期间的 tick 数 | **334 拍 / 1000 ms** |
-| 整轮（4 次模型请求 + 3 次工具） | 4.4 s |
+| 指标 | macOS arm64 | Android arm64 |
+|---|---|---|
+| JS bundle（prelude + agent，含会话+todo） | **364,730 B**（App 的 2,950,176 B → **小 8.1×**） | 同一个二进制，同一份 bundle |
+| guest 冷启动 | 26 – 60 ms | 84.6 ms |
+| QuickJS 堆 | 1.81 MB | 1.81 MB |
+| 会话恢复 | 1.8 ms（18 条） | 5.1 ms（20 条） |
+| DNS | 13.5 ms | 32.3 ms |
+| TLS 握手 + HTTP | 125.6 ms | 143.1 ms |
+| 首增量（真网络） | 402 – 929 ms | 587 ms |
+| 工具调用（本地 fs） | 0.0 – 1.5 ms | 0.1 – 0.9 ms |
+| 审批等待期间的 tick 数 | **334 拍 / 1000 ms** | — |
+| 整轮（4 次模型请求 + 3 次工具） | 4.4 s | — |
+| 产物体积 | 7.92 MB（未 strip） | **9.49 MB / 6.73 MB strip 后**（App 是 87MB 的 .so） |
 
 体积差从 9.3× 变成 8.1×，是因为这里**又多了会话与 todo 的能力**（316KB → 364KB）；
 App 那 2.95MB 里仍有 8 家 provider + OAuth + 全部产品层。
@@ -264,7 +297,11 @@ spike 阶段先把语义对齐（`TODO_TRANSITIONS` 与 `replayTodos` 逐行对�
    `delta`，表现是「模型答了但屏幕空白」。
 4. **mock 自己在工具调用前发了 `[DONE]`**：宿主解析器读到 `[DONE]` 直接收工，
    工具调用整段丢失。mock 也要当被测代码写。
-5. **「等审批时没阻塞」这条指标要设计观测窗口**：管道输入是瞬时回答，等待窗口只有
+5. **二进制运行期还依赖 `dist/agent.js` 文件**：bundle 明明是 `include_str!` 编进去的，
+   启动时却 `fs::metadata("spikes/quickjs-agent/dist/agent.js")` 只为打印体积 ——
+   桌面看不出来，**Android 上直接 FAIL**（真机没有仓库相对路径）。改成从编译期常量取。
+   是「上设备」这一步把它逼出来的。
+6. **「等审批时没阻塞」这条指标要设计观测窗口**：管道输入是瞬时回答，等待窗口只有
    微秒级，`ticks while waiting` 恒为 0，看不出任何东西。加 `--delay-approval`
    把窗口撑开才量得到（且它只在真有等待时打印——那一轮 agent 只调了只读工具，
    所以没有这行，不是 bug）。

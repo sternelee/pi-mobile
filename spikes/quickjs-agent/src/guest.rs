@@ -138,6 +138,15 @@ impl Sink {
     }
 }
 
+/// 编译进二进制的 bundle 大小。
+///
+/// 注意：bundle 是 `include_str!` 进来的，**运行期不需要 dist/agent.js 存在** ——
+/// 早先 main.rs 为了打印体积去 `fs::metadata("spikes/quickjs-agent/dist/agent.js")`，
+/// 在 Android 上直接失败（真机没有仓库相对路径）。这个函数取代那次文件读取。
+pub fn bundle_bytes() -> usize {
+    include_str!("../dist/agent.js").len()
+}
+
 /// 引擎层自检：不挂 host、不发请求，只回答「QuickJS 起得来吗 / bundle 能 eval 吗 /
 /// `__spike` 的导出齐不齐」。真机上把「引擎」与「网络」分开判断用（见 netcheck.rs）。
 pub fn engine_selftest() -> Result<String, String> {

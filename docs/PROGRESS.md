@@ -2,6 +2,67 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第三轮）— ✅ spike 在 arm64 Android 上真机跑通（含会话恢复与审批）
+
+用户去跑真机前，先把能自己验的验到位：spike 交叉编译到 Android，并在 **arm64 模拟器**
+（API 32）上**真执行**——不是只做静态检查。仍在分支 `spike/quickjs-agent`。
+
+### 结论：Android 上每一层都成立
+
+```
+$ ./quickjs-agent-spike --net-check
+  dns     ok       32.3 ms  api.deepseek.com → 120.232.219.129, …
+  tls     ok      143.1 ms  api.deepseek.com (HTTP 401) — 证书由编译进来的 webpki 根校验
+  engine  ok      264.4 ms  QuickJS ok；bundle 356 KB eval 250 ms；堆 1.71 MB
+```
+
+完整一轮真 DeepSeek（8 次模型请求 / 6 次工具调用）在设备上跑完：`src/hello.js`
+被创建、`notes.md` 被改写、**会话 JSONL 落在设备上**（13.9 KB）；第二轮 `--resume`
+**恢复 20 条消息 5.1 ms**，agent 不调工具就答出上一轮的文件。
+
+最值得记的两条（都是真机最可疑的点）：
+- **DNS 通**：走 `std::net` 的 `getaddrinfo` → Bionic 解析器，**不是** bun 在 iOS 上
+  被坑的 c-ares（那条路读不到 `/etc/resolv.conf`，于是去连 127.0.0.1:53 全挂）。
+- **TLS 不依赖系统信任库**：`reqwest` 的 `rustls-tls` = `rustls-tls-webpki-roots`，
+  Mozilla 根证书**静态编入二进制**（Cargo.lock 里 webpki-roots 1.0.9，无
+  rustls-native-certs）。实测二进制里 `system/etc/security/cacerts` 出现 **0 次**、
+  `libssl/libcrypto` 符号 **0 个**（strings 里的 openssl 字样是 ring 的 perlasm 署名）。
+  → **D16 卡了 4 轮的那类问题在这条路上不存在**：不用按 Android hashed 目录拼 CA
+  bundle、不用 `set_ssl_cert_file/dir`、不受 conscrypt 目录布局变化影响。
+
+### 新增
+
+- `tools/android-build.sh`：交叉编译 + 16KB 页对齐检查（复用 `scripts/check-elf-align.py`）。
+  产物 `ELF 64-bit LSB pie executable`，动态依赖**只有 libc/libdl/libm**
+  （QuickJS/ring/rustls 全静态），9.49 MB 未 strip / 6.73 MB strip 后。
+- `tools/android-run.sh`：推送 + 设备上执行，支持真 key 与宿主 LAN mock；跑正式那轮前
+  **自动先自检**。
+- `--net-check`：把 dns / tls / engine 三层分开报（engine 完全不碰网络），失败时一眼
+  看出是哪层，不用对着转圈的 agent 猜。
+- `--data-dir`（真机不能依赖仓库相对路径）；mock 支持 bind host。
+
+### 交叉编译的三个坑（封在脚本里）
+
+1. 任何 cargo 命令都要 NDK 的 CC/AR/RANLIB/LINKER（同 `scripts/android-build.sh`）。
+2. **rquickjs-sys 没有 android 的预生成绑定**，只能开 `bindgen`（Cargo.toml 按 target 开）；
+   bindgen 要 libclang，而 **NDK 只带 `libClangdXPCLib`** → 用 homebrew llvm 的。
+3. **bindgen 自己不传 `--target`**，不给就按宿主解析报 `'stdio.h' file not found`；
+   要显式给 `--target`+`--sysroot`，且变量名是 `BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android`
+   （下划线；bash 的 `export` 不接受带横线的名字）。
+
+### ⚠️ 真机暴露出来的 bug
+
+**二进制运行期还依赖 `dist/agent.js` 文件**：bundle 明明是 `include_str!` 编进去的，
+启动时却去 `fs::metadata("spikes/quickjs-agent/dist/agent.js")` 只为打印体积 ——
+桌面完全看不出来，**Android 上直接 FAIL**（真机没有仓库相对路径）。已改成从编译期常量取。
+这就是「上设备」这一步的价值：静态检查全绿也盖不住它。
+
+另修 `runtime.memory_usage()` 不能在 `context.with` 里调（runtime 的 RefCell 已借出，
+再借 panic），以及 `--net-check` 原本「全部跑完才打印」导致 panic 时一行不输出。
+
+> 模拟器启动踩坑（本机环境）：SDK 里 swiftshader 的 `libGLESv2/libEGL` 签名坏了，
+> `-gpu swiftshader_indirect` 起不来。可用组合是 `-gpu host -feature -Vulkan`。
+
 ## 2026-09-19（第二轮）— ✅ spike 加会话持久化 + 审批 + goal/todo 插件；真 DeepSeek 全量验证
 
 在第一轮 spike 上补四个能力。**全部真模型验证**（`DEEPSEEK_API_KEY` 在本机 `~/.zshrc`，

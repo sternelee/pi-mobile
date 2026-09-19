@@ -149,13 +149,9 @@ fn run() -> Result<(), String> {
         sink.clone(),
     ));
 
-    let bundle_bytes = std::fs::metadata("spikes/quickjs-agent/dist/agent.js")
-        .map(|m| m.len())
-        .map_err(|e| {
-            format!(
-                "dist/agent.js missing ({e}) — run `bash spikes/quickjs-agent/js/build.sh` first"
-            )
-        })?;
+    // bundle 已编译进二进制（include_str!），运行期不依赖 dist/agent.js —— 真机上
+    // 没有那个路径（早先这里读文件只为打印体积，Android 上直接失败）。
+    let bundle_bytes = guest::bundle_bytes();
 
     println!("── quickjs-agent spike ──────────────────────────────────────");
     println!("model        {}", args.model);
