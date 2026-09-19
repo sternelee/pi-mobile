@@ -205,6 +205,68 @@ bun 版同一段代码一样写，但它的阈值是「上下文窗口 100 万 t
 **实际跑不到**，所以这个 bug 一直没暴露。本 spike 加了 `--compact-at <tokens>` 才能把这条
 路径真的走一遍 —— 这也是为什么那个参数不是多余的。
 
+## iOS：与 bun 路线最大的差别就在这里
+
+**WebKit 只是 A 路线（bun）的依赖，B 路线（QuickJS）不需要它。** 这条差别值得单独讲清，
+因为它是两条路线在 iOS 上成本悬殊的根源：
+
+| | A 路线（bun + JSC） | B 路线（本 spike，QuickJS） |
+|---|---|---|
+| JS 引擎是什么 | **JavaScriptCore** —— WebKit 源码树的一部分（`Source/JavaScriptCore`） | **QuickJS** —— 独立的纯 C 库，与任何浏览器引擎无关 |
+| 引擎从哪来 | Android 用 skal 预构建（92MB .so）；**iOS 真机没有可用的预构建** → 只能 clone WebKit 源码自己编 | `rquickjs-sys` **自带**源码并本地编译：只有 4 个 `.c`（`quickjs.c` / `libregexp.c` / `libunicode.c` / `dtoa.c`），共 4.5MB |
+| 源码/磁盘 | WebKit shallow ~8GB + JSC 构建 ~3GB + bun 构建 ~2GB ≈ **13GB** | 无额外源码树（crate 里那 4.5MB） |
+| 构建链 | `setup-bun-fork.sh` → `build-jsc-ios.sh` → bun objects → `link-skal-ios.sh` → 嵌 dylib，多阶段且自带 link 步骤会失败（README 有说明） | `cargo build --target aarch64-apple-ios` |
+| JIT 合规 | 引擎**自己有 JIT**，必须关掉：`setenv("JavaScriptCoreUseJIT","0")`，且**时序敏感**（`canUseAssembler()` 被 `call_once` 缓存，必须在 `jsc.initialize()` 之前） | **不适用** —— QuickJS 是纯解释器，没有 JIT 可关，也没有 `setenv` 时序问题 |
+| 本项目实测 | 见 README 的 iOS 段（搭起来花了一整个里程碑） | **编过 + 跑通**，见下 |
+
+### 怎么编、怎么跑
+
+```bash
+# 真机 arm64（Mach-O executable，8.1MB）
+bash spikes/quickjs-agent/tools/ios-build.sh
+
+# 模拟器 arm64
+TARGET_TRIPLE=aarch64-apple-ios-sim bash spikes/quickjs-agent/tools/ios-build.sh
+
+# 在已启动的模拟器里直接执行（不需要 .app 包、不需要签名）
+SIMCTL_CHILD_DEEPSEEK_API_KEY=sk-… xcrun simctl spawn booted \
+  "$PWD/spikes/quickjs-agent/target/aarch64-apple-ios-sim/release/quickjs-agent-spike" \
+  --yes --workspace /tmp/ios-spike/workspace --data-dir /tmp/ios-spike/data --prompt "…"
+```
+
+`simctl spawn` 的环境变量要用 **`SIMCTL_CHILD_` 前缀**传（否则子进程看不到 —— 实测
+第一次就这么失败了）。
+
+### 两个 iOS 专属的坑（都在脚本里处理了）
+
+1. **`rquickjs-sys` 没有 iOS 的预生成绑定**（与 Android 同因）→ 开 `bindgen`；
+   而 Xcode 不带可用的 libclang → 用 homebrew llvm 的（`LIBCLANG_PATH`），并用
+   `BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios` 指出 `--target` 与 iPhoneOS SDK。
+2. **`___chkstk_darwin` 未定义** —— Apple clang 对**大栈帧**函数会生成这个栈探测调用
+   （`quickjs.c` 里的大 switch / 深递归就有），它由 compiler-rt 提供。clang 驱动链接时
+   自动带上，而 **rustc 直接调 ld 不会** → 显式把 `libclang_rt.ios.a` 加进链接参数即可。
+   这是整个 iOS 构建里唯一需要「适配引擎」的地方。
+
+### 实测（iOS 模拟器，真 DeepSeek）
+
+```
+  dns     ok   41.2 ms  api.deepseek.com → 120.232.219.129, …
+  tls     ok  115.0 ms  HTTP 401（证书由编译进来的 webpki 根校验）
+  engine  ok   40.7 ms  QuickJS + bundle eval 33 ms + 堆 1.78 MB
+```
+
+完整一轮真 DeepSeek 也跑通了（建 `src/ios.js`、改 `notes.md`、todo 2 项、会话落盘），
+`--resume` 恢复 26 条消息 **1.4 ms**（三个平台里最快）。
+
+| 指标 | macOS | Android（arm64 模拟器） | iOS（arm64 模拟器） |
+|---|---|---|---|
+| guest 冷启动 | 26 – 60 ms | 84.6 ms | — |
+| bundle eval | 138 ms | 250 ms | **33 ms** |
+| 会话恢复 | 1.8 ms（18 条） | 5.1 ms（20 条） | **1.4 ms（26 条）** |
+| DNS | 13.5 ms | 32.3 ms | 41.2 ms |
+| TLS 握手 + HTTP | 125.6 ms | 143.1 ms | 115.0 ms |
+| 完整一轮 | ✅ | ✅ | ✅ |
+
 ## Android 真机
 
 spike 是**普通 CLI**，不需要 APK / Tauri / WebView —— 可以直接 `adb push` 到

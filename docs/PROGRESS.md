@@ -2,6 +2,58 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第八轮）— ✅ iOS 也跑通（编过 + 模拟器真执行）；顺带把「为什么要编 WebKit」讲清
+
+B 路线最后一个没碰过的平台。结论：**iOS 上比 A 路线简单一个数量级**，因为根本不用碰 WebKit。
+
+### 为什么 A 路线要编 WebKit、B 路线不用
+
+用户问得很准：**WebKit 只是 A 路线（bun）的依赖。**
+
+| | A（bun + JSC） | B（本 spike，QuickJS） |
+|---|---|---|
+| 引擎是什么 | **JavaScriptCore** = WebKit 源码树的一部分（`Source/JavaScriptCore`） | **QuickJS** = 独立纯 C 库，与浏览器引擎无关 |
+| 引擎从哪来 | Android 用 skal 预构建；**iOS 真机没有可用预构建** → 自己 clone WebKit 编 | `rquickjs-sys` 自带源码：只有 4 个 `.c`（quickjs/libregexp/libunicode/dtoa），4.5MB |
+| 磁盘 | WebKit ~8GB + JSC 构建 ~3GB + bun ~2GB ≈ **13GB** | 无额外源码树 |
+| JIT 合规 | 引擎自带 JIT → 必须 `setenv("JavaScriptCoreUseJIT","0")`，且时序敏感 | **不适用**（纯解释器，没有 JIT 可关） |
+| 本项目代价 | 见 README，搭起来花了一整个里程碑（M5） | **一个链接参数**，见下 |
+
+### 实测
+
+```
+$ xcrun simctl spawn booted <ios-sim 产物> --net-check
+  dns     ok   41.2 ms
+  tls     ok  115.0 ms  HTTP 401（webpki 根编译进来，未用系统信任库）
+  engine  ok   40.7 ms  QuickJS + bundle eval 33ms + 堆 1.78MB
+```
+
+完整一轮真 DeepSeek 也通了（建 src/ios.js、改 notes.md、todo 2 项、会话落盘），
+`--resume` 26 条 **1.4ms**（比 macOS 1.8ms、Android 5.1ms 都快）。
+
+### 两个 iOS 专属的坑（都封进 tools/ios-build.sh）
+
+1. **`rquickjs-sys` 没有 iOS 的预生成绑定**（与 Android 同因）→ 开 bindgen；Xcode 不带
+   可用 libclang → 用 homebrew llvm 的，并用 `BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios`
+   指出 `--target` 与 iPhoneOS SDK。
+2. **`___chkstk_darwin` 未定义**：Apple clang 对**大栈帧**函数生成这个栈探测调用
+   （quickjs.c 的大 switch / 深递归），由 compiler-rt 提供；clang 驱动链接会自动带，
+   **rustc 直连 ld 不会** → 显式把 `libclang_rt.ios.a` 加进链接参数。这是整个 iOS 构建里
+   唯一需要「适配引擎」的地方。
+
+### 平台账（现在三端齐了）
+
+| | macOS | Android arm64（模拟器） | iOS arm64（模拟器） |
+|---|---|---|---|
+| 冷启动 | 26–60 ms | 84.6 ms | — |
+| bundle eval | 138 ms | 250 ms | **33 ms** |
+| 会话恢复 | 1.8 ms | 5.1 ms | **1.4 ms** |
+| 完整一轮（真 DeepSeek） | ✅ | ✅ | ✅ |
+| 产物体积 | 7.9 MB | 9.5 MB（strip 6.7） | 8.1 MB |
+
+跑法：Android 用 `adb push` 到 `/data/local/tmp`（`tools/android-run.sh`）；
+iOS 用 `xcrun simctl spawn booted <bin>`（环境变量要 `SIMCTL_CHILD_` 前缀传 —— 实测
+第一次就是漏了这个才报「key 未设置」）。
+
 ## 2026-09-19（第七轮）— ✅ goal autoContinue + /plan·/btw + 会话切换；对齐清单全部清完
 
 最后三项「可做未做」都补上了，bun 版的功能面到此**能对齐的都对齐了**。

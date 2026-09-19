@@ -24,5 +24,11 @@ similar = "2"
 #   2. BINDGEN_EXTRA_CLANG_ARGS_<target> 给 `--target` 与 NDK sysroot
 #      —— 不给的话 bindgen 会按宿主去解析，报 `'stdio.h' file not found`。
 # 不开 `macro` feature，所以 host 侧仍走预生成绑定，不受影响。
+# iOS 同理：`src/bindings/` 里没有 aarch64-apple-ios 那一份（实测报
+# "probably doesn't ship bindings for platform aarch64-apple-ios"）。绑定通过
+# BINDGEN_EXTRA_CLANG_ARGS_<下划线 triple> 指向 iPhoneOS SDK，见 tools/ios-build.sh。
 [target.'cfg(target_os = "android")'.dependencies]
+rquickjs = { version = "0.12", features = ["bindgen"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
 rquickjs = { version = "0.12", features = ["bindgen"] }
