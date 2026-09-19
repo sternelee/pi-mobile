@@ -181,7 +181,8 @@ pi-mobile/
 │   ├── PLAN.md               # 架构方案与里程碑路线图
 │   ├── PROGRESS.md           # 开发进度日志（倒序）
 │   ├── CONTRACTS.md          # UI↔Rust IPC 契约
-│   └── LIBPI-BUN-NOTES.md    # skal 工艺研究笔记
+│   ├── LIBPI-BUN-NOTES.md    # skal 工艺研究笔记
+│   └── POCKET-PI-NOTES.md    # pocket-pi / PocketJS 调研笔记
 └── vendor/                   # gitignored：bun fork + WebKit 源码
 ```
 
@@ -193,6 +194,7 @@ pi-mobile/
 | [docs/PROGRESS.md](docs/PROGRESS.md) | 开发进度日志（倒序，含真机调试踩坑记录） |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | UI↔Rust IPC 契约（commands / events / hostcall） |
 | [docs/LIBPI-BUN-NOTES.md](docs/LIBPI-BUN-NOTES.md) | skal 工艺研究、JSC ABI、构建链接、iOS 合规路径 |
+| [docs/POCKET-PI-NOTES.md](docs/POCKET-PI-NOTES.md) | pocket-pi / PocketJS 调研：薄 JS + 厚原生运行时方案、移动端可行性（D1 再评估输入） |
 
 ## 致谢
 
