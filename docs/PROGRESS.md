@@ -2,6 +2,45 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第九轮）— ✅ QuickJS 版 release APK（9.1MB，不需要 libskal）
+
+用户要「打包 apk release 版本」。这里有个容易混的点，值得记清：
+
+**仓库里现有的 App 是 A 路线**（Tauri + bun bundle），它运行时 dlopen 92MB 的
+`libskal.so`；我先按它走了一步，用户指出「QuickJS 版本并不需要 libskal.so」——对。
+所以改成给 spike 做壳：**B 路线 APK 是自包含的**，引擎（QuickJS）静态编进二进制。
+
+| | A 路线（主 App） | B 路线（本 spike） |
+|---|---|---|
+| release APK | 37.5 MB（**不含** libskal；补上 92MB 的 .so 后 ~130MB 量级） | **9.1 MB**（自包含） |
+| 运行时依赖 | 92MB 外部 .so | 无 |
+| UI | Tauri + WebView（完整产品） | 极简 Activity（显示进程输出 + 审批按钮） |
+
+顺带把 A 路线 release 也打出来了（`app-universal-release.apk` 37.5MB + AAB），
+它需要 libskal，而本机那份 92MB 的 `.so` 已经不在了（jniLibs 空），所以那个 APK
+**现在装上去 agent 起不来** —— 要用得先 `bash scripts/fetch-libpi-bun.sh` 拉回来。
+
+### 让 CLI 在 APK 里能跑的两条硬约束（都钉进注释）
+
+1. 二进制必须以 **`lib*.so`** 命名进 jniLibs → 系统才解包到 `nativeLibraryDir`，
+   而**只有那里可执行**（Android 10+ 禁 data 目录 exec；proot 等项目同款做法）。
+2. AGP 默认 `useLegacyPackaging = false`（不落盘、直接映射）→ 必须显式开
+   `useLegacyPackaging = true` + manifest `extractNativeLibs="true"`，否则磁盘上没文件可 exec。
+
+### 壳做了什么
+
+一行没改路线本身。壳只解决「手机上怎么按下去」：起进程贴输出；
+**审批变按钮**（App 没 stdin → 管道 + 允许/拒绝/总是/全拒写 y/n/a/d）；
+API key 存 SharedPreferences 经 env 传；workspace/data 在 filesDir，所以 `--resume` 可用。
+
+### ⚠️ 未验证
+
+设备在装之前从 USB 掉线了（系统层也看不到），所以
+**「exec from nativeLibraryDir 在真机上真的能跑」这一步没有实测证据** ——
+静态项全过（签名 v2 ✓、extractNativeLibs=true ✓、二进制 PIE + 16KB 对齐 ✓、
+与本地构建逐字节一致 ✓），但这是运行期行为。若失败，退路是把 spike 编成 cdylib
+走 JNI 在进程内调用。
+
 ## 2026-09-19（第八轮）— ✅ iOS 也跑通（编过 + 模拟器真执行）；顺带把「为什么要编 WebKit」讲清
 
 B 路线最后一个没碰过的平台。结论：**iOS 上比 A 路线简单一个数量级**，因为根本不用碰 WebKit。

@@ -205,6 +205,62 @@ bun 版同一段代码一样写，但它的阈值是「上下文窗口 100 万 t
 **实际跑不到**，所以这个 bug 一直没暴露。本 spike 加了 `--compact-at <tokens>` 才能把这条
 路径真的走一遍 —— 这也是为什么那个参数不是多余的。
 
+## 打包成 APK（QuickJS 版）
+
+**这个 APK 不需要 libskal。** 仓库里现有的 App 是 **A 路线**（Tauri + bun bundle），
+它运行时 dlopen 那个 92MB 的 `libskal.so`（嵌入式 bun）；本 spike 的引擎是 QuickJS，
+由 rquickjs **静态编进二进制**，所以 APK 是自包含的。
+
+| | A 路线（主 App） | B 路线（本 spike） |
+|---|---|---|
+| release APK | 37.5 MB（**不含** libskal） | **9.1 MB**（自包含） |
+| 运行时还要什么 | 92MB `libskal.so` 装进 jniLibs → 合计 ~130MB 量级（debug 版曾 571MB） | 无 |
+| 引擎从哪来 | 外部 .so，dlopen | 静态链进二进制 |
+| 怎么做 UI | Tauri + WebView（完整产品 UI） | 一个极简 Activity（只显示进程输出） |
+
+```bash
+bash spikes/quickjs-agent/tools/android-apk.sh            # 出 APK
+bash spikes/quickjs-agent/tools/android-apk.sh --install  # 顺带 adb install
+# 手工装：adb install -r spikes/quickjs-agent/android/app/build/outputs/apk/release/app-release.apk
+```
+
+### 让 CLI 在 Android 的 App 里能跑，只有两条硬约束
+
+spike 是个 CLI，「打包」实际上是把**二进制塞进 APK 并执行它**，两个坑都在
+`app/build.gradle.kts` 与 `AndroidManifest.xml` 的注释里钉住了：
+
+1. **二进制必须以 `lib*.so` 命名进 jniLibs**（这里是 `libquickjsagent.so`）——
+   系统才会把它解包到 `nativeLibraryDir`，而**只有那里可执行**
+   （Android 10+ 禁止从 app data 目录 exec）。这也是 proot 那类项目的通行做法。
+2. **必须显式要求解包**：AGP 默认 `useLegacyPackaging = false`（库不落盘、直接从 APK
+   内存映射），那样磁盘上根本没有文件可 exec。所以要
+   `useLegacyPackaging = true` + manifest 里 `extractNativeLibs="true"`。
+
+实测（构建产物）：
+```
+lib/arm64-v8a/libquickjsagent.so   ELF 64-bit LSB **pie executable**, arm64, /system/bin/linker64
+                                   PT_LOAD p_align=0x4000（16KB 页对齐，Android 15+ 要求）
+                                   与本地产物逐字节一致
+APK 签名  APK Signature Scheme v2 ✓（用仓库里的 keystore.properties）
+体积      9.1 MB
+```
+
+### 壳做了什么、没做什么
+
+**没改路线本身一行** —— QuickJS 宿主、Rust 工具链、会话/审批/MCP 全是 spike 里那份。
+壳只解决「手机上怎么按下去」：
+
+- 起进程、把 stdout/stderr 实时贴到一个等宽文本区；
+- **审批变成按钮**：App 里没有 stdin，所以进程的 stdin 接了管道，`允许/拒绝/总是/全拒`
+  四个按钮往管道写 `y/n/a/d`（终端里那套提示照旧打在输出里）；
+- API key 存 SharedPreferences，只经环境变量传给子进程；
+- workspace/data 放 app 私有目录（`filesDir/`），所以 `--resume` 在手机上也能续会话。
+
+**未验证**：设备在装之前掉线了，所以「exec from nativeLibraryDir 在真机上真的能跑」
+这一步**还没有实测证据** —— 静态项全过，但这条是运行期行为。若真机上失败（SELinux 拦
+exec），退路是把 spike 编成 **cdylib** 走 JNI 在进程内调用，而不是 fork/exec
+（那就需要给 host 加一层 JNI 导出，工作量中等）。
+
 ## iOS：与 bun 路线最大的差别就在这里
 
 **WebKit 只是 A 路线（bun）的依赖，B 路线（QuickJS）不需要它。** 这条差别值得单独讲清，

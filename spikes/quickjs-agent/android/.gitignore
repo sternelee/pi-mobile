@@ -1,0 +1,8 @@
+# Gradle / 构建产物
+build/
+.gradle/
+local.properties
+# 签名材料（与主工程一致：不入库）
+keystore.properties
+# 打进 APK 的二进制是构建产物，不入库
+app/src/main/jniLibs/

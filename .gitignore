@@ -8,3 +8,5 @@ target/
 # 独立 crate（非 workspace 成员）跑 cargo 会就地生成 lockfile；
 # 真正生效的锁是 src-tauri/Cargo.lock
 crates/*/Cargo.lock
+# macOS
+.DS_Store
