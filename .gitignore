@@ -2,3 +2,9 @@ node_modules
 dist
 build/
 vendor/
+# Rust 构建产物（src-tauri 自己那份在 src-tauri/.gitignore 里，这里是给
+# crates/、spikes/ 下的独立 crate 兜底 —— 它们不带自己的 .gitignore）
+target/
+# 独立 crate（非 workspace 成员）跑 cargo 会就地生成 lockfile；
+# 真正生效的锁是 src-tauri/Cargo.lock
+crates/*/Cargo.lock

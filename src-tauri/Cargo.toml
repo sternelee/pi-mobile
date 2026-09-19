@@ -65,6 +65,10 @@ git2 = { version = "0.20", default-features = false, features = [
     "vendored-libgit2",
     "vendored-openssl",
 ] }
+# agent 工具实现（workspace 越狱 + 写前备份/回滚）。抽成本仓独立 crate 是为了让
+# Tauri 之外的宿主也能复用同一份实现 —— 见 `spikes/quickjs-agent`（QuickJS 宿主）
+# 与 `docs/POCKET-PI-NOTES.md`。loopback.rs 只保留同名转发，行为不变。
+pi-host-tools = { path = "../crates/pi-host-tools" }
 
 # D4 凭证：keyring 无 Android Keystore 后端（v3 支持 mac/win/linux/ios），
 # Android 侧 cfg 隔离为沙箱文件态（见 src/creds.rs），不编译本依赖。

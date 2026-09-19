@@ -3121,6 +3121,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-host-tools"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde_json",
+]
+
+[[package]]
 name = "pi-mobile"
 version = "0.1.0"
 dependencies = [
@@ -3130,6 +3138,7 @@ dependencies = [
  "git2",
  "keyring",
  "libloading 0.8.9",
+ "pi-host-tools",
  "rand 0.10.2",
  "regex",
  "reqwest 0.12.28",
