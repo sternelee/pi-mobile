@@ -9,7 +9,8 @@ spike 里 `DEEPSEEK_BASE_URL` 就是为它留的。
   消息里没有 role:"tool" → 回一个 `read` 工具调用（arguments 分两片发，验证流式拼接）
   消息里已有 role:"tool" → 回一段收尾文本（thinking + text 两类增量）
 
-用法：python3 tools/mock-deepseek.py [port]   # 默认 8899
+用法：python3 tools/mock-deepseek.py [port] [host]   # 默认 8899 / 127.0.0.1
+     真机连宿主时用 host=0.0.0.0（否则只监听回环，设备连不上）
 """
 
 import json
@@ -18,6 +19,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8899
+HOST = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
 STATE = {"requests": 0, "bodies": []}
 
 
@@ -146,5 +148,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"[mock] DeepSeek SSE mock listening on http://127.0.0.1:{PORT}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    print(f"[mock] DeepSeek SSE mock listening on http://{HOST}:{PORT}", flush=True)
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

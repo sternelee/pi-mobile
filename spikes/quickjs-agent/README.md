@@ -84,6 +84,74 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 > mock 是**无状态**的：消息里没有 `role:"tool"` 就回一个 `read` 工具调用，有就回收尾
 > 文本。所以同一句话可以反复跑，每次都会走完整的两轮 + 一次真实工具执行。
 
+## Android 真机
+
+spike 是**普通 CLI**，不需要 APK / Tauri / WebView —— 可以直接 `adb push` 到
+`/data/local/tmp` 跑。这样能在动整个 App 集成之前，先确认「QuickJS + pi-agent-core +
+Rust 工具链」这一层在真机上不塌。
+
+```bash
+# 1. 交叉编译（产物在 spikes/quickjs-agent/target/aarch64-linux-android/release/）
+bash spikes/quickjs-agent/tools/android-build.sh
+
+# 2a. 真模型（key 从环境或 ~/.zshrc 读，走 env 文件传给设备，不进 argv）
+bash spikes/quickjs-agent/tools/android-run.sh --prompt "Create src/x.js then stop."
+
+# 2b. 或者不出网：宿主跑 mock（必须绑 0.0.0.0，设备经 LAN 连回来）
+python3 spikes/quickjs-agent/tools/mock-deepseek.py 8899 0.0.0.0 &
+MOCK=1 bash spikes/quickjs-agent/tools/android-run.sh --prompt "…"
+```
+
+`android-run.sh` 会把 workspace/data 放到设备上的 `/data/local/tmp/pi-spike/`，
+所以第二轮加 `--resume` 就能在设备上验会话恢复。不带 `--yes/--deny` 时是本目录默认的
+**交互审批**：`adb shell` 有 pty，可以直接在终端敲 `y`/`n`/`a`/`d`。
+
+### 已验证的（静态）
+
+| 项 | 结果 |
+|---|---|
+| 可执行形态 | `ELF 64-bit LSB **pie executable**, ARM aarch64, interpreter /system/bin/linker64` |
+| 16KB 页对齐（Android 15+） | 4 个 `PT_LOAD` 全 `p_align = 0x4000`，用仓库的 `scripts/check-elf-align.py` 验过 |
+| 动态依赖 | **只有 `libc.so` / `libdl.so` / `libm.so`** —— QuickJS、ring、rustls 全静态链进来 |
+| 体积 | 9.49 MB（未 strip）/ **6.73 MB**（`llvm-strip` 后），对照 bun 路线的 87MB `.so` |
+
+### TLS：这条路的根证书是编译进来的（对真机很关键）
+
+`reqwest` 的 `rustls-tls` feature = `rustls-tls-webpki-roots`，也就是 **Mozilla 根证书库
+静态编入二进制**（Cargo.lock 里 `webpki-roots 1.0.9`，且**没有** `rustls-native-certs`）。
+实测二进制里 `system/etc/security/cacerts` 出现 **0 次**、`libssl/libcrypto` 符号 **0 个**
+（`strings` 里那几处 openssl 字样是 ring 的 perlasm 汇编作者署名）。
+
+这意味着 **D16 卡了 4 轮的那类问题在这条路上不存在**：不需要按 Android 的 hashed
+目录格式拼 CA bundle、不需要 `set_ssl_cert_file/dir`、不受 `/apex/com.android.conscrypt`
+布局变化影响。代价是根证书更新要跟着依赖走（换 `webpki-roots` 版本重编）。
+
+### 交叉编译的三个坑（都封在 `android-build.sh` 里）
+
+1. **任何 cargo 命令都要 NDK 的 CC/AR/RANLIB/LINKER** —— 同 `scripts/android-build.sh`
+   的教训（Android 上连 `cargo check` 都会因为没有 CC 而失败）。
+2. **rquickjs-sys 没有 android 的预生成绑定**（`src/bindings/` 里没有那一份），
+   只能开 `bindgen` 现场生成 —— Cargo.toml 里按 target 打开。bindgen 要 libclang，
+   而 **NDK 只带 `libClangdXPCLib`、不带 libclang** → 用 homebrew llvm 的
+   （脚本自动探测 `LIBCLANG_PATH`）。
+3. **bindgen 自己不传 `--target`**（读的是 rquickjs-sys 的 build.rs），不给就按宿主解析，
+   报 `'stdio.h' file not found` —— 本机 PATH 里 NDK clang 排在 Apple clang 前面，
+   正好把这个坑放大。要显式给 `--target=<triple><API> --sysroot=<NDK sysroot>`，
+   且变量名是 **`BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android`**（下划线；bash 的
+   `export` 也不接受带横线的名字）。
+
+### 真机上还没验的
+
+静态检查过了，但**「能编译」不等于「能跑」**。上设备后重点看这几条（按可疑程度排）：
+
+1. **DNS/出网**：rustls 走 `std::net` 的 `getaddrinfo` → Android Bionic 解析器读的是
+   系统属性，理论上没问题；但**这正是 pi-mobile 在 iOS 上被 bun 的 c-ares 坑到的地方**
+   （c-ares 读不到 `/etc/resolv.conf`）。这条是本 spike 在真机上最值得看的点。
+2. **`/data/local/tmp` 可执行**：adb shell 里正常，但如果以后塞进 APK，则需要
+   INTERNET 权限 + 不能从 data 分区 exec（那是另一套问题）。
+3. 冷启动与堆占用是否与 macOS 同量级（QuickJS 无 JIT，Android 上 arm64 也是解释执行，
+   预期接近）。
+
 ## 实测数字
 
 macOS arm64 / release / **真 DeepSeek**：
@@ -185,10 +253,11 @@ spike 阶段先把语义对齐（`TODO_TRANSITIONS` 与 `replayTodos` 逐行对�
 
 ## 已知问题 / 未验证
 
-- **未在 iOS/Android 上构建**：rquickjs 是纯 C、无 JIT，跨平台编译预期简单
-  （PocketJS 已在两端跑过 QuickJS），但本 spike 只跑了 macOS。
-  且 `rquickjs` **不要开 `bindgen` feature**：本机 PATH 里 NDK 的 clang 排在
-  Apple clang 前面，bindgen 会拿 NDK 的 include 路径去找 `stdio.h` 而失败（实测）。
+- **Android 已交叉编译通过、未上真机**（见「Android 真机」一节：静态项全过，
+  真机跑法有脚本）。**iOS 未做**：rquickjs 无 JIT 本身合规，但没试过交叉编译。
+- 桌面构建**不要开 `bindgen` feature**（Cargo.toml 里只在 android target 打开它）：
+  本机 PATH 里 NDK 的 clang 排在 Apple clang 前面，bindgen 会拿 NDK 的 include
+  路径去找 `stdio.h` 而失败（实测）。
 - **`transformMessages` 没实现**：pi-ai 发请求前会做 provider 归一化（孤儿
   toolCall 修补、连续 toolResult 合并等）。本 spike 只做了三种角色 + 空 assistant
   丢弃，长时间多轮后可能撞到边界。

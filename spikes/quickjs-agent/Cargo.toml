@@ -7,12 +7,22 @@ license = "MIT"
 publish = false
 
 [dependencies]
-# QuickJS 绑定。**不要开 `bindgen` feature** —— 本机 PATH 里 Android NDK 的 clang
-# 排在 Apple clang 前面，bindgen 会拿到 NDK 的 include 路径去找 stdio.h 而失败
-# （2026-09-19 实测）。预生成绑定够用。
+# QuickJS 绑定。桌面走**预生成绑定**（rquickjs-sys 自带 macOS arm64 那份），
+# 跨编译到 Android 时才需要 bindgen —— 见下面 target 段。
 rquickjs = "0.12"
 pi-host-tools = { path = "../../crates/pi-host-tools" }
+# rustls 而非 native-tls：Rust 侧选 TLS 后端就是为了不碰 OpenSSL 那套证书加载
+# （D16 在 Android 上卡了 4 轮的正是它）。真机实测见 README。
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 serde_json = "1"
 # 审批卡的 diff 渲染 —— 与 src-tauri 同款（同一个库，观感一致）
 similar = "2"
+
+# Android 上 rquickjs-sys **没有**预生成绑定（`src/bindings/` 里没有 android 那份），
+# 只能开 bindgen 现场生成。两个配套条件都写在 tools/android-build.sh 里：
+#   1. LIBCLANG_PATH 指 homebrew llvm（NDK 只带 libClangdXPCLib，不带 libclang）；
+#   2. BINDGEN_EXTRA_CLANG_ARGS_<target> 给 `--target` 与 NDK sysroot
+#      —— 不给的话 bindgen 会按宿主去解析，报 `'stdio.h' file not found`。
+# 不开 `macro` feature，所以 host 侧仍走预生成绑定，不受影响。
+[target.'cfg(target_os = "android")'.dependencies]
+rquickjs = { version = "0.12", features = ["bindgen"] }

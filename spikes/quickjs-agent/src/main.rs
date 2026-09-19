@@ -30,6 +30,7 @@ struct Args {
     model: String,
     thinking: String,
     workspace: PathBuf,
+    data_dir: PathBuf,
     quiet: bool,
     decision: DecisionSource,
     resume: bool,
@@ -41,6 +42,8 @@ fn parse_args() -> Result<Args, String> {
     let mut model = std::env::var("SPIKE_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
     let mut thinking = "high".to_string();
     let mut workspace = PathBuf::from("spikes/quickjs-agent/workspace");
+    // 真机上没有仓库相对路径，Android 跑法用 --workspace/--data-dir 显式给
+    let mut data_dir = PathBuf::from("spikes/quickjs-agent/.data");
     let mut quiet = false;
     let mut decision = DecisionSource::Prompt;
     let mut resume = false;
@@ -54,6 +57,9 @@ fn parse_args() -> Result<Args, String> {
             "--thinking" => thinking = argv.next().ok_or("--thinking needs a value")?,
             "--workspace" => {
                 workspace = PathBuf::from(argv.next().ok_or("--workspace needs a value")?)
+            }
+            "--data-dir" => {
+                data_dir = PathBuf::from(argv.next().ok_or("--data-dir needs a value")?)
             }
             "--quiet" => quiet = true,
             "--resume" => resume = true,
@@ -82,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
         model,
         thinking,
         workspace,
+        data_dir,
         quiet,
         decision,
         resume,
@@ -121,7 +128,7 @@ fn run() -> Result<(), String> {
 
     // 数据目录放 .data（备份根 + policy.json + sessions），与 workspace 分开
     // —— 与 App 内布局一致。
-    let data_dir = PathBuf::from("spikes/quickjs-agent/.data");
+    let data_dir = args.data_dir.clone();
     seed_workspace(&args.workspace)?;
     let tools = HostTools::new(&args.workspace, &data_dir);
     let sink = std::sync::Arc::new(Sink::new(cfg));
