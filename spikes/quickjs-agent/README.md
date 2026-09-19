@@ -79,6 +79,10 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 | `--yes` / `--deny` | 审批全放行 / 全拒绝（**仍走完整握手**，无人值守也能验证） |
 | `--delay-approval <ms>` | 延迟放行，用来观测「等待期间 guest 没被阻塞」 |
 | `--net-check` | 只验 dns / tls / engine 三层，不起 agent（真机自诊先用它） |
+| `--plan <objective>` | 起草实施计划（只读嵌套 run，不动主对话） |
+| `--btw <question>` | 旁问（带主对话上下文回答，不动主对话） |
+| `--list-sessions` / `--open-session <id>` | 列出 / 打开会话（`*` 标最新） |
+| `--no-auto-continue` | 关掉 goal 自动续跑（默认开，上限 10 次） |
 | `--mcp-config <file>` | MCP 服务器配置（默认 `<data-dir>/mcp.json`）；其源会被自动授权给 `host.http` |
 | `--compact-at <tokens>` | 上下文水位到多少就压缩（默认窗口 60%；真跑一轮够不到，所以可显式给） |
 | `--data-dir <dir>` | 数据目录（真机上不能依赖仓库相对路径；run 脚本会显式传） |
@@ -100,13 +104,13 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 | **subagent**（delegate/researcher/reviewer + `agents/*.md`） | ✅ 移植 | 子代理的工具调用**同样过宿主审批** |
 | **ask_user**（多选 + 自由输入） | ✅ 移植 | 契约与 `ask_user.rs` 相同，决策源换成终端 |
 | **AGENTS.md 注入** | ✅ 对齐 | 异步读 + 重装 systemPrompt + `context_ready` 门控 |
-| **goal**（持久目标注入） | ⚠️ 部分 | 注入 + 持久化已对齐；**autoContinue 未做**（上游 Sisyphus 自动续跑） |
+| **goal**（注入 + autoContinue） | ✅ 已对齐 | autoContinue 语义照搬（上限 10 / GOAL_COMPLETE / 用户 prompt 重置预算）；退避改用宿主 tick |
 | **auto-compaction** | ✅ 对齐 | 同阈值策略（窗口 60%）+ 保留 8 条；另见下方「发现的 bun 版潜 bug」 |
 | **会话持久化** | ✅ 同一份实现 | 同一个 `JsonlSessionRepo` + 同一份 Rust fs，pi-v4 格式互通 |
 | **审批**（分档 + diff + always） | ✅ 且更强 | 分档表照抄；额外多了「Rust 强制握手」（见「审批」一节） |
 | 控制面 `__pi_status` / `__pi_tool_names` / `__pi_history` | ✅ 对齐 | `__spike.status/toolNames/history` |
-| 会话切换 `__pi_open_session` / `__pi_new_session` | ❌ 未做 | 只有 `--resume` 取最新；切换要加一层「选哪个」 |
-| `/plan` `/btw` 嵌套 run | ❌ 未做 | 底座 `runNestedCollect` 已就位，缺的是命令面（那是 UI 驱动的东西） |
+| **会话列表/切换**（`session_list` / `open` / `new`） | ✅ 已对齐 | `--list-sessions` / `--open-session <id>`；走 kick 模式（见下） |
+| **`/plan` / `/btw`** | ✅ 已对齐 | `--plan <objective>` / `--btw <question>`；一次只读嵌套 run，不动主对话 |
 | `nativeTools`（剪贴板/通知/定位/日历/通讯录/照片/天气） | ❌ **不可移植** | M6 走 Tauri 插件（ClipboardExt/NotificationExt/GeolocationExt…）。CLI 在桌面上没有这些能力，要验得在 App 里 |
 | `run_js`（D14 脚本沙箱） | ❌ 不可移植 | 要搬 `script.rs` 的隔离 runner + 能力授予 + per-run token（一套独立的安全核心） |
 | `preview`（D15） | ❌ 不可移植 | 要搬 `preview.rs`（axum 静态服务 + 端口管理），且它的消费者是 WebView UI |
@@ -119,6 +123,18 @@ cargo run --release --manifest-path spikes/quickjs-agent/Cargo.toml -- \
 **读法**：这张表本身就是 B 路线的成本清单 —— 左边一列里「同一份实现」的行是**已经沉没、
 可以白拿**的部分；「不可移植」的行各自绑定一个 Tauri 插件或一个 cargo 依赖，换宿主就得重写；
 「按设计不做」的行是这条路线的取舍。
+
+### 会话操作与命令面：为什么都是 kick 模式
+
+`repo.list()` / `repo.open()` 是异步的，而 rquickjs 的 `call::<String>` **不能把 Promise
+转成 String**（实测报 `Error converting from js 'promise' into type 'string'`）。所以会话
+列表/切换/plan/btw 全部走 **kick 模式**：JS 立即返回 `"started"`，结果经事件回合，宿主
+tick 循环取。这与 App 在真机上被迫采用的形状一致（CONTRACTS 里记的那条）——不是巧合，
+是同一个约束：**异步 I/O 的结果不能靠返回值穿过桥**。
+
+autoContinue 的退避也换了实现：bun 版用 `setTimeout` 重试「agent 还在 processing」，
+QuickJS 没有定时器 → 改成宿主 tick 每拍试一次（上限 30 拍）。语义相同，形状更贴
+「循环归宿主」。
 
 ### skills：可复用的正是「注入半」
 
@@ -309,7 +325,7 @@ release / **真 DeepSeek**。Android 那列是在 arm64 模拟器上真跑出来
 
 | 指标 | macOS arm64 | Android arm64 |
 |---|---|---|
-| JS bundle（prelude + agent，含会话+todo+MCP+skills） | **380,417 B**（App 的 2,950,176 B → **小 7.8×**） | 同一个二进制，同一份 bundle |
+| JS bundle（prelude + agent，含会话+todo+MCP+skills+命令面） | **385,201 B**（App 的 2,950,176 B → **小 7.7×**） | 同一个二进制，同一份 bundle |
 | guest 冷启动 | 26 – 60 ms | 84.6 ms |
 | QuickJS 堆 | 1.81 MB | 1.81 MB |
 | 会话恢复 | 1.8 ms（18 条） | 5.1 ms（20 条） |

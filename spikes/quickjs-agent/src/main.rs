@@ -46,6 +46,11 @@ struct Args {
     net_check: bool,
     compact_at: u64,
     mcp_config: Option<PathBuf>,
+    plan: Option<String>,
+    btw: Option<String>,
+    list_sessions: bool,
+    open_session: Option<String>,
+    auto_continue: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -62,6 +67,11 @@ fn parse_args() -> Result<Args, String> {
     let mut net_check = false;
     let mut compact_at = 0u64;
     let mut mcp_config: Option<PathBuf> = None;
+    let mut plan: Option<String> = None;
+    let mut btw: Option<String> = None;
+    let mut list_sessions = false;
+    let mut open_session: Option<String> = None;
+    let mut auto_continue = true;
 
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -78,6 +88,13 @@ fn parse_args() -> Result<Args, String> {
             "--quiet" => quiet = true,
             "--resume" => resume = true,
             "--net-check" => net_check = true,
+            "--plan" => plan = Some(argv.next().ok_or("--plan needs an objective")?),
+            "--btw" => btw = Some(argv.next().ok_or("--btw needs a question")?),
+            "--list-sessions" => list_sessions = true,
+            "--open-session" => {
+                open_session = Some(argv.next().ok_or("--open-session needs an id")?)
+            }
+            "--no-auto-continue" => auto_continue = false,
             "--mcp-config" => {
                 mcp_config = Some(PathBuf::from(
                     argv.next().ok_or("--mcp-config needs a value")?,
@@ -123,6 +140,11 @@ fn parse_args() -> Result<Args, String> {
         net_check,
         compact_at,
         mcp_config,
+        plan,
+        btw,
+        list_sessions,
+        open_session,
+        auto_continue,
     })
 }
 
@@ -374,6 +396,77 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // ── 只做一件事的模式（命令面）：跑完就退，不进对话循环 ──────────────
+    if args.list_sessions {
+        println!("\n── sessions ─────────────────────────────────────────────────");
+        guest.list_sessions()?;
+        // kick 模式：等 session_list 事件（与 restore 同形）
+        let mut sessions: Option<Value> = None;
+        let started = Instant::now();
+        while sessions.is_none() && started.elapsed() < Duration::from_secs(30) {
+            for event in guest.tick()? {
+                match event["type"].as_str() {
+                    Some("session_list") => sessions = Some(event["sessions"].clone()),
+                    Some("session_error") => {
+                        return Err(event["error"].as_str().unwrap_or("list failed").to_string())
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(TICK_INTERVAL);
+        }
+        let list = sessions.ok_or("session_list 未到达")?;
+        for (index, meta) in list
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            println!(
+                "  {}{:<38} modified {}",
+                if index == 0 { "* " } else { "  " },
+                meta["id"].as_str().unwrap_or("?"),
+                meta["modifiedAt"].as_u64().unwrap_or(0)
+            );
+        }
+        println!("  （* = 最新；--open-session <id> 打开）");
+        return Ok(());
+    }
+    if let Some(id) = &args.open_session {
+        guest.open_session(id)?;
+        // 打开是异步的（走 fs hostcall），跟着 tick 推完
+        for _ in 0..500 {
+            let events = guest.tick()?;
+            if events.iter().any(|e| e["type"] == "session_opened") {
+                break;
+            }
+            std::thread::sleep(TICK_INTERVAL);
+        }
+        let info = guest.session_info()?;
+        println!(
+            "opened session      {} ({} messages)",
+            info["sessionId"].as_str().unwrap_or("?"),
+            info["restoredMessages"].as_u64().unwrap_or(0)
+        );
+        return Ok(());
+    }
+    if let Some(objective) = &args.plan {
+        println!("\n── plan ─────────────────────────────────────────────────────");
+        guest.plan(objective)?;
+        let text = collect_nested(&guest, "plan_drafted", "plan_error")?;
+        println!("{text}");
+        return Ok(());
+    }
+    if let Some(question) = &args.btw {
+        println!("\n── btw ──────────────────────────────────────────────────────");
+        guest.btw(question)?;
+        let text = collect_nested(&guest, "btw_answer", "btw_error")?;
+        println!("{text}");
+        return Ok(());
+    }
+    guest.set_auto_continue(args.auto_continue)?;
+
     // prompt 前的水位 —— 压缩阈值就是拿它判的，所以它必须可见
     if let Ok(status) = guest.status() {
         println!(
@@ -510,7 +603,17 @@ fn run() -> Result<(), String> {
                         event["error"].as_str().unwrap_or("?")
                     );
                 }
-                Some("agent_end") => finished = true,
+                // **不是** agent_end 就收工：goal 存续时会自动续跑，终态由 agent_idle 给出
+                Some("agent_idle") => finished = true,
+                Some("goal_auto_continue") => println!(
+                    "  [goal] 自动续跑 {}/{}",
+                    event["count"].as_u64().unwrap_or(0),
+                    event["cap"].as_u64().unwrap_or(0)
+                ),
+                Some("goal_auto_done") => println!("  [goal] 模型报告 GOAL_COMPLETE，停止续跑"),
+                Some("goal_error") => {
+                    println!("  [goal] {}", event["error"].as_str().unwrap_or("?"))
+                }
                 Some("agent_error") => {
                     failure = Some(
                         event["message"]
@@ -629,6 +732,34 @@ fn mcp_server_origins(path: &std::path::Path) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 等一个「嵌套 run」的结果事件（plan / btw 用）。终态是 xxx_drafted/xxx_answer 或
+/// xxx_error —— 与 App 的 kick+事件模式同形。
+fn collect_nested(guest: &Guest, done: &str, failed: &str) -> Result<String, String> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(120) {
+        for event in guest.tick()? {
+            match event["type"].as_str() {
+                Some(kind) if kind == done => {
+                    return Ok(event["content"]
+                        .as_str()
+                        .or_else(|| event["answer"].as_str())
+                        .unwrap_or("(no output)")
+                        .to_string())
+                }
+                Some(kind) if kind == failed => {
+                    return Err(event["error"]
+                        .as_str()
+                        .unwrap_or("nested run failed")
+                        .to_string())
+                }
+                _ => {}
+            }
+        }
+        std::thread::sleep(TICK_INTERVAL);
+    }
+    Err(format!("{done} 未到达（120s 超时）"))
 }
 
 fn ms(duration: Duration) -> f64 {

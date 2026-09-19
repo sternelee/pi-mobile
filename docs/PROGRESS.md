@@ -2,6 +2,51 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第七轮）— ✅ goal autoContinue + /plan·/btw + 会话切换；对齐清单全部清完
+
+最后三项「可做未做」都补上了，bun 版的功能面到此**能对齐的都对齐了**。
+
+### ① goal autoContinue（上游 Sisyphus 语义）
+
+上限 10 次 / 模型逐字答 `GOAL_COMPLETE` 即停 / 用户 prompt 重置预算。
+**一处实现差异**：bun 版用 `setTimeout` 重试「agent 还在 processing」，QuickJS 没有定时器
+→ 改成宿主 tick 每拍试一次（上限 30 拍）。语义相同，形状更贴「循环归宿主」。
+
+实测（真 DeepSeek）：
+```
+[goal] 自动续跑 1/10        ← 第一轮结束后自动继续
+[goal] 模型报告 GOAL_COMPLETE，停止续跑
+```
+即模型真在续跑后自己判定完成并停下 —— 不是靠上限截断。
+
+### ② `/plan` 与 `/btw`
+
+`--plan <objective>` / `--btw <question>`，都是一次只读嵌套 run。实测 plan 真的先调查
+再起草（它发现 `clamp` 已存在，还引用了 AGENTS.md 里「文件不超 40 行」那条规则）。
+
+### ③ 会话列表 / 打开 / 新建
+
+`--list-sessions`（`*` 标最新）/ `--open-session <id>`。**都走 kick 模式**：
+`repo.list()` 是异步的，而 rquickjs 的 `call::<String>` 不能把 Promise 转成 String
+（实测 `Error converting from js 'promise' into type 'string'`）→ JS 立即返回 `"started"`，
+结果经事件回合。这与 App 在真机上被迫采用的形状**一致**（CONTRACTS 记的那条）——
+同一个约束：异步 I/O 的结果不能靠返回值穿过桥。
+
+### 对齐总账（相对 bun 版）
+
+| 分类 | 项 |
+|---|---|
+| **已对齐**（16） | 文件工具 7 个 / fetch / todo / subagent / ask_user / MCP / skills 注入 / 审批 / 会话（持久化+列表+切换）/ AGENTS.md / goal（注入+续跑）/ 自动压缩 / 控制面 / plan / btw |
+| **不可移植**（5） | nativeTools（Tauri 插件族）/ run_js（D14 沙箱）/ preview（axum+WebView）/ git（git2+openssl）/ skills 安装器（git2+zip） |
+| **按设计不做**（1） | provider 目录与 OAuth（只做 DeepSeek 一家） |
+
+bundle 385,201 B（App 2,950,176 B → 小 **7.7×**）。工具面 13。
+测试：spike 10 / crate 13 / src-tauri 39，clippy 与 fmt 全干净（src-tauri 基线 fmt 14 /
+clippy 26）。桌面与 Android 双验。
+
+**下一步该考虑的不是再加功能**：这张表已经把 B 路线的成本与收益都量出来了，
+要不要切 D1 是个决策（触发条件见 `docs/POCKET-PI-NOTES.md` §4），不是继续堆 spike。
+
 ## 2026-09-19（第六轮）— ✅ skills 注入对齐（复用「注入半」）；bundle 对齐基本收官
 
 D12 的 skills 在实现上天然分两半，而这条切分线恰好就是「能不能复用」的答案：

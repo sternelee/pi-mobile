@@ -979,6 +979,178 @@ function composeSystemPrompt(base) {
   return prompt;
 }
 
+// ── pi-goal autoContinue（上游 Sisyphus 自动续跑，带上限防失控）────────
+//
+// 语义照搬 bun 版：goal 存续期间每回合结束自动续跑，直到模型逐字答复
+// GOAL_COMPLETE、达到上限。**一处实现差异**：那边用 `setTimeout` 做「agent 还在
+// processing」的退避重试，而 QuickJS 没有定时器 —— 改成由宿主 tick 驱动（每拍试一次），
+// 与整条路线「循环归宿主」的形状一致。
+const GOAL_AUTO_CAP = 10;
+const GOAL_CONTINUE_PROMPT =
+  "Continue working toward the current goal. If the goal is fully achieved, reply with exactly GOAL_COMPLETE and nothing else.";
+let goalAutoCount = 0;
+let goalAutoStopped = false;
+let goalAutoEnabled = true;
+let goalAutoPending = false;
+let goalAutoTries = 0;
+
+function lastAssistantText() {
+  const messages = agent?.state.messages ?? [];
+  const last = [...messages].reverse().find((m) => m.role === "assistant");
+  return textOfContent(last?.content ?? []).trim();
+}
+
+/// 由 tick 调用：agent 空闲时提交续跑 prompt；还在忙就下一拍再试。
+/// （bun 版这里是 setTimeout 退避 30×100ms；我们没有定时器。）
+function pumpGoalAutoContinue() {
+  if (!goalAutoPending) return;
+  if (goalAutoTries >= 30) {
+    goalAutoPending = false;
+    outbox.push({ type: "goal_error", error: "agent stayed busy — auto-continue skipped" });
+    outbox.push({ type: "agent_idle" });
+    return;
+  }
+  goalAutoTries += 1;
+  if (agent?.state.isStreaming || pendingModels.size > 0) return; // 下一拍再试
+  goalAutoPending = false;
+  agent.prompt(GOAL_CONTINUE_PROMPT).then(
+    () => {},
+    (error) => {
+      const message = String(error?.message ?? error ?? "");
+      if (message.includes("already processing")) {
+        goalAutoPending = true; // 退避：交给下一拍
+      } else {
+        outbox.push({ type: "goal_error", error: message });
+        outbox.push({ type: "agent_idle" });
+      }
+    },
+  );
+}
+
+/// agent_end 时判定：继续跑还是收工。**终态必然发 agent_idle**，宿主靠它停循环。
+function decideGoalContinue() {
+  if (goalAutoStopped) {
+    goalAutoStopped = false;
+    outbox.push({ type: "agent_idle" });
+    return;
+  }
+  const done = lastAssistantText() === "GOAL_COMPLETE";
+  if (done) outbox.push({ type: "goal_auto_done" });
+  if (!goalAutoEnabled || !currentGoal || done || goalAutoCount >= GOAL_AUTO_CAP) {
+    if (currentGoal && goalAutoCount >= GOAL_AUTO_CAP) {
+      outbox.push({ type: "goal_error", error: `auto-continue 达到上限 ${GOAL_AUTO_CAP}` });
+    }
+    outbox.push({ type: "agent_idle" });
+    return;
+  }
+  goalAutoCount += 1;
+  goalAutoTries = 0;
+  goalAutoPending = true;
+  outbox.push({ type: "goal_auto_continue", count: goalAutoCount, cap: GOAL_AUTO_CAP });
+}
+
+// ── /plan 与 /btw（pi-plan / pi-btw 的移动原生化，命令面由宿主驱动）────
+// 两者都是「一次只读的嵌套 run」：不动主对话、不写文件。
+async function draftPlan(objective) {
+  outbox.push({ type: "plan_drafting", objective });
+  try {
+    const plan = await runNestedCollect(
+      `Draft an implementation plan for this objective. Investigate the workspace with read-only tools first. Output numbered steps, each one line with the files involved. No code unless essential.\n\nObjective: ${objective}`,
+      ["read", "ls", "grep"],
+      "You are a planning subagent. Using read-only tools, investigate what is needed and draft a concise, actionable plan. No code unless essential.",
+      "minimal",
+    );
+    outbox.push({ type: "plan_drafted", objective, content: plan || "(planning produced no output)" });
+  } catch (error) {
+    outbox.push({ type: "plan_error", objective, error: String(error?.message ?? error) });
+  }
+}
+
+async function askByTheWay(question) {
+  outbox.push({ type: "btw_thinking", question });
+  try {
+    const context = (agent?.state.messages ?? [])
+      .slice(-12)
+      .map((m) => `${m.role}: ${textOfContent(m.content).slice(0, 400)}`)
+      .filter((line) => !line.endsWith(": "))
+      .join("\n");
+    const answer = await runNestedCollect(
+      `Main conversation so far:\n${context || "(empty)"}\n\nQuestion: ${question}`,
+      ["read", "ls", "grep"],
+      "You are a side-conversation assistant. The user asks a quick question ('by the way') while the main task continues. Answer briefly using the main-conversation context above and read-only tools if needed. Do not continue the main task.",
+      "minimal",
+    );
+    outbox.push({ type: "btw_answer", question, answer: answer || "(no answer)" });
+  } catch (error) {
+    outbox.push({ type: "btw_error", question, error: String(error?.message ?? error) });
+  }
+}
+
+/// 会话列表（对齐 App 的 session_list）：按 modifiedAt 倒序。
+///
+/// ⚠️ **kick 模式**：`repo.list()` 是异步的，而宿主侧 `call::<String>` 不能把 Promise
+/// 转成 String（rquickjs 会报 "Error converting from js 'promise' into type 'string'"）。
+/// 所以这里立即返回 "started"，结果经 `session_list` 事件回合 —— 与 restore / plan
+/// 同一形状，也是 App 在真机上被迫采用的那套（CONTRACTS 里记的 kick+轮询）。
+function listSessions() {
+  void repo
+    .list()
+    .then((metas) => {
+      metas.sort((a, b) => b.modifiedAt - a.modifiedAt);
+      outbox.push({
+        type: "session_list",
+        sessions: metas.map((m) => ({
+          id: m.id,
+          modifiedAt: m.modifiedAt,
+          cwd: m.cwd,
+          entries: m.entries ?? null,
+        })),
+      });
+    })
+    .catch((error) => outbox.push({ type: "session_error", error: `list: ${error?.message ?? error}` }));
+  return "started";
+}
+
+/// 打开指定会话（对齐 App 的 session_open / __pi_open_session）。同样 kick 模式。
+function openSession(id) {
+  void (async () => {
+    const metas = await repo.list();
+    const meta = metas.find((m) => m.id === id);
+    if (!meta) throw new Error(`no session with id ${id}`);
+    session = await repo.open(meta);
+    sessionId = meta.id;
+    const entries = await session.findEntries();
+    restoredMessages = entries
+      .filter((e) => e.type === "message" && e.message)
+      .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+      .map((e) => e.message);
+    if (restoredMessages.length && agent) agent.state.messages = restoredMessages;
+    for (const message of [...restoredMessages].reverse()) {
+      if (message.role !== "assistant" || !message.usage) continue;
+      lastContextTokens =
+        message.usage.totalTokens ?? (message.usage.input ?? 0) + (message.usage.output ?? 0);
+      break;
+    }
+    replayTodos(restoredMessages);
+    outbox.push({ type: "session_opened", sessionId: meta.id, messages: restoredMessages.length });
+  })().catch((error) =>
+    outbox.push({ type: "session_error", error: `open: ${error?.message ?? error}` }),
+  );
+  return "started";
+}
+
+/// 新建空白会话（对齐 App 的 session_new）。
+function newSession() {
+  session = null;
+  sessionPromise = null;
+  sessionId = null;
+  restoredMessages = [];
+  lastContextTokens = 0;
+  todoState = { tasks: [], nextId: todoState.nextId };
+  if (agent) agent.state.messages = [];
+  outbox.push({ type: "session_new" });
+}
+
 /// 启用中的技能 → systemPrompt（注入逻辑在 Rust：复用 App 的 skills::enabled_for_injection，
 /// 所以「哪些技能被注入 / 截断预算」两边完全一致）。
 async function refreshSkills() {
@@ -1184,6 +1356,8 @@ function finishModel(p, result) {
 
 // ── 宿主驱动的一拍 ────────────────────────────────────────────────────
 function tick() {
+  // 每拍检查一次是否需要续跑（取代 bun 版的 setTimeout 退避）
+  pumpGoalAutoContinue();
   const batch = JSON.parse(host?.poll() || "[]");
   for (const event of batch) {
     const pending = pendingModels.get(event.id);
@@ -1290,6 +1464,8 @@ function boot(configJson) {
       compact.isError = Boolean(event.isError);
     }
     outbox.push(compact);
+    // 回合真正结束：判定是否往目标续跑（终态由它发 agent_idle）
+    if (event.type === "agent_end") decideGoalContinue();
   });
   outbox.push({ type: "agent_ready" });
   // 启动期的两件异步事：读 AGENTS.md（重装 systemPrompt）+ 连 MCP（注册工具）。
@@ -1378,4 +1554,14 @@ globalThis.__spike = {
   status,
   toolNames,
   history,
+  // 命令面（对齐 App 的 pi_call_global：__pi_plan_start / __pi_btw_start / session_*）
+  draftPlan,
+  askByTheWay,
+  listSessions,
+  openSession,
+  newSession,
+  setAutoContinue: (enabled) => {
+    goalAutoEnabled = Boolean(enabled);
+    return "ok";
+  },
 };

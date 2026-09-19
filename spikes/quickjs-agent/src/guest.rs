@@ -167,11 +167,12 @@ pub fn engine_selftest() -> Result<String, String> {
             let eval_ms = started.elapsed().as_secs_f64() * 1000.0;
             let probe: String = ctx
                 .eval(
-                    "['boot','prompt','tick','drain','restore','sessionInfo','status','toolNames','history']\
+                    "['boot','prompt','tick','drain','restore','sessionInfo','status','toolNames','history',\
+                  'draftPlan','askByTheWay','listSessions','openSession','newSession','setAutoContinue']\
                  .map((k) => typeof __spike[k]).join(',')",
                 )
                 .map_err(|e| describe(&ctx, e, "probe"))?;
-            if probe != "function,function,function,function,function,function,function,function,function" {
+            if probe.split(',').any(|f| f != "function") {
                 return Err(format!("__spike 导出不全: {probe}"));
             }
             Ok(eval_ms)
@@ -181,7 +182,7 @@ pub fn engine_selftest() -> Result<String, String> {
             // RefCell 已被借出，里面再借会 panic（RefCell already borrowed，实测）。
             let usage = runtime.memory_usage();
             format!(
-                "QuickJS ok；bundle {} KB eval {:.0} ms；堆 {:.2} MB；__spike 9 个导出齐全",
+                "QuickJS ok；bundle {} KB eval {:.0} ms；堆 {:.2} MB；__spike 15 个导出齐全",
                 bundle.len() / 1024,
                 eval_ms,
                 usage.memory_used_size as f64 / 1_048_576.0
@@ -319,6 +320,42 @@ impl Guest {
             let raw: String =
                 call(&ctx, "sessionInfo", ()).map_err(|e| format!("sessionInfo: {e}"))?;
             serde_json::from_str(&raw).map_err(|e| format!("sessionInfo json: {e}"))
+        })
+    }
+
+    /// 命令面：/plan 与 /btw（对齐 App 的 __pi_plan_start / __pi_btw_start）。
+    pub fn plan(&self, objective: &str) -> Result<(), String> {
+        self.context.with(|ctx| {
+            call::<()>(&ctx, "draftPlan", (objective.to_string(),))
+                .map_err(|e| format!("draftPlan: {e}"))
+        })
+    }
+
+    pub fn btw(&self, question: &str) -> Result<(), String> {
+        self.context.with(|ctx| {
+            call::<()>(&ctx, "askByTheWay", (question.to_string(),))
+                .map_err(|e| format!("askByTheWay: {e}"))
+        })
+    }
+
+    /// 会话列表 / 打开 / 新建（对齐 App 的 session_list / session_open / session_new）。
+    pub fn list_sessions(&self) -> Result<String, String> {
+        self.context.with(|ctx| {
+            call::<String>(&ctx, "listSessions", ()).map_err(|e| format!("listSessions: {e}"))
+        })
+    }
+
+    pub fn open_session(&self, id: &str) -> Result<(), String> {
+        self.context.with(|ctx| {
+            call::<()>(&ctx, "openSession", (id.to_string(),))
+                .map_err(|e| format!("openSession: {e}"))
+        })
+    }
+
+    pub fn set_auto_continue(&self, enabled: bool) -> Result<(), String> {
+        self.context.with(|ctx| {
+            call::<()>(&ctx, "setAutoContinue", (enabled,))
+                .map_err(|e| format!("setAutoContinue: {e}"))
         })
     }
 
