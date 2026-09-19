@@ -256,10 +256,24 @@ APK 签名  APK Signature Scheme v2 ✓（用仓库里的 keystore.properties）
 - API key 存 SharedPreferences，只经环境变量传给子进程；
 - workspace/data 放 app 私有目录（`filesDir/`），所以 `--resume` 在手机上也能续会话。
 
-**未验证**：设备在装之前掉线了，所以「exec from nativeLibraryDir 在真机上真的能跑」
-这一步**还没有实测证据** —— 静态项全过，但这条是运行期行为。若真机上失败（SELinux 拦
-exec），退路是把 spike 编成 **cdylib** 走 JNI 在进程内调用，而不是 fork/exec
-（那就需要给 host 加一层 JNI 导出，工作量中等）。
+### 真机验证（MEY-AN00 / Android 16）—— 全部通过
+
+| 项 | 结果 |
+|---|---|
+| 解包与权限 | `/data/app/…/lib/arm64/libquickjsagent.so` → **`-rwxr-xr-x`**（系统解包并给了执行位） |
+| **exec from nativeLibraryDir** | ✅ 真跑起来了（这是最担心的一条：Android 10+ 禁 data 目录 exec，但 nativeLibraryDir 可以） |
+| 完整一轮真 DeepSeek | ✅ 会话落在 `files/data/sessions`，workspace 播种，`进程退出 code=0` |
+| **审批在 App 里** | ✅ 写文件弹出 `┌─ approval required │ tool write │ create src/hello.js (254 bytes)`，点「允许」后文件真的出现 |
+| 等审批时不冻结 | ✅ `ticks while waiting 5316` —— 你在手机上等的那十几秒里 guest 一直在跑 |
+
+真机上还抓到两个只有上设备才看得见的问题（都已修）：
+
+1. **`Button` 继承自 `TextView`，自带 `append()`** —— 于是 `Button(this).apply { … }` 里的
+   `append(msg)` 被解析到**按钮自己**身上，日志跑进了按钮文字里（截图里看到的
+   「允许[壳] 现在没有在等输入」）。改名 `logLine()` 解决。
+2. **`adb shell input text` 走输入法** —— 中文 IME 会把 ASCII 按键转成拼音候选，
+   任务框变成乱码。所以默认任务改成全 ASCII，且顺带选了个**会触发审批**的操作
+   （点开就能看到审批按钮怎么用）。
 
 ## iOS：与 bun 路线最大的差别就在这里
 

@@ -50,8 +50,13 @@ class MainActivity : AppCompatActivity() {
         setContentView(buildUi())
 
         keyInput.setText(prefs.getString("api_key", ""))
-        promptInput.setText(prefs.getString("last_prompt", "列出工作区里的文件，然后说一句话总结。"))
-        append(
+        promptInput.setText(
+            prefs.getString(
+                "last_prompt",
+                "Write src/hello.js exporting a ping() helper, then say one line.",
+            ),
+        )
+        logLine(
             "QuickJS agent spike —— 壳会执行 nativeLibraryDir 里的 libquickjsagent.so\n" +
                 "首次使用：填 API key → 点「运行」。审批会在这里弹提示，用按钮回答。\n\n",
         )
@@ -59,9 +64,14 @@ class MainActivity : AppCompatActivity() {
 
     // ── UI（用代码搭，省掉 layout XML）──────────────────────────────────
     private fun buildUi(): ViewGroup {
+        val statusBar = resources
+            .getIdentifier("status_bar_height", "dimen", "android")
+            .takeIf { it > 0 }
+            ?.let { resources.getDimensionPixelSize(it) }
+            ?: 64
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 32, 24, 24)
+            setPadding(24, statusBar + 24, 24, 24)
         }
 
         root.addView(label("API key（存本机 SharedPreferences，仅传给它自己的进程）"))
@@ -103,10 +113,12 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(label("审批（终端里本来是 stdin，这里换成按钮）"))
         val approvals = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        approvals.addView(answerButton("允许", "y\n"))
-        approvals.addView(answerButton("拒绝", "n\n"))
-        approvals.addView(answerButton("总是", "a\n"))
-        approvals.addView(answerButton("全拒", "d\n"))
+        for ((label, payload) in listOf("允许" to "y\n", "拒绝" to "n\n", "总是" to "a\n", "全拒" to "d\n")) {
+            approvals.addView(
+                answerButton(label, payload),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
         root.addView(approvals)
 
         val misc = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -118,7 +130,7 @@ class MainActivity : AppCompatActivity() {
             text = "保存 key"
             setOnClickListener {
                 prefs.edit().putString("api_key", keyInput.text.toString()).apply()
-                append("[壳] API key 已保存\n")
+                logLine("[壳] API key 已保存\n")
             }
         })
         root.addView(misc)
@@ -148,13 +160,13 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener {
             val pipe = stdin
             if (pipe == null) {
-                append("[壳] 现在没有在等输入\n")
+                logLine("[壳] 现在没有在等输入\n")
                 return@setOnClickListener
             }
             runCatching {
                 pipe.write(payload.toByteArray())
                 pipe.flush()
-                append("[壳] → $text\n")
+                logLine("[壳] → $text\n")
             }.onFailure { append("[壳] 写 stdin 失败: ${it.message}\n") }
         }
     }
@@ -162,12 +174,12 @@ class MainActivity : AppCompatActivity() {
     // ── 进程 ────────────────────────────────────────────────────────────
     private fun startRun() {
         if (process?.isAlive == true) {
-            append("[壳] 还在跑，先「停止」\n")
+            logLine("[壳] 还在跑，先「停止」\n")
             return
         }
         val key = keyInput.text.toString().trim()
         if (key.isEmpty()) {
-            append("[壳] 先填 API key（或者用宿主 mock：见 README）\n")
+            logLine("[壳] 先填 API key（或者用宿主 mock：见 README）\n")
             return
         }
         prefs.edit()
@@ -177,7 +189,7 @@ class MainActivity : AppCompatActivity() {
 
         val exe = File(applicationInfo.nativeLibraryDir, "libquickjsagent.so")
         if (!exe.canExecute()) {
-            append("[壳] 找不到可执行的 ${exe.absolutePath}（canExecute=false）\n")
+            logLine("[壳] 找不到可执行的 ${exe.absolutePath}（canExecute=false）\n")
             return
         }
 
@@ -191,7 +203,7 @@ class MainActivity : AppCompatActivity() {
         )
         if (resumeBox.isChecked) args.add("--resume")
 
-        append("\n[壳] ${args.joinToString(" ")}\n\n")
+        logLine("\n[壳] ${args.joinToString(" ")}\n\n")
 
         val builder = ProcessBuilder(args)
         builder.environment()["DEEPSEEK_API_KEY"] = key
@@ -200,7 +212,7 @@ class MainActivity : AppCompatActivity() {
 
         val started = runCatching { builder.start() }
         if (started.isFailure) {
-            append("[壳] 起进程失败: ${started.exceptionOrNull()?.message}\n")
+            logLine("[壳] 起进程失败: ${started.exceptionOrNull()?.message}\n")
             return
         }
         val proc = started.getOrThrow()
@@ -214,7 +226,7 @@ class MainActivity : AppCompatActivity() {
         Thread {
             val code = proc.waitFor()
             runOnUiThread {
-                append("\n[壳] 进程退出，code=$code\n")
+                logLine("\n[壳] 进程退出，code=$code\n")
                 runButton.isEnabled = true
                 stopButton.isEnabled = false
                 stdin = null
@@ -225,7 +237,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopRun() {
         process?.let {
-            append("[壳] destroy()\n")
+            logLine("[壳] destroy()\n")
             it.destroy()
         }
     }
@@ -239,7 +251,7 @@ class MainActivity : AppCompatActivity() {
                     val read = stream.read(buffer)
                     if (read <= 0) break
                     val text = String(buffer, 0, read)
-                    runOnUiThread { append(text) }
+                    runOnUiThread { logLine(text) }
                 }
             } catch (_: Exception) {
                 // 进程结束时的正常现象
@@ -247,7 +259,12 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun append(text: String) {
+    /**
+     * ⚠️ 名字**不能**叫 append：`Button` 继承自 `TextView`，它自带 `append(CharSequence)`，
+     * 于是在 `Button(this).apply { … }` 里调用 `append(...)` 会被解析到**按钮自己**身上 ——
+     * 真机上看到的就是「允许[壳] 现在没有在等输入」这种按钮里长日志的怪象（截图抓到的）。
+     */
+    private fun logLine(text: String) {
         output.append(text)
         scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
     }
