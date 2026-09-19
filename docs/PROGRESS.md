@@ -2,6 +2,103 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-19（第十轮）— 🚧 **方向定了：保留 UI，用 QuickJS 换掉 bun**；后端落地，UI 零改动
+
+用户明确目标：**采用 QuickJS 代替 Bun，但保留 Tauri WebView 的 UI/UX**。
+所以这不是继续做 spike，而是**在 App 里换运行时**——等于 D1 的迁移开始落地。
+仓库默认运行时仍是 bun（迁移期要能回退），打「默认走 QuickJS」的包用
+`PI_AGENT_RUNTIME_DEFAULT=qjs`。
+
+### 架构：新增 `qjs` 后端，与 `pi_bun` 并存
+
+```
+src/ (SolidJS, 5014 行)  ← 一行不改
+      ↕ Tauri IPC：39 个命令 + pi-agent-event 事件流  ← 契约不变
+src-tauri/
+  ├─ pi_bun/   A 路线：dlopen libskal + loopback HTTP hostcall
+  └─ qjs/      B 路线：rquickjs guest + **进程内**调用既有服务  ← 新增
+        ├─ mod.rs     worker 线程 + 命令面 + 运行时开关 + 事件汇
+        ├─ guest.rs   挂 host.*：审批→approval.rs / 提问→ask_user.rs /
+        │             工具→pi_host_tools / 会话 fs→pi_host_tools::fs_op /
+        │             目标技能 MCP→goal.rs/skills.rs/mcp.rs
+        └─ deepseek.rs 模型传输（**换引擎的真实代价就在这**，见下）
+pi-bundle/agent-qjs.js   QuickJS 版 agent 入口（由 spike 的 entry.js 演化，385KB）
+```
+
+运行时开关三级：`PI_AGENT_RUNTIME` 环境变量 → `{data_dir}/runtime.txt` → 编译期默认
+（`PI_AGENT_RUNTIME_DEFAULT`，缺省 bun）。**`pi_bun` 的 9 个入口内部按开关分派**，
+所以 lib.rs 与 UI 完全不用动。
+
+### 已落地（M1–M3）：对话 / 工具 / 审批 / 会话 / 插件全在
+
+| 能力 | 走哪个既有服务 |
+|---|---|
+| 流式对话 | pi-agent-core 的 Agent + 自定义 streamFn → Rust 传输 |
+| 工具（read/write/edit/ls/grep/mkdir/rm） | `pi_host_tools`（与 bun 路线同一份） |
+| **审批** | `approval.rs`：auto 放行 / ask 弹**既有审批卡 + diff + always**；执行权仍由 Rust 判（callId 握手，JS 绕过无效） |
+| 会话持久化 | `JsonlSessionRepo` + `pi_host_tools::fs_op`（同一份，格式互通） |
+| todo / subagent / 压缩 / plan / btw | agent-qjs.js（纯 JS，事件名对齐 UI） |
+| goal / skills / MCP / ask_user | `goal.rs` / `skills.rs` / `mcp.rs` / `ask_user.rs` |
+| 事件流 | **原样转发** pi-agent-core 的事件（UI 认的就是原始形状） |
+
+### 验证
+
+- **集成测试** `qjs_live_turn`（真 DeepSeek，标 `#[ignore]` 手工跑）：
+  1.1s 跑完一轮，事件序列
+  `agent_start → turn_start → message_start → message_update×3 → message_end → turn_end → agent_end`
+  —— 正是 `src/lib/events.ts` 认的那套。
+- **真机（MEY-AN00）**：release APK **39.6MB**（只有 `libpi_mobile_lib.so` 35.9MB，
+  **没有 92MB 的 libskal**）装上后走 qjs，UI 起在了 provider 配置页（数据被卸载清掉）。
+  对照：旧 debug 版 619MB。
+
+### 途中修的四个问题（都是真跑才暴露的）
+
+1. `agent_end` 重复：JS 里补的合成事件 + agent 自己发的那条 → 去掉合成的。
+2. **凭证被当成 boot 硬门槛**：没 key 就 boot 失败，与 bun 路线（先起、UI 显示配置页、
+   存完 key 就能用）不一致 → 改成**每次模型请求现读凭证**，存完 key 立即可用。
+3. **真实 boot 错误被「agent_init 超时」盖住**（真机日志里只看到 timeout）→ boot 结果
+   用 channel 如实回报。
+4. （spike APK 里的）`Button` 继承 `TextView` 自带 `append()`，把日志写进了按钮文字。
+
+### ⚠️ 换引擎的真实代价：provider 传输必须 Rust 重写
+
+回答了「既然 QuickJS 能跑 pi-agent-core，为何不继续集成 pi-ai」：**pi-agent-core
+设计上就是宿主无关的**（streamFn 与 tools 都是注入点，它自己不碰网络），所以能原样跑；
+而 **pi-ai 的传输层要的是「一整个 Web/Node 平台」**：
+
+- 依赖 4 家厂商 SDK（`openai` / `@anthropic-ai/sdk` / `@google/genai` /
+  `@aws-sdk/client-bedrock-runtime`）+ smithy + proxy-agent；
+- 这些 SDK 在 bun bundle 里对 **node 内建有 68 处调用**（fs/stream/https/net/crypto/
+  buffer/util/os/http/events），bun 路线靠 `node-stdlib-browser` + 手写 `__require`
+  垫片兜住（垫片里取不到的直接 throw）；
+- QuickJS 既没有模块系统，也没有 fetch/ReadableStream/TextDecoderStream ——
+  **这正是它 1MB vs bun 87MB 的原因**，补回来等于把 bun 已经给的东西再实现一遍。
+
+**但 pi-ai 里有一半能集成**，而且已经在用：
+
+| pi-ai 的组成 | 能否复用 | 现状 |
+|---|---|---|
+| 模型目录（39 provider / 1290 模型 / 551KB） | ✅ **纯数据** | 已生成 `src-tauri/assets/models.json`（`scripts/gen-models-catalog.py` 可重跑） |
+| 协议编解码（convertMessages / parseChunkUsage / mapStopReason / thinkingFormat） | ✅ 纯函数 | 已在 `qjs/deepseek.rs` 逐字段复刻（对齐 openai-completions.js） |
+| SDK 传输（streamSimple 那层） | ❌ | 必须 Rust 重写 |
+
+**杠杆点（按目录统计）**：`openai-completions` 一族覆盖 **653/1290 个模型、26/39 个
+provider**，而现有传输本来就是这种客户端，只是把 baseUrl/provider 写死了 →
+泛化它 = 一次拿下过半 provider；再加 `anthropic-messages`（296 模型 / 10 provider）
+就是 **74%**。剩下 bedrock / google / mistral 等按需再说。
+
+### ⏭ 下一步
+
+1. 把 `deepseek.rs` 泛化成 `openai_completions.rs`（读目录里的 baseUrl / compat /
+   thinkingLevelMap），凭证按 provider 取 —— 覆盖 26 个 provider；
+2. 接 `providers_listed` / `models_listed` 两个事件到这份目录（UI 的模型选择器就真了）；
+3. 之后再补 `anthropic-messages`，以及 native / preview / git / run_js 的工具壳。
+
+### 未做 / 已知缺口（qjs 路线上）
+
+native 能力（9 个）、preview、git（6 个）、run_js 这四组工具**还没有 JS 壳**（Rust 实现都在）；
+provider 传输目前只有 DeepSeek 一族；OAuth 订阅登录未接。
+
 ## 2026-09-19（第九轮）— ✅ QuickJS 版 release APK（9.1MB，不需要 libskal）
 
 用户要「打包 apk release 版本」。这里有个容易混的点，值得记清：
