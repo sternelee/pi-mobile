@@ -517,6 +517,100 @@ impl HostTools {
     }
 }
 
+/// 交给 guest 的工具表（名字/描述/参数 schema）——**实现在本 crate 的 [`HostTools::run_tool`]**。
+///
+/// 为什么定义要在这里而不是 JS 里：名字必须与 `run_tool` 的 dispatch 是同一份真源，
+/// 否则「模型看到的工具」与「宿主能执行的工具」会悄悄分叉（描述文案与
+/// `pi-bundle/agent-main.js` 保持一致，差异记在 docs/PROGRESS.md）。
+///
+/// ⚠️ 新增工具必须同时改三处：`run_tool` 的 match、这里、以及审批分档
+/// （`approval.rs` 的 tier 表）。
+pub fn tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "read",
+            "label": "Read",
+            "description": "Read a UTF-8 text file inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Path relative to the workspace root." } },
+                "required": ["path"], "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "write",
+            "label": "Write",
+            "description": "Create or overwrite a file inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"], "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "edit",
+            "label": "Edit",
+            "description": "Replace an exact text fragment in a file. Fails unless oldText occurs exactly once (pass replaceAll to replace every occurrence).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "oldText": { "type": "string" },
+                    "newText": { "type": "string" },
+                    "replaceAll": { "type": "boolean" }
+                },
+                "required": ["path", "oldText", "newText"], "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "ls",
+            "label": "List",
+            "description": "List a directory inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "grep",
+            "label": "Grep",
+            "description": "Regex search over text files in the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": { "pattern": { "type": "string" }, "path": { "type": "string" } },
+                "required": ["pattern"], "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "mkdir",
+            "label": "Make directory",
+            "description": "Create a directory (and parents) inside the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"], "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "rm",
+            "label": "Remove",
+            "description": "Delete a file or directory inside the workspace. Directories need recursive: true, which cannot be undone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "recursive": { "type": "boolean" }
+                },
+                "required": ["path"], "additionalProperties": false
+            }
+        }),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +750,30 @@ mod tests {
         assert_eq!(t.display_rel(&ws.join("t.txt")), "t.txt");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 工具表与 dispatch 的一致性：**名字集合**必须与 `run_tool` 的 match 臂完全对应。
+    ///
+    /// 为什么只钉名字集合：dispatch 是一个 `match name`，无法内省；改了 `run_tool`
+    /// 却忘了改这张表（或反过来），模型就会看到一个“宿主执行不了”的工具（或看不到
+    /// 一个已实现的工具）—— 这正是 qjs 在 App 里曾经完全没文件工具的原因
+    /// （boot config 忘了传 `tools`）。
+    #[test]
+    fn tool_definitions_cover_every_dispatchable_file_tool() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["read", "write", "edit", "ls", "grep", "mkdir", "rm"]
+        );
+        for def in &defs {
+            assert!(
+                def["description"].as_str().is_some_and(|d| !d.is_empty()),
+                "{def}"
+            );
+            // 参数 schema 必须是能直接交给模型的对象 schema
+            assert_eq!(def["parameters"]["type"], "object", "{def}");
+            assert!(def["parameters"]["properties"].is_object(), "{def}");
+        }
     }
 }

@@ -48,23 +48,26 @@ const emptyUsage = () => ({
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 });
 
-// DeepSeek 的模型对象按 pi-ai 的 model catalog 手写（providers/data/deepseek.json）：
-// 走这条路线就不再把 provider 目录打进 bundle，catalog 的字段在 Rust 侧同样用到
-// （compat: max_tokens / system role / reasoning_content 必填）。
+// 生效模型对象由**宿主**用目录（src-tauri/assets/models.json）解析后随 boot 传入：
+// id/name/provider/baseUrl/reasoning/thinkingLevelMap/cost/contextWindow/maxTokens
+// 一处定义，传输层（Rust 的 build_body）与这里用的是同一个对象。
+// 下面这份字面量只是兜底（宿主没传 model 时），不再当主路径用。
+const FALLBACK_MODEL = {
+  id: "deepseek-v4-flash",
+  name: "DeepSeek V4 Flash",
+  provider: "deepseek",
+  api: "openai-completions",
+  baseUrl: "https://api.deepseek.com",
+  reasoning: true,
+  thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", max: "max" },
+  input: ["text"],
+  cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+  contextWindow: 1_000_000,
+  maxTokens: 384_000,
+};
+
 function modelFor(config) {
-  return {
-    id: config.model || "deepseek-v4-flash",
-    name: config.model || "DeepSeek V4 Flash",
-    provider: "deepseek",
-    api: "openai-completions",
-    baseUrl: config.baseUrl || "https://api.deepseek.com",
-    reasoning: true,
-    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", max: "max" },
-    input: ["text"],
-    cost: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
-    contextWindow: 1_000_000,
-    maxTokens: 384_000,
-  };
+  return config.model && config.model.id ? config.model : FALLBACK_MODEL;
 }
 
 // ── 工具的 JS 半边：只是壳，实现在 Rust（pi-host-tools）─────────────────
@@ -1483,9 +1486,13 @@ function boot(configJson) {
 /// `--resume` 时由宿主调用：把最新会话的消息灌回 agent。
 function restore() {
   if (!agent) throw new Error("restore before boot");
-  void restoreLatestSession().then(
-    () => outbox.push({ type: "session_restored" }),
-    (error) => outbox.push({ type: "session_error", error: `restore: ${error?.message ?? error}` }),
+  // ⚠️ 终态事件由 `restoreLatestSession()` 自己发（带 found / sessionId / messages），
+  // 这里**不要再补一条**：那条没有 sessionId，而 App 的 `session_restored` 处理是
+  // `setCurrentSession(ev.sessionId ?? null)` —— 会把刚恢复出来的会话高亮清掉（真机上
+  // 看到的就是“历史回来了但左边没选中”）。spike 里补那一句只是因为 CLI 需要一个
+  // “跑完了”的信号，搬到 App 就变成了反向作用。
+  void restoreLatestSession().catch((error) =>
+    outbox.push({ type: "session_error", error: `restore: ${error?.message ?? error}` }),
   );
 }
 
@@ -1547,6 +1554,52 @@ function history() {
   return JSON.stringify({ sessionId, messages: agent?.state.messages ?? [] });
 }
 
+// ── provider / 模型 / 命令面（UI 经 pi_call_global 驱动）─────────────────
+// 目录与「当前模型」全在 Rust 侧（`__pi_providers_list` / `__pi_models_refresh` /
+// `__pi_model_current` / `__pi_model_select` 都在 guest.rs 直接答）：models.json 是
+// 551KB 纯数据，塞进这个 bundle 会把产物翻倍，而 Rust 那边传输层本来就要用它
+// （baseUrl / compat / thinkingLevelMap），且 「UI id ↔ 目录 id」的映射也只能在那边做。
+// 这里只留一件只能在 guest 内发生的事：**改 agent 的状态**。
+
+/// 模型热切换：模型对象由宿主按目录解析后传入，这里只换 agent 的状态
+/// （请求体的 model 字段就是它）。子 agent 取运行时快照，自动跟随。
+/// `model_applied` 与 `__pi_model_current` 都由 Rust 答（它知道 UI id），这里不重复发。
+function setModel(json) {
+  if (!agent) throw new Error("setModel before boot");
+  agent.state.model = JSON.parse(json);
+  return "started";
+}
+
+/// 自定义指令清单（声明了 `command` 的技能 → `/slug`），与 bun 版同形状。
+/// content 已注入 systemPrompt，展开时只发意图。
+function commands() {
+  return JSON.stringify(
+    skillsCache
+      .filter((s) => s.command)
+      .map((s) => ({ cmd: `/${s.command}`, name: s.name, description: s.description })),
+  );
+}
+
+/// 技能热生效（`__pi_skills_apply`）：重读 registry 并重装 systemPrompt。
+/// kick 形状与 mcpReconnect 同因 —— rquickjs 的 `call::<String>` 不能把 Promise
+/// 转成 String，所以立即回 "started"，结果经事件（skills_applied）回来。
+function skillsApply() {
+  void refreshSkills().catch(() => {});
+  return "started";
+}
+
+/// 目标热生效（`__pi_goal_apply`）：goal 由宿主持有（goal.rs），这里重读并重装
+/// systemPrompt —— 否则新设的目标要等下一次 boot 才进上下文。
+function goalApply() {
+  try {
+    currentGoal = host.goalGet() || null;
+  } catch {
+    currentGoal = null;
+  }
+  if (agent) agent.state.systemPrompt = composeSystemPrompt(baseSystemPrompt);
+  return "started";
+}
+
 globalThis.__spike = {
   boot,
   prompt,
@@ -1557,6 +1610,10 @@ globalThis.__spike = {
   status,
   toolNames,
   history,
+  setModel,
+  commands,
+  skillsApply,
+  goalApply,
   // 命令面（对齐 App 的 pi_call_global：__pi_plan_start / __pi_btw_start / session_*）
   draftPlan,
   askByTheWay,

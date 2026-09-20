@@ -2,6 +2,268 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-20（第十三轮）— ✅ 真机：「配置完 key 一直停在 agent booting…」——qjs 把 boot 事件吃掉了
+
+真机装上前一轮那个 release APK（`PI_AGENT_RUNTIME_DEFAULT=qjs`，40MB，无 libskal），
+配好 DeepSeek + 模型之后界面**永远停在 `agent booting…`**（composer 灰着）。
+
+### ① 根因：`Guest::start` 的热身 tick 把事件扔了
+
+UI 的启动顺序是（`App.tsx` onMount）：
+
+```
+get_default_model → listen("pi-agent-event") → invoke("agent_init") → loadHistory()
+```
+
+也就是**监听先注册、boot 后发生** —— 所以 boot 期间发出的事件正是它等的那批。
+而 qjs 这边：
+
+```rust
+for _ in 0..200 { guest.tick()?; std::thread::sleep(1ms) }   // ← 返回值直接扔了
+```
+
+`agent_ready`（UI 唯一用来解锁 composer 的信号）就在这批里被丢掉。**静态检查、
+clippy、单测全绿都拦不住它** —— 因为「事件有没有到宿主」这件事没有任何东西在看。
+
+### ② 同一类：`open_session` 的轮询也在吞事件
+
+```rust
+for event in self.tick()? { match ... }   // 只看自己等的那个，其余丢掉
+```
+
+那个窗口里可能夹着 model 增量、**`approval_required`** —— 后者被吞掉就是审批卡不弹、
+agent 在另一头干等（「静静卡住」比报错难查得多）。
+
+修法：加一个 `Guest::tick_and_emit()`（tick + 转发，与 worker 主循环同一条路），
+boot 热身与 `open_session` 都走它。**规则写成注释钉在那里：任何「边 tick 边等某个
+事件」的地方都必须转发。**
+
+### ③ 顺手挖出两个连带缺口
+
+| 缺口 | 症状 | 修法 |
+|---|---|---|
+| **boot 不恢复上次会话** | bun 路线在 bundle 顶部就 `restoreLatest()`；qjs 没有任何人调 `restore` → 重开 App 是空白对话（会话文件都在） | boot 后调 `restore()`；恢复是异步的，热身 tick 会推完 |
+| JS `restore()` 补发**第二条** `session_restored`（无字段） | App 的处理器是 `setCurrentSession(ev.sessionId ?? null)` → 刚恢复出来的会话高亮**立刻被清掉**（spike 里补那句只是 CLI 要个完成信号） | 删掉：`restoreLatestSession()` 自己已经发了带 `found/sessionId/messages` 的那条 |
+
+### 验证（新增了「跑得起来」的门）
+
+| 验证 | 结果 |
+|---|---|
+| `qjs_globals_offline` | ✅ 0.44 s —— **新增断言：boot 期间 `agent_ready` 恰好 1 条、`session_restored` 恰好 1 条（`found:0`）** |
+| `qjs_responses_mock_turn` | ✅ 0.43 s —— 新增 ④：`session_open` 重开刚落盘的会话，历史里仍有 user/assistant，且 `session_opened` 经事件到岸 |
+| `qjs_live_turn`（真 DeepSeek） | ✅ 0.86 s |
+| `cargo test` / clippy / fmt | ✅ 65（62+3 ignored）/ 31（HEAD 33）/ 15（HEAD 39） |
+| bundle | 385,334 B |
+| 新 APK | `app-universal-release.apk` 40 MB，sha256 `4dd2cd6684e2decb…`，16KB 对齐 ✓，签名 ✓，`PI_AGENT_RUNTIME_DEFAULT=qjs` ✓（cargo dep-info 记的） |
+
+⚠️ **这一轮的真正教训是一条流程问题**：qjs 的这三个集成测试全都标着 `#[ignore]`
+（`agent_init` 的 HOST/WORKER 是 `OnceLock`，一个进程只能 boot 一次），于是
+`cargo test` 根本不覆盖 boot 路径 —— 而 qjs 出的两个 bug（boot 卡 30s、永远
+booting）**恰好只有它们能发现**。所以新增 **`scripts/qjs-tests.sh`**：
+一个测试一个进程地跑那两个离线的（不要 key、不要网络），`QJS_LIVE=1` 再带上真模型那轮。
+**这是本轮唯一防止同类 bug 再犯的东西**，比任何注释都重要。
+
+### ⏭ 仍未做（与上轮同）
+
+`openai-completions` 泛化（openrouter 333 模型）／`anthropic-messages`／
+`google-generative-ai`／codex 的 OAuth；真 OpenAI key 上的验证。
+
+## 2026-09-20（第十二轮）— ✅ OpenAI **Responses** 传输落地；顺带修掉第三个同类坑（App 里 qjs 完全没有文件工具）
+
+用户选的方向是「先做 openai-responses」（而不是 PROGRESS 原本列的 openai-completions），
+理由是核对数据之后发现原来那条杠杆对 **UI 现有那 8 行**基本不成立：
+
+| UI 那 8 行 | 模型数 | 真实 api 家族 |
+|---|---:|---|
+| openai | 38 | `openai-responses` ← 这一轮 |
+| xai | 4 | `openai-responses` ← 这一轮 |
+| openrouter | 333 | `openai-completions`（只覆盖到这 1 行） |
+| deepseek | 3 | `openai-completions`（已实现） |
+| google-gemini | 22 | `google-generative-ai` |
+| anthropic / kimi-coding | 13 / 4 | `anthropic-messages` |
+| openai-codex | 7 | `openai-codex-responses`（要 OAuth） |
+
+工作量也不对称：`openai-completions.js` **1352 行**（8 种 `thinkingFormat` +
+缓存/亲和/grammar/strict/deferred 一堆 quirk），`openai-responses.js` **286 行**。
+所以先花小钱把 UI 第一行（openai）打通。
+
+### ① 传输层改成**按 `model.api` 分派**（不是按 provider 名）
+
+```rust
+enum Transport { OpenAiCompletions, OpenAiResponses }   // qjs/catalog.rs
+pub fn transport_for(model) -> Result<Transport, String>
+```
+
+一个家族实现一次就解锁一批 provider —— 之后「加一家 provider」只是目录里多一行。
+`Err` 的两种情况分开表述（对用户的含义不同）：
+
+- `anthropic-messages` / `google-*` / bedrock… → 「这一族没实现」；
+- `openai-completions` 但 provider ≠ deepseek → 「这一族做了，但只做了 DeepSeek 的
+  compat 档案」（openrouter 选模型时看到的就是这句）；
+- `github-copilot` → 「要动态头 + OAuth，没做」——宁可说清楚，也不发一个必失败的请求。
+
+### ② 新增 `src-tauri/src/qjs/openai_responses.rs`（≈400 行含测试）
+
+逐条对齐 `openai-responses.js` + `openai-responses-shared.js`（pi-ai 0.84.4）：
+input items（user / assistant→message+function_call / toolResult→function_call_output）、
+**扁平** tool 形状、`store:false`、`max_output_tokens`（≥16）、
+`reasoning.effort + summary:auto + include:[reasoning.encrypted_content]`、
+`developer` vs `system` 角色、以及 `getSupportedThinkingLevels` / `clampThinkingLevel`
+的**直译**（不做 clamp 会把 `high` 发给只认 `xhigh` 的模型 → 400）、
+`mapStopReason` / usage（input 要减掉缓存读写）。
+
+⚠️ 复核时抓到一处**只有对着上游才能发现**的分叉：serde_json 里「键缺失」与「键是
+null」都取到 `Value::Null`，而 pi-ai 用的是 JS 的 `undefined`/`null` 区分 ——
+低档位缺键**算支持**、显式 null 不算；`off` 缺键要发 `{effort:"none"}`、显式
+null 则整个字段不发。今天能路由的模型里这处分叉**一个都没命中**（13 例全在没实现的
+github-copilot 上），但已按上游语义改正并用单测钉住 —— 下一个 provider 就会踩到。
+
+刻意不做的（每条都写进了模块头）：`prompt_cache_key` / 缓存保留、`service_tier`、
+会话亲和头、copilot 动态头、grammar tools / strict schema 重写 / deferred tools、
+图片输入、`textSignature`（我们的扁平结果契约没这个字段 → 回放时 message id 用 pi-ai
+的兜底形态 `msg_pi_<n>`，phase 丢失，只影响 codex 系的 commentary/final_answer 区分）。
+**多轮靠 `reasoning.encrypted_content` 回放**（store:false 的前提），这条通了。
+
+### ③ 第三个同类坑：**App 里的 qjs 一个文件工具都没有**
+
+`guest.rs` 的 boot config 漏了 `"tools"`，而 JS 侧是 `toolsFor(config.tools || [])`
+——spike 一直在传（`tool_definitions()` 85 行），搬到 App 时漏了。后果：agent 手里
+只有 fetch / todo / subagent / ask_user，**read/write/edit/ls/grep/mkdir/rm 全没有**。
+前一轮的 M1–M3 表里那行「工具 → pi_host_tools」在 App 里其实不成立。
+
+修法不是再抄一份：把工具表放进 **`pi-host-tools::tool_definitions()`**
+（与 `run_tool` 的 dispatch 同一处），App 直接 `"tools": tool_definitions()`。
+另加一个一致性测试（名字集合 = 7 个文件工具 + 每个都有 description 与 object schema），
+因为 dispatch 是 `match name` 无法内省，改一处忘另一处就会再分叉。
+
+### 验证（新增一个「单族验收」的测试形状）
+
+| 验证 | 结果 |
+|---|---|
+| **新增** `qjs_responses_mock_turn`（本地 mock SSE，不要 key） | ✅ 0.44 s |
+| `qjs_globals_offline`（8 个全局逐项） | ✅ 0.43 s |
+| `qjs_live_turn`（真 DeepSeek 一整轮） | ✅ 0.90 s |
+| `cargo test`（src-tauri） | ✅ 65 个（62 过 / 3 ignored）；新单测 11 个（responses）+ 2 个（catalog 分派） |
+| `pi-host-tools` | ✅ 14 个（新增工具表一致性 1 个） |
+| clippy | **31**（HEAD 33）——顺手清掉 `mut` 与死代码 `from_env` |
+| fmt | **15**（HEAD 39）；`openai_responses.rs` / `catalog.rs` 全干净 |
+| bundle | 未动（这轮纯 Rust），`agent-qjs.js` 385,376 B |
+
+**`qjs_responses_mock_turn` 的价值**（本地 mock 起 SSE，把 baseUrl 指过去）：
+它一次钉住三件真踩过的事 —— ① 换到 openai/gpt-5 之后请求体是 **Responses 形状**
+（`input`/`store`/`reasoning`）而不是 completions 的 `messages`/`max_tokens`；
+② **工具表真的传进了 guest**（漏传时这里就是空数组）；③ SSE 增量与终态真的以 UI
+认的事件形状到岸。**一族的验收就应该长这样**：不需要真 key，但走完整条链。
+
+顺带加的开发缝：`PI_<PROVIDER>_BASE_URL`（自建端点/ mock 用；旧名
+`DEEPSEEK_BASE_URL` 只留给 DeepSeek，免得全局设了抢别家的端点）。
+
+### ⚠️ 这轮没做 / 下一步
+
+- **没在真 OpenAI key 上验过**（本机没有 key）—— 只有 mock 与单测。有 key 之后
+  第一件事就是 `PI_OPENAI_API_KEY=… cargo test --lib qjs_responses_mock_turn` 换成真
+  端点跑一轮（或直接在手机上选 openai）。
+- `openai-completions` 泛化仍未做 → **openrouter（333 模型）还选不了**（会明确报
+  「只做了 DeepSeek 的 compat 档案」）。那一族要决定是「正确性子集」还是逐字复刻。
+- `anthropic-messages`（1074 行，覆盖 anthropic + kimi-coding）、
+  `google-generative-ai`、codex（要 OAuth）都还没动。
+- 跨家族的 `transformMessages`（孤儿 toolCall 修补、foreign id 归一）未移植：在
+  responses↔completions 之间切 provider 时，历史里的 `call_x|fc_y` 会原样发给
+  DeepSeek。低风险但记在案。
+
+## 2026-09-20（第十一轮）— ✅ 修好 qjs 的**启动链路**与 **provider/模型/命令面**（真机报的两个问题）
+
+用户反馈「qjs 还无法正常工作：未实现的全局调用 `__pi_models_refresh`」。查下去发现
+**是两个 bug，而且第一个比报上来的那个更致命**。
+
+### ① 致命：qjs 每次 boot 都白等 30 秒，最后报 `qjs boot timeout`
+
+上一轮把 boot 结果改成「用 channel 如实回报」时，成功信号被写在了 `worker_main`
+**返回之后**——而 worker 主循环是**常驻的**（正常路径永不返回）：
+
+```
+let result = worker_main(...);      // ← 永不返回（里面的 loop 常驻）
+let _ = boot_tx.send(Ok(()));       // ← 到不了
+```
+
+后果很阴：**boot 必然超时，而 agent 其实是好的**（worker 线程活着，UI 照样能聊）。
+所以它既不是「起不来」也不是「全部正常」，而是「启动报错 + 功能大半可用」——
+`qjs_live_turn` 那个集成测试也因此一直是坏的，但它标了 `#[ignore]`，没人看见。
+
+修法：信号移到 `Guest::start` 返回的那一刻（成功/失败都发），常驻循环之外；
+worker 中途死掉仍然 `logcat` + `boot_error`。
+**实测：0.36 s 起来（原来 30.0 s 超时）。**
+
+### ② 用户报的那个：`pi_call_global` 只映射了 4 个名字，UI 调 8 个
+
+| UI 调用 | 触发点 | 修前 | 修后 |
+|---|---|---|---|
+| `__pi_models_refresh` | 存 key / 模型快选 | ❌ 未实现 | ✅ 目录 → `models_listed` / `models_error` |
+| `__pi_providers_list` | agent_ready / 抽屉 | ❌ 未实现 | ✅ 8 家 + 模型 → `providers_listed` |
+| `__pi_model_current` | agent_ready | ❌ 静默 `.catch()` | ✅ Rust 里的当前模型 |
+| `__pi_model_select` | 选模型 | ❌ 未实现 | ✅ 目录解析 + 热切换 → `model_applied` |
+| `__pi_commands` | skills 之后 | ❌ 静默空 | ✅ 技能的 `/slug` 清单 |
+| `__pi_oauth_login` | OAuth | ❌ 未实现 | ⛔ 明确报「未接」（不假装） |
+| `__pi_skills_apply` / `__pi_goal_apply` | 热生效 | ⚠️ 空实现（"started"） | ✅ 真重读并重装 systemPrompt |
+| `__pi_plan_start` / `__pi_btw_start` | /plan·/btw | ✅ | ✅ |
+
+### 新东西：`src-tauri/src/qjs/catalog.rs`（目录终于有人用了）
+
+`src-tauri/assets/models.json`（39 家 / 1290 模型 / 565 KB）上轮就生成了，**但仓库里
+一处引用都没有** —— 这轮把它接上，作为 **Rust 侧的单一真源**：
+
+- UI 的事件面（`providers_listed` / `models_listed`）与传输层
+  （baseUrl / compat / thinkingLevelMap）**共用同一份**，不再有第二份抄本；
+- 也不塞进 qjs bundle（551KB 会把它翻倍）—— 目录归 Rust 是体积上唯一划算的落点；
+- `modelFor()` 里那份手抄的 DeepSeek 模型字面量退成兜底；boot 传给 JS 的
+  `config.model` 现在是**目录解析出的完整对象**。
+
+两个刻意的判断（都写进了注释）：
+
+1. **展示名以 UI 为准**：`providers_listed` 会整份替换 UI 的静态清单，用 pi-ai 的名
+   （"Anthropic API key" / "Google"）会让用户看到两套名字。目录只供 id 与模型。
+2. **`google-gemini` → `google` 别名**：UI 的 id 是历史命名。bun 路线其实没做这个映射
+   （`models.getProvider("google-gemini")` 取不到），那一行**一直是空的**。
+
+### 传输边界：从「静默换一家」改成「明确报错」
+
+上一轮 `guest.rs` 是：provider 不是 deepseek 就 **logcat 一句、静默回退 deepseek**
+（"UI 里仍显示已选 provider"）。那是**最难查的一类不一致**：UI 显示 OpenAI，请求
+实际打 DeepSeek。这轮改成两道门：
+
+- `__pi_model_select`：没有传输的 provider → 直接报错（不返回 "started"）；
+- `startModel`（每轮请求）：同样拒绝，错误直接进对话流；
+- 顺带把凭证/baseUrl 按 `model.provider` 取（`PI_<PROVIDER>_API_KEY` /
+  `creds::get(dir, provider)` / 目录的 `baseUrl`），为下一步泛化留好接口。
+
+### 验证
+
+| 验证 | 结果 |
+|---|---|
+| **新增** `qjs_globals_offline`（离线，`#[ignore]`） | ✅ 0.36 s：上面 8 个全局逐个走一遍，事件形状逐项核对 |
+| `qjs_live_turn`（真 DeepSeek，`#[ignore]`） | ✅ **0.75 s**（修前必然 boot 超时） |
+| `cargo test`（src-tauri） | ✅ 52 个（50 过 / 2 ignored），catalog 7 个新单测 |
+| clippy | 33 = 改动前 33（**零新增**，`git stash` 对照） |
+| fmt | 新文件 `catalog.rs` 干净；`guest.rs` 16 → **14** hunk（顺手少了两处存量） |
+| bundle | `agent-qjs.js` 385,376 B（+175 B） |
+
+⚠️ **教训**：boot 链路必须有一个**会跑的**测试看着。「改成如实回报」是个正确方向，
+但它同时把成功路径写死了，而唯一能发现它的是个 `#[ignore]` 集成测试 ——
+**等同于没有测试**。所以这轮把那条路径做成了默认就能跑的单元测试形状
+（离线、不要 key），只把「真模型」留成 ignored。
+
+### ⏭ 下一步（未变，仍是第十轮列的那两条）
+
+1. **`deepseek.rs` 泛化成 `openai_completions.rs`**：按目录的 baseUrl / compat /
+   thinkingFormat / 凭证取 provider —— 一次覆盖目录里 **26 个 provider**（现在
+   选非 DeepSeek 会明确报错，就是因为这一步没做）；
+2. 之后补 `anthropic-messages`（+10 provider，累计 74%）。
+
+### 仍未接的（qjs 路线，与上轮同）
+
+native 能力（9 个）/ preview / git（6 个）/ run_js 这四组工具**还没有 JS 壳**；
+OAuth 订阅登录未接（现在会明确报错）。
+
 ## 2026-09-19（第十轮）— 🚧 **方向定了：保留 UI，用 QuickJS 换掉 bun**；后端落地，UI 零改动
 
 用户明确目标：**采用 QuickJS 代替 Bun，但保留 Tauri WebView 的 UI/UX**。

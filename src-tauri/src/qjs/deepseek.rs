@@ -25,33 +25,9 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-/// 模型流事件：只要这两类 —— 与 pocket-pi 的 `ModelStreamEvent` 同形。
-#[derive(Clone, Debug)]
-pub enum StreamEvent {
-    Thinking(String),
-    Text(String),
-}
-
-#[derive(Clone)]
-pub struct DeepSeekConfig {
-    pub api_key: String,
-    pub base_url: String,
-}
-
-impl DeepSeekConfig {
-    pub fn from_env() -> Result<Self, String> {
-        let api_key = std::env::var("DEEPSEEK_API_KEY")
-            .map_err(|_| "DEEPSEEK_API_KEY is not set".to_string())?;
-        if api_key.trim().is_empty() {
-            return Err("DEEPSEEK_API_KEY is empty".into());
-        }
-        Ok(Self {
-            api_key,
-            base_url: std::env::var("DEEPSEEK_BASE_URL")
-                .unwrap_or_else(|_| "https://api.deepseek.com".into()),
-        })
-    }
-}
+/// 流事件与凭证/端点都用 qjs 传输层的共享类型（见 `qjs/mod.rs`）。
+/// 这个模块只养「openai-completions 这一族的线格式」。
+use super::{Config, StreamEvent};
 
 fn client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
@@ -287,7 +263,7 @@ fn build_body(request: &Value) -> Result<Value, String> {
 /// 一次完整请求：阻塞跑完流，边跑边把增量交给 `emit`，返回最终结果 JSON
 /// （形状即 JS 侧 `finishModel` 期待的 `ModelResult`）。
 pub fn complete(
-    cfg: &DeepSeekConfig,
+    cfg: &Config,
     request_json: &str,
     emit: &mut dyn FnMut(StreamEvent),
 ) -> Result<String, String> {

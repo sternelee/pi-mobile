@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use rquickjs::{Context, Ctx, Function, Object, Runtime};
 use serde_json::{json, Value};
 
-use super::{deepseek, Host};
+use super::{catalog, deepseek, Config, Host, StreamEvent};
 use pi_host_tools::HostTools;
 
 const SYSTEM_PROMPT: &str = "You are pi, a coding agent running on a mobile device. \
@@ -27,6 +27,10 @@ pub struct Guest {
     context: Context,
     host: Arc<Host>,
     tools: HostTools,
+    /// **UI 面的当前模型**（`__pi_model_current` 的回读源，也是 `model_applied`
+    /// 事件的来源）。目录与传输都在 Rust，UI 只需要 `(provider, id, name)` 三个字段；
+    /// provider 存的是 **UI id**（`google-gemini`），因为 UI 拿它去自己的列表里匹配。
+    current_model: std::sync::Mutex<Value>,
 }
 
 impl Guest {
@@ -42,29 +46,27 @@ impl Guest {
         let bundle = include_str!("../../../pi-bundle/dist/agent-qjs.js");
 
         let provider_cfg = read_provider_config(data_dir);
-        let (provider, model_id) = (
-            provider_cfg
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("deepseek")
-                .to_string(),
-            provider_cfg
-                .get("modelId")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned),
+        // 生效模型由**目录**解析成完整对象（baseUrl / compat / thinkingLevelMap 全带上），
+        // 而不是在 JS 里手抄一份 —— 抄本一定会跟目录漂移。见 catalog 模块头注释。
+        let (ui_provider, model) = catalog::resolve_for_boot(
+            provider_cfg.get("provider").and_then(|v| v.as_str()),
+            provider_cfg.get("modelId").and_then(|v| v.as_str()),
         );
-        if provider != "deepseek" {
-            // 换引擎后 provider 传输要在 Rust 重写，目前只有 DeepSeek —— 明确报出来，
-            // 不要静默用一个跟 UI 显示不一致的模型（见 qjs/deepseek.rs 顶部注释）。
-            super::logcat(&format!(
-                "qjs: provider '{provider}' 尚无 Rust 传输，回退 deepseek（UI 里仍显示已选 provider）"
-            ));
+        if let Err(reason) = catalog::transport_for(model) {
+            // 不静默换一家去发（那会让 UI 显示的 provider 与真实请求不一致）。
+            // 这里只记日志，真正的拒绝发生在每轮请求的 startModel —— 那时用户能
+            // 在对话流里看到明确的错误，而不是一个「还能用」的假象。
+            super::logcat(&format!("qjs: 这个模型没有可用的传输（{reason}）"));
         }
-        // 凭证：优先 env 覆盖（测试/开发缝 —— 让集成测试不用碰用户的 keychain），
+        // 凭证：读 env 覆盖（测试/开发缝 —— 让集成测试不用碰用户的 keychain），
         // 否则读宿主凭证服务（桌面 keyring / Android 沙箱文件）。
         // ⚠️ 凭证**不是 boot 的门槛**：与 bun 路线一致 —— 没 key 也要能起来，
         // UI 显示配置页，用户存完 key 直接就能聊。所以 key 在**每次模型请求时**读
         // （见 mount 里的 startModel），而不是 boot 时定死。
+        //
+        // baseUrl 现在以目录里的为准（模型的 `baseUrl` 字段，在 startModel 里取）；
+        // 这个值只剩两个用途：DEEPSEEK_BASE_URL 的开发缝（mock/自建端点），
+        // 以及目录里没写 baseUrl 时的最后回退。
         let base_url = std::env::var("DEEPSEEK_BASE_URL")
             .unwrap_or_else(|_| "https://api.deepseek.com".into());
 
@@ -82,19 +84,32 @@ impl Guest {
             })
             .unwrap_or_default();
 
+        // ⚠️ 工具表必须在这里传进 guest：JS 侧是 `toolsFor(config.tools || [])`，
+        // 漏了这个字段就等于 agent 手里**一个文件工具都没有**（只剩 fetch/todo/
+        // subagent/ask_user）—— 这个坑真踩过，见 docs/PROGRESS.md。
+        let tool_definitions = pi_host_tools::tool_definitions();
         let boot_host = Arc::clone(&host);
         let boot_data_dir = data_dir.to_string();
         context.with(|ctx| -> Result<(), String> {
-            mount(&ctx, Arc::clone(&host), tools.clone(), base_url.clone(), mcp_origins)?;
-            ctx.eval::<(), _>(prelude).map_err(|e| describe(&ctx, e, "prelude"))?;
-            ctx.eval::<(), _>(bundle).map_err(|e| describe(&ctx, e, "bundle"))?;
+            mount(
+                &ctx,
+                Arc::clone(&host),
+                tools.clone(),
+                base_url.clone(),
+                mcp_origins,
+            )?;
+            ctx.eval::<(), _>(prelude)
+                .map_err(|e| describe(&ctx, e, "prelude"))?;
+            ctx.eval::<(), _>(bundle)
+                .map_err(|e| describe(&ctx, e, "bundle"))?;
 
             let goal = crate::goal::get(&boot_data_dir)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .and_then(|v| v.as_str().map(str::to_owned));
             let config = json!({
-                "model": model_id.unwrap_or_else(|| "deepseek-v4-flash".into()),
+                "model": model,
+                "tools": tool_definitions,
                 "thinkingLevel": "high",
                 "systemPrompt": SYSTEM_PROMPT,
                 "workspace": boot_host.workspace.to_string_lossy(),
@@ -103,14 +118,33 @@ impl Guest {
             })
             .to_string();
             call::<()>(&ctx, "boot", (config,)).map_err(|e| format!("boot: {e}"))?;
+            // 与 bun 路线对齐：boot 后自动恢复**最近一次会话**（agent-main.js 顶部那句
+            // `restoreLatest()`）。不做的话重开 App 是空白对话，用户得自己去抽屉里点
+            // 一下 —— 真机上就是这么发现的（会话文件都在，界面却空的）。
+            // 恢复是异步的（结果经 `session_restored` 事件），下面的热身 tick 会推完。
+            call::<()>(&ctx, "restore", ()).map_err(|e| format!("restore: {e}"))?;
             Ok(())
         })?;
 
-        let guest = Self { runtime, context, host, tools };
-        // 推进若干拍让 boot 后的异步（会话回放 / MCP / 技能注入）跑起来，
+        let guest = Self {
+            runtime,
+            context,
+            host,
+            tools,
+            current_model: std::sync::Mutex::new(
+                json!({ "provider": ui_provider, "id": model["id"], "name": model["name"] }),
+            ),
+        };
+        // 推进若干拍让 boot 后的异步（会话恢复 / MCP / 技能注入）跑起来，
         // 这样 agent_init 返回时 history 已经是可读的。
+        //
+        // ⚠️ 这里的 tick 事件**必须转发给宿主，不能丢**：UI 的顺序是
+        // `listen("pi-agent-event")` → `invoke("agent_init")`（App.tsx onMount），
+        // 所以 boot 期间发的事件正好是它在等的那批 —— 尤其 `agent_ready`
+        // （UI 靠它把 composer 从 "agent booting…" 解锁）。曾经这里把返回值直接
+        // 扔掉，真机上就是永远停在 booting（静态检查与单测都拦不住）。
         for _ in 0..200 {
-            guest.tick()?;
+            guest.tick_and_emit()?;
             std::thread::sleep(Duration::from_millis(1));
         }
         Ok(guest)
@@ -121,7 +155,9 @@ impl Guest {
             .globals()
             .get("__spike")
             .map_err(|e| format!("__spike missing: {e}"))?;
-        spike.get(name).map_err(|e| format!("__spike.{name} missing: {e}"))
+        spike
+            .get(name)
+            .map_err(|e| format!("__spike.{name} missing: {e}"))
     }
 
     /// 一拍：把队列事件交给 guest → 泵微任务队列 → 取回 agent 事件给 UI。
@@ -131,13 +167,32 @@ impl Guest {
     pub fn tick(&self) -> Result<Vec<Value>, String> {
         self.context.with(|ctx| -> Result<Vec<Value>, String> {
             let tick: Function = self.spike(&ctx, "tick")?;
-            tick.call::<_, ()>(()).map_err(|e| describe(&ctx, e, "tick"))?;
+            tick.call::<_, ()>(())
+                .map_err(|e| describe(&ctx, e, "tick"))?;
             while ctx.execute_pending_job() {}
             let drain: Function = self.spike(&ctx, "drain")?;
-            let raw: String = drain.call::<_, String>(()).map_err(|e| describe(&ctx, e, "drain"))?;
-            let parsed: Value = serde_json::from_str(&raw).map_err(|e| format!("drain json: {e}"))?;
+            let raw: String = drain
+                .call::<_, String>(())
+                .map_err(|e| describe(&ctx, e, "drain"))?;
+            let parsed: Value =
+                serde_json::from_str(&raw).map_err(|e| format!("drain json: {e}"))?;
             Ok(parsed["events"].as_array().cloned().unwrap_or_default())
         })
+    }
+
+    /// 一拍：把事件**转发给宿主**（与 worker 主循环同一条路）。
+    ///
+    /// ⚠️ 任何「边 tick 边等某个事件」的地方都要走这里：`tick()` 返回的是一条事件流，
+    /// 自己拿着看而不转发，等于把 UI 正在等的东西吃掉。两个真实例：
+    ///   · boot 热身的 `agent_ready` 被吃掉 → 真机上永远停在 "agent booting…"；
+    ///   · `session_open` 轮询窗口里的 `approval_required` 被吃掉 → 审批卡不弹、
+    ///     agent 在另一头干等（这类“静静卡住”比报错难查得多）。
+    fn tick_and_emit(&self) -> Result<usize, String> {
+        let events = self.tick()?;
+        for event in &events {
+            super::emit(event);
+        }
+        Ok(events.len())
     }
 
     pub fn prompt(&self, text: &str) -> Result<(), String> {
@@ -147,15 +202,13 @@ impl Guest {
     }
 
     pub fn status(&self) -> Result<String, String> {
-        self.context.with(|ctx| {
-            call::<String>(&ctx, "status", ()).map_err(|e| format!("status: {e}"))
-        })
+        self.context
+            .with(|ctx| call::<String>(&ctx, "status", ()).map_err(|e| format!("status: {e}")))
     }
 
     pub fn history(&self) -> Result<String, String> {
-        self.context.with(|ctx| {
-            call::<String>(&ctx, "history", ()).map_err(|e| format!("history: {e}"))
-        })
+        self.context
+            .with(|ctx| call::<String>(&ctx, "history", ()).map_err(|e| format!("history: {e}")))
     }
 
     pub fn stop(&self) -> Result<(), String> {
@@ -168,9 +221,8 @@ impl Guest {
     }
 
     pub fn new_session(&self) -> Result<(), String> {
-        self.context.with(|ctx| {
-            call::<()>(&ctx, "newSession", ()).map_err(|e| format!("newSession: {e}"))
-        })
+        self.context
+            .with(|ctx| call::<()>(&ctx, "newSession", ()).map_err(|e| format!("newSession: {e}")))
     }
 
     pub fn open_session(&self, id: &str) -> Result<(), String> {
@@ -182,6 +234,9 @@ impl Guest {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(30) {
             for event in self.tick()? {
+                // 先转发再判定：这一窗口里可能夹着别的回合的事件（model 增量、
+                // approval_required…），吞掉它们就是让 UI 干等一个不会来的东西。
+                super::emit(&event);
                 match event["type"].as_str() {
                     Some("session_opened") => return Ok(()),
                     Some("session_error") => {
@@ -196,28 +251,109 @@ impl Guest {
     }
 
     pub fn mcp_reconnect(&self) -> Result<(), String> {
-        self.context.with(|ctx| {
-            call::<String>(&ctx, "mcpReconnect", ()).map(|_| ())
-        })
+        self.context
+            .with(|ctx| call::<String>(&ctx, "mcpReconnect", ()).map(|_| ()))
     }
 
-    /// `pi_call_global` 的命令面映射（bun 版是 `__pi_*` 全局）。
+    /// `pi_call_global` 的命令面映射。
+    ///
+    /// bun 路线这些名字是 `globalThis.__pi_*`（JS 自己实现）；qjs 路线**分两类**：
+    ///  · 目录类（providers/models/model_current/model_select）→ 在 Rust 直接答，
+    ///    因为目录（models.json）与 "当前模型" 都在 Rust；
+    ///  · 命令类（plan/btw/commands/skills/goal）→ 映射到 guest 的 `__spike.*`。
+    ///
+    /// 返回 "started" 的语义与 bun 一致：**结果经事件回来**（UI 的 kick 模式）。
     pub fn call_global(&self, fn_name: &str, arg: &str) -> Result<String, String> {
-        let target = match fn_name {
-            "__pi_plan_start" => "draftPlan",
-            "__pi_btw_start" => "askByTheWay",
-            // 目标/技能的热生效在 QuickJS 侧不需要（每次 boot 都会重读）
-            "__pi_goal_apply" | "__pi_skills_apply" => return Ok("started".into()),
+        // ── 目录类：事件由 Rust 直接投（UI 只认事件形状，不看谁 emit 的）──
+        match fn_name {
+            "__pi_providers_list" => {
+                super::emit(&json!({
+                    "type": "providers_listed",
+                    "providers": catalog::providers_list(),
+                }));
+                return Ok("started".into());
+            }
+            "__pi_models_refresh" => {
+                // 不做网络刷新（目录是静态数据，见 catalog 模块头注释）。
+                // shapes 与 bun 逐字对齐：成功 models_listed / 失败 models_error，
+                // 两者都带 UI 侧的 provider id —— UI 就拿它去自己的列表里匹配。
+                let event = match catalog::model_list(arg) {
+                    Ok(models) => {
+                        json!({ "type": "models_listed", "provider": arg, "models": models })
+                    }
+                    Err(error) => {
+                        json!({ "type": "models_error", "provider": arg, "error": error })
+                    }
+                };
+                super::emit(&event);
+                return Ok("started".into());
+            }
+            "__pi_model_current" => return Ok(self.current_model.lock().unwrap().to_string()),
+            "__pi_model_select" => return self.model_select(arg),
+            "__pi_oauth_login" => {
+                return Err(
+                    "qjs 路线未接 OAuth 订阅登录（已记录在 docs/PROGRESS.md「已知缺口」）".into(),
+                )
+            }
+            _ => {}
+        }
+
+        // ── 命令类：名字映射 + 参数形态两套（有参/无参）──
+        let (target, arg) = match fn_name {
+            "__pi_plan_start" => ("draftPlan", Some(arg)),
+            "__pi_btw_start" => ("askByTheWay", Some(arg)),
+            "__pi_commands" => ("commands", None),
+            // 热生效：bun 侧是 JS 自己重读，这边同样交给 guest（见 agent-qjs.js）
+            "__pi_skills_apply" => ("skillsApply", None),
+            "__pi_goal_apply" => ("goalApply", None),
             other => return Err(format!("qjs: 未实现的全局调用 {other}")),
         };
+        self.context
+            .with(|ctx| match arg {
+                Some(arg) => call::<String>(&ctx, target, (arg.to_string(),)),
+                None => call::<String>(&ctx, target, ()),
+            })
+            .map_err(|e| format!("{target}: {e}"))
+    }
+
+    /// `__pi_model_select({"provider":"deepseek","modelId":"…"})`。
+    ///
+    /// 三道判断的顺序是有意的：**先查目录**（不存在的模型要报得跟 bun 一样），
+    /// **再查传输**（没有传输的 provider 现在是明确报错，不是静默换一家），
+    /// 最后才热切换。
+    fn model_select(&self, arg: &str) -> Result<String, String> {
+        let parsed: Value =
+            serde_json::from_str(arg).map_err(|e| format!("bad model select: {e}"))?;
+        let provider = parsed["provider"].as_str().unwrap_or_default();
+        let model_id = parsed["modelId"].as_str().unwrap_or_default();
+        let model = catalog::find_model(provider, model_id)
+            .ok_or_else(|| format!("unknown model: {provider}/{model_id}"))?;
+        // 闸门：按 model.api 分派。选不了的要**说清是哪一族没做**，而不是假装成功。
+        catalog::transport_for(model)?;
+        // 热切换：请求体里的 model 字段就是 agent.state.model（见 agent-qjs.js setModel）
         self.context.with(|ctx| {
-            call::<String>(&ctx, target, (arg.to_string(),))
-                .map_err(|e| format!("{target}: {e}"))
-        })
+            call::<String>(&ctx, "setModel", (model.to_string(),))
+                .map_err(|e| format!("setModel: {e}"))
+        })?;
+        let name = model["name"].as_str().unwrap_or(model_id);
+        // 回给 UI 的 provider 一定是 **UI id**（`google-gemini`），不能是目录 id：
+        // UI 拿它去自己的 provider 列表里匹配（模型快选、当前模型状态条）。
+        let ui_id = catalog::ui_provider(provider)
+            .map(|(id, _, _)| id)
+            .unwrap_or(provider);
+        *self.current_model.lock().unwrap() =
+            json!({ "provider": ui_id, "id": model_id, "name": name });
+        super::emit(&json!({
+            "type": "model_applied", "provider": ui_id, "modelId": model_id, "name": name,
+        }));
+        Ok("started".into())
     }
 
     pub fn tool_count(&self) -> usize {
-        self.tools.run_tool("ls", &json!({ "path": "." })).map(|_| 1).unwrap_or(0)
+        self.tools
+            .run_tool("ls", &json!({ "path": "." }))
+            .map(|_| 1)
+            .unwrap_or(0)
     }
 }
 
@@ -233,8 +369,10 @@ fn mount(
 
     obj.set(
         "log",
-        Function::new(ctx.clone(), |line: String| super::logcat(&format!("qjs-js: {line}")))
-            .map_err(|e| e.to_string())?,
+        Function::new(ctx.clone(), |line: String| {
+            super::logcat(&format!("qjs-js: {line}"))
+        })
+        .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
 
@@ -251,35 +389,87 @@ fn mount(
                 let queue = Arc::clone(&queue);
                 let data_dir = data_dir.clone();
                 let base_url = base_url.clone();
+                let base_url_fallback = base_url.clone();
                 std::thread::spawn(move || {
-                    // 每次请求现读凭证：用户在 UI 里刚存的 key 立刻生效（不用重启）
-                    let api_key = std::env::var("PI_DEEPSEEK_API_KEY")
-                        .ok()
-                        .filter(|k| !k.trim().is_empty())
-                        .or_else(|| crate::creds::get(&data_dir.to_string_lossy(), "deepseek"))
-                        .unwrap_or_default();
+                    // 请求体里的 model 对象就是真相（**Rust 用目录解析后随 boot 传给 JS
+                    // 的那一份**）：provider 决定走哪条传输、用谁的凭证，baseUrl 决定打哪儿。
+                    let request_value: Value =
+                        serde_json::from_str(&request).unwrap_or(Value::Null);
+                    let model = request_value["model"].clone();
+                    let provider = model["provider"].as_str().unwrap_or("deepseek").to_string();
+                    let api = model["api"].as_str().unwrap_or_default().to_string();
+                    // 传输闸门：按 **model.api** 分派（一个家族实现一次就解锁一批 provider）。
+                    // 没有可用的就明确报错 —— 绝不静默改动去发（否则 UI 显示 OpenAI、
+                    // 真实请求打 DeepSeek，是最难查的一类不一致）。
+                    let transport = match catalog::transport_for(&model) {
+                        Ok(transport) => transport,
+                        Err(reason) => {
+                            queue.lock().unwrap().push(json!({
+                                "type": "model_error", "id": id,
+                                "error": format!("{reason}（当前模型：{provider}/{api}）"),
+                            }));
+                            return;
+                        }
+                    };
+                    // 每次请求现读凭证：用户在 UI 里刚存的 key 立刻生效（不用重启）。
+                    // 查 key 用 **UI id**（`set_creds` 存的就是它），与请求体里的目录 id
+                    // 不同名时（google / google-gemini）不能混用。
+                    let creds_provider = catalog::to_ui_id(&provider);
+                    let api_key = std::env::var(format!(
+                        "PI_{}_API_KEY",
+                        creds_provider.to_uppercase().replace('-', "_")
+                    ))
+                    .ok()
+                    .filter(|k| !k.trim().is_empty())
+                    .or_else(|| crate::creds::get(&data_dir.to_string_lossy(), creds_provider))
+                    .unwrap_or_default();
                     if api_key.trim().is_empty() {
                         queue.lock().unwrap().push(json!({
                             "type": "model_error", "id": id,
-                            "error": "没有 DeepSeek 凭证 —— 在设置里配 provider + API key",
+                            "error": format!("没有 {creds_provider} 凭证 —— 在设置里配 provider + API key"),
                         }));
                         return;
                     }
-                    let cfg = deepseek::DeepSeekConfig { api_key, base_url };
-                    let mut emit = |event: deepseek::StreamEvent| {
+                    // baseUrl：env 覆盖（开发缝/自建端点：`PI_<PROVIDER>_BASE_URL`；
+                    // DeepSeek 那家还认历史上的 `DEEPSEEK_BASE_URL`）优先，
+                    // 其次目录里的真值，最后 boot 传给 mount 的那个。
+                    let env_provider = creds_provider.to_uppercase().replace('-', "_");
+                    let env_base_url = std::env::var(format!("PI_{env_provider}_BASE_URL"))
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| {
+                            // 旧名只给 DeepSeek 用：全局设了就抢别的 provider 的端点会很莫名
+                            (provider == "deepseek")
+                                .then(|| std::env::var("DEEPSEEK_BASE_URL").ok())
+                                .flatten()
+                                .filter(|s| !s.trim().is_empty())
+                        });
+                    let base_url = env_base_url
+                        .or_else(|| model["baseUrl"].as_str().map(str::to_owned))
+                        .unwrap_or(base_url_fallback);
+                    let cfg = Config { api_key, base_url };
+                    let mut emit = |event: StreamEvent| {
                         let payload = match event {
-                            deepseek::StreamEvent::Thinking(delta) => json!({
+                            StreamEvent::Thinking(delta) => json!({
                                 "type": "model_progress", "id": id,
                                 "thinkingDelta": delta, "textDelta": "",
                             }),
-                            deepseek::StreamEvent::Text(delta) => json!({
+                            StreamEvent::Text(delta) => json!({
                                 "type": "model_progress", "id": id,
                                 "thinkingDelta": "", "textDelta": delta,
                             }),
                         };
                         queue.lock().unwrap().push(payload);
                     };
-                    match deepseek::complete(&cfg, &request, &mut emit) {
+                    let result = match transport {
+                        catalog::Transport::OpenAiResponses => {
+                            super::openai_responses::complete(&cfg, &request, &mut emit)
+                        }
+                        catalog::Transport::OpenAiCompletions => {
+                            deepseek::complete(&cfg, &request, &mut emit)
+                        }
+                    };
+                    match result {
                         Ok(result) => queue
                             .lock()
                             .unwrap()
@@ -312,7 +502,10 @@ fn mount(
                     let verdict = crate::approval::request(&json!({ "tool": tool, "args": args }));
                     if let Some(decision) = verdict["decision"].as_str() {
                         // auto / deny / 无 UI：立即定论
-                        grants.lock().unwrap().insert(call_id.clone(), decision.into());
+                        grants
+                            .lock()
+                            .unwrap()
+                            .insert(call_id.clone(), decision.into());
                         let id = format!("auto-{call_id}");
                         queue.lock().unwrap().push(json!({
                             "type": "approval_decision", "id": id, "decision": decision,
@@ -379,7 +572,8 @@ fn mount(
         obj.set(
             "fs",
             Function::new(ctx.clone(), move |op: String, payload: String| -> String {
-                let mut request: Value = serde_json::from_str(&payload).unwrap_or_else(|_| json!({}));
+                let mut request: Value =
+                    serde_json::from_str(&payload).unwrap_or_else(|_| json!({}));
                 if let Some(object) = request.as_object_mut() {
                     object.insert("op".into(), json!(op));
                 }
@@ -465,7 +659,10 @@ fn mount(
         Function::new(ctx.clone(), move |payload: String| -> String {
             let parsed: Value = serde_json::from_str(&payload).unwrap_or_else(|_| json!({}));
             let registered = crate::ask_user::register(&parsed);
-            registered["id"].as_str().unwrap_or("ask-unknown").to_string()
+            registered["id"]
+                .as_str()
+                .unwrap_or("ask-unknown")
+                .to_string()
         })
         .map_err(|e| e.to_string())?,
     )
@@ -505,8 +702,13 @@ fn call<'js, R>(
 where
     R: rquickjs::FromJs<'js>,
 {
-    let spike: Object = ctx.globals().get("__spike").map_err(|e| format!("__spike missing: {e}"))?;
-    let function: Function = spike.get(name).map_err(|e| format!("__spike.{name} missing: {e}"))?;
+    let spike: Object = ctx
+        .globals()
+        .get("__spike")
+        .map_err(|e| format!("__spike missing: {e}"))?;
+    let function: Function = spike
+        .get(name)
+        .map_err(|e| format!("__spike.{name} missing: {e}"))?;
     function.call(args).map_err(|e| describe(ctx, e, name))
 }
 
@@ -533,6 +735,9 @@ fn describe(ctx: &Ctx<'_>, error: rquickjs::Error, tag: &str) -> String {
     if stack.is_empty() {
         format!("{tag}: {rendered}")
     } else {
-        format!("{tag}: {rendered}\n{}", stack.lines().take(6).collect::<Vec<_>>().join("\n"))
+        format!(
+            "{tag}: {rendered}\n{}",
+            stack.lines().take(6).collect::<Vec<_>>().join("\n")
+        )
     }
 }
