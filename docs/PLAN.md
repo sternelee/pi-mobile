@@ -1,6 +1,11 @@
 # pi-mobile 项目规划
 
-> 在 Android / iOS 上运行的 Pi Coding Agent —— Tauri 2 + Bun + SolidJS 架构方案
+> 在 Android / iOS 上运行的 Pi Coding Agent —— Tauri 2 + **QuickJS** + SolidJS。
+>
+> ⚠️ **本文档是规划与决策记录，含有已作废的方案**。运行时已从「嵌入式 bun（libskal）」
+> 换成 **QuickJS（rquickjs 静态链接）** —— 见下面的 **D18**；bun 路线（含 D1/D2/D10/D14
+> 的部分内容）完整归档在 `backup/bun` 分支，要点见 [LIBPI-BUN-NOTES.md](LIBPI-BUN-NOTES.md)。
+> **当前架构以 [README](../README.md) 与 [CONTRACTS.md](CONTRACTS.md) 为准。**
 
 受以下项目启发：
 
@@ -47,9 +52,9 @@ Pi Agent 本体来自 [earendil-works/pi](https://github.com/badlogic/pi-mono)�
 |----|------|------|
 | App 壳 | **Tauri 2（mobile）** | 一份 Rust core + WebView，`tauri android init` / `tauri ios init` 生成 gen/ 工程；Rust 侧天然承担"可信宿主"角色（对应 pocket-pi 的 native host） |
 | UI | **SolidJS + vite-plugin-solid** | 脚手架已就位；skal 同款选型，细粒度响应式适合流式 token 渲染；体积小于 React |
-| Agent 核心 | **`pi-coding-agent`（完整版）** 经 libpi-bun 嵌入 | 上游 100% 原生行为：extensions、bun API、fs 全部可用，适配层最小化 |
+| Agent 核心 | **`pi-agent-core`**（agent 循环）跑在嵌入式 JS 引擎里 | 上游 100% 原生行为：宿主无关（streamFn 与 tools 都是注入点，它自己不碰网络），所以能原样跑 |
 | JS 工具链 | **Bun**（workspace / test / build） | 本机 bun 1.3.14；与上游 pi-mono 的运行时假设一致 |
-| Agent 运行时 | **libpi-bun**（skal 工艺：zig 交叉编译 bun 为平台库） | **核心决策 D1 = 方案 C**；Android 动态库（.so，JNI 加载）/ iOS 静态库（.a） |
+| Agent 运行时 | **QuickJS（rquickjs，静态链进二进制）** —— 见 **D18** | 原选型 libpi-bun（D1）已作废；换引擎的收益是体积（去掉 92MB libskal）与 iOS（不再需要 WebKit/JSC），代价是模型传输必须用 Rust 重写 |
 | 宿主服务 | **Rust（Tauri commands）** | 文件、搜索、凭证、HTTP 代理、会话索引全部宿主侧实现，JS 无原始权限 |
 | 凭证 | `tauri-plugin-keyring` 或 `keyring` crate | Keychain / Keystore 抽象 |
 | 网络 | `tauri-plugin-http` | WebView 内直连 LLM Provider 有 CORS 限制，走 Rust fetch 代理 |
@@ -57,11 +62,14 @@ Pi Agent 本体来自 [earendil-works/pi](https://github.com/badlogic/pi-mono)�
 | 默认内置工具 | `tauri-plugin-http` / `-fs` / `-opener` / `-os` | 作为 pi 默认 tool 的原生执行层，见 D2.1 |
 | MCP | `@modelcontextprotocol/sdk`（浏览器 streamable-http）+ git2-rs 拉取 | 仅 HTTP 协议，见 D11 |
 | Skills | 自研 registry + git2-rs 安装器 | SKILL.md 注入式技能包，见 D12 |
-| 用户配置 | `tauri-plugin-store` | JSON KV + autosave；键空间入契约，见 D13 |
+| 用户配置 | 自研 JSON 文件（`{data_dir}/*.json`） | D13 原选 `tauri-plugin-store`，**该插件目前无读写方**；实际持久化是 provider.json / policy.json / mcp.json / goal.json，见 CONTRACTS §3 |
 
 ---
 
-## 3. 总体架构（D1 = 方案 C：嵌入式 bun 运行时）
+## 3. 总体架构（原 D1 = 方案 C；**已被 D18 取代，此节仅存历史**）
+
+> 下面的图是 bun 时代的形态：guest 是完整 bun VM，宿主能力经 loopback HTTP hostcall 进出。
+> 现在的形态是「QuickJS guest + `globalThis.host.*` 进程内直调」，图见 README。
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -143,7 +151,7 @@ pi-mobile/
 
 ## 5. 关键设计决策
 
-### D1：agent 运行在哪里？——已定稿为方案 C（嵌入式 bun 运行时）
+### D1：agent 运行在哪里？——已定稿为方案 C（嵌入式 bun 运行时）　⛔ **已被 D18 取代，存档**
 
 > 2026-09-04 决策定稿：直接采用方案 C，不再考虑方案 A 与 B。这正是 skal 项目已经验证过的挑战路线——本项目的核心工程价值所在。
 
@@ -175,7 +183,7 @@ pi-mobile/
 - `build/`：各平台 link inputs（gitignored）；`build-libpi-bun.sh` 一键产出 .so/.a 并放进 gen/ 工程；
 - JSC 版本耦合：.jsc 字节码缓存与 JSC 版本强绑定（skal 教训），bundle 与运行时同版本构建。
 
-### D2：桥协议（bun ↔ Rust ↔ UI）
+### D2：桥协议（bun ↔ Rust ↔ UI）　⛔ **已失效，存档**（现为 `globalThis.host.*` 进程内调用，见 CONTRACTS §2）
 
 | 通道 | 方向 | 内容 |
 |------|------|------|
@@ -266,14 +274,14 @@ pi-mobile/
 - **管理界面**：安装 / 更新 / 启停 / 删除；禁用 = 不注入；删除后历史会话保留 id+version 引用记录。
 - **成本联动**：启用 skills 的注入内容计入上下文预算，在 M3 用量可视化中可见。
 
-### D13：用户配置存储（tauri-plugin-store）
+### D13：用户配置存储（tauri-plugin-store）　⚠️ **未落地**（实际用 JSON 文件，见 CONTRACTS §3）
 
 - **职责边界**：`tauri-plugin-store`（JSON KV + autosave，存 `app_data_dir`）负责**用户配置**——UI 偏好（主题/语言/字号）、默认 Provider 与模型、审批策略基线（policy 默认值）、onboarding 完成标记、MVP 级杂项开关。
 - **不放 store 的数据**（仍走宿主文件服务，因需 schema 校验/原子写/契约测试）：会话 JSONL（D3）、skills registry（D12）、mcp.json（D11）——store 只做"键值偏好"，结构化数据归契约层。
 - **键空间入契约**：store 的全部 key 在 `docs/CONTRACTS.md` 登记（如 `settings.theme`、`settings.defaultModel`、`policy.default.*`），与 IPC schema 同等对待，防键名漂移；`src/state/settings.ts` 做类型安全封装，UI 只读 signal，写经统一 setter。
 - **迁移**：key 结构变更走版本字段（`settings.version`），Rust/TS 两侧共用迁移表。
 
-### D14：脚本执行（agent 自写 JS 并运行）——显式能力授予
+### D14：脚本执行（agent 自写 JS 并运行）——显式能力授予　⚠️ **隔离 runner 随 bun 归档**（策略层 `script.rs` 保留，见 D18）
 
 - **定位**：这是本项目**唯一的 exec 面**，是 D6「无 exec」的定向例外。价值不在「能跑代码」，而在**一次脚本替代 N 次工具往返**——移动端的瓶颈是 LLM 往返延迟，不是解释器速度，故 iOS 无 JIT 在此可接受。**不引入子进程**：`fork`/`exec` 在 iOS 被禁，脚本跑在**进程内独立 JS context**。
 - **核心安全不变式**：*脚本永远不能做超出「用户在审批卡上看到的那份能力清单」的事。* 三条支撑缺一不可：
@@ -437,7 +445,45 @@ pi-mobile/
 
 ---
 
-## 6. 里程碑路线图（方案 C 形态：libpi-bun 为关键路径）
+### D18：换运行时 —— 嵌入式 bun → QuickJS（2026-09-20，**当前形态**）
+
+**决策**：agent 运行时不再用「skal 工艺交叉编译的 bun 库（libskal）」，改为 **QuickJS**
+（`rquickjs`，纯 C 引擎，静态编进 Rust 二进制）。bun 路线归档在 `backup/bun` 分支。
+
+**为什么换**（都是量出来的，不是偏好）：
+
+| 维度 | 嵌入式 bun | QuickJS |
+|---|---|---|
+| 额外产物 | **92 MB** libskal.so / .dylib | **0**（引擎在 app 二进制里） |
+| iOS | 从源码构建 WebKit（~13 GB 磁盘、关 JIT 的时序坑、DNS 后端补丁） | 一个链接参数（`libclang_rt.ios.a`） |
+| agent JS 体积 | 1.4 MB（+ node 内建垫片） | 385 KB |
+| 启动 | — | 0.36 s（修掉一个 boot 信号 bug 后实测） |
+| Android 依赖 | jniLibs 里的 .so 必须在 `nativeLibraryDir` 且可 exec | 无 |
+
+**代价（这是这条路线真正的账）**：pi-ai 的**传输层**要的是「一整个 Web/Node 平台」（4 家厂商
+SDK + 68 处 node 内建 + fetch/Streams），QuickJS 恰恰不提供 —— 所以**模型传输必须用 Rust
+重写，一家族一家族地补**：
+
+| 家族 | 状态 | 覆盖（pi-ai 目录） |
+|---|---|---|
+| `openai-responses` | ✅ | 105 模型 / 6 provider（含 UI 第一行 openai、xai） |
+| `openai-completions` | 🔨 只做了 DeepSeek 的 compat 档案 | 653 模型 / 26 provider（openrouter 333 个尚未解锁） |
+| `anthropic-messages` / `google-generative-ai` / `openai-codex-responses` / bedrock… | ⛔ 未做 | 剩下那些 |
+
+**没跟着搬过来的**（工具壳，实现都在、只差接到 agent 上）：native 4 个工具、git 6 个、
+D14 脚本沙箱（隔离 runner 是 bun 的整 VM，需要重新设计）、OAuth 订阅登录、preview 工具。
+详见 CONTRACTS §2.5 与 [PROGRESS](PROGRESS.md) 2026-09-20（第十五轮）。
+
+**保留下来的既有决策**：D3（会话 JSONL 格式，两路线互通）、D4（凭证只在宿主）、D6（无 exec）、
+D11（MCP）、D12（Skills）、D15（预览）、D16（git）、D17（UI）。**D1/D2/D10 作废**，
+D13 未落地，D14 待重新设计。
+
+**教训（值得单独记）**：换引擎本身不难，难的是**「宿主该给 agent 的东西」有没有全给到**。
+这条路上连撞四次同类问题（boot 信号白等 30 s、UI 永远停在 booting、agent 没有文件工具、
+UI 命令报 workspace not configured）——每一个都只在真机上暴露，且都属于「事件/能力没接到
+UI 上」。所以现在 **`scripts/qjs-tests.sh` 是必跑的**，CI 也显式跑它。
+
+## 6. 里程碑路线图（原方案 C 形态：libpi-bun 为关键路径）　⛔ **关键路径已作废**（D18 后它消失了）
 
 ### M0 —— 走通 Tauri mobile ✅（收尾中）
 - [x] bun 接管 workspace（tauri.conf.json 命令已改 bun）

@@ -1,5 +1,11 @@
 # PocketPi / PocketJS 调研笔记（2026-09-19）
 
+> 📦 **历史存档（2026-09-20）**：本文档是**换引擎决策的输入**（2026-09-19 调研）。
+> 结论已经落地：运行时换成了 QuickJS（见 [PLAN.md](PLAN.md) D18），bun 路线归档在
+> `backup/bun`。文中对 pocket-pi / PocketJS / Claude Code / Node-on-mobile 的分析仍然有效，
+> 可作为「薄 JS + 厚原生」这条范式的参考读物。
+
+
 > 调研对象：[pocket-stack/pocket-pi](https://github.com/pocket-stack/pocket-pi)（60★，MIT，Rust）
 > 与 [pocket-stack/pocketjs](https://github.com/pocket-stack/pocketjs)（1509★，MIT，TS）。
 > **性质：D1（agent 运行时选型）的再评估输入，不是决策。** 结论未经真机验证，

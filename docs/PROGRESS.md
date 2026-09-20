@@ -2,6 +2,89 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-20（第十五轮）— ✅ 删掉 bun/skal 运行时：main 只剩 QuickJS
+
+用户方向已定：**bun 版本备份到 `backup/bun` 分支，QuickJS 版本合入 main**（本地 + origin
+都有备份）。所以这轮把它在 main 上清干净，并把文档改到与现状一致。
+
+### 分两步走（每步都能编译）
+
+| commit | 内容 |
+|---|---|
+| 第 1 步 | 把 `logcat` 与 `workspace/jail` 从 `pi_bun` **抽出来**（新模块 `logcat.rs` / `workspace.rs`）—— 它们从来不属于 bun：lib.rs 的 UI 侧命令、preview、git、approval、native、keepalive 都在用，只是当年跟着 loopback 长在了一个模块里 |
+| 第 2 步 | 删掉 bun 运行时本体，lib.rs 直连 `qjs::*` |
+
+### 删了什么
+
+```
+src-tauri/src/pi_bun/          1480 行（dlopen libskal + loopback HTTP hostcall + 运行时开关）
+pi-bundle/agent-main.js        95 KB（+ dist/agent.js + 17 个 bun 路线的 JS 夹具/契约测试）
+scripts/                       build-libpi-bun / fetch-libpi-bun / link-skal-{ios,macos} /
+                               setup-bun-fork / build-jsc-ios .sh，以及 d14-runner-harness/
+Cargo.toml                     libloading
+运行时开关                      PI_AGENT_RUNTIME / {data_dir}/runtime.txt / PI_AGENT_RUNTIME_DEFAULT
+iOS 工程                        libskal.dylib 的 embed（project.yml + pbxproj 手删 4 处；
+                               xcodebuild -list 仍能解析，下次 tauri ios init 也不会带回来）
+```
+
+### ⚠️ 删掉之后暴露的一批「孤儿能力」
+
+原来只被 bun 的 hostcall 调、qjs 路线**从来没接**的四块实现：
+
+| 能力 | 位置 | 缺什么 |
+|---|---|---|
+| git 工具 6 个（status/diff/log/clone/pull/commit） | `git.rs` | JS 工具壳 |
+| native 工具 4 个（clipboard/notify/location/weather） | `native/mod.rs` | 同上（能力层与 UI 是活的，工具那半没接线） |
+| D14 脚本沙箱的**授权边界** | `script.rs` | 隔离 runner（bun 的整 VM 隔离随路线归档，qjs 要重新设计） |
+| OAuth 订阅登录 | `oauth.rs` | 未接（`__pi_oauth_login` 明确报错） |
+
+它们正是「qjs 还没接的」那张清单要用的实现，且**带着测试**（git 5 个等），所以**保留实现**、
+用模块级 `#![allow(dead_code)]` + 注释显式写出「暂时无消费者」，而不是删掉或留一堆 warning。
+接壳时把 allow 去掉即可 —— 那时也能一眼看出还差哪几个。
+
+### 顺带修掉的工程问题（都与「换引擎」直接相关）
+
+1. **`bundle:build` 进构建链**：`tauri.conf.json` 的 `beforeDev/BuildCommand` 现在先跑
+   `bun run bundle:build`。这堵死了一个反复踩的人类纪律坑（「改了 JS 没跑 build.sh → 跑的是
+   旧 JS」，PROGRESS 里出现过两次）。
+2. **CI 的三个 job 之前必然编译失败**：`rust` / `android-cross-check` / `desktop-build` 都没有
+   先出 bundle，而 `guest.rs` 用 `include_str!("dist/agent-qjs.js")` —— 新 clone 直接编译不过。
+   现在三个 job 都显式跑 `bun run bundle:build`。
+3. **CI 的 rust job 新增 `bash scripts/qjs-tests.sh`**：那三个 `#[ignore]` 的集成测试正是能发现
+   qjs 已出过的两个 boot bug 的东西 —— 以前它们不在任何门禁里。
+4. `.gitignore` 加 `.pi/`（pi CLI 在本目录写的本机状态，被 `git add -A` 误提交过一次；
+   复核过不含密钥）。
+
+### 文档（这轮的大头）
+
+| 文档 | 处理 |
+|---|---|
+| `README.md` | 重写：架构图（qjs + 进程内 host.*）、运行时对比表、Android/iOS 开发步骤（**删掉 92MB libskal 下载与 13GB WebKit 构建那两大段**）、bundle 构建与测试说明、项目结构、文档索引 |
+| `docs/CONTRACTS.md` | 重写为当前形态：40 个命令逐条核对、`pi-agent-event` 事件表、`globalThis.host.*` 通道表、`__spike.*` 控制面、线程模型两条纪律、孤儿能力清单、持久化路径表；bun 时代的 loopback/C ABI/脚本主体 token 压进 §5 历史 |
+| `docs/PLAN.md` | 顶部现状横幅；技术选型表更新；§3 标注历史；**新增 D18（换运行时的决策、收益、代价、没搬过来的东西、教训）**；D1/D2 标「已被 D18 取代」、D10 原有的作废标记保留、D13 标「未落地」、D14 标「runner 随 bun 归档」；§6 关键路径标注作废 |
+| `docs/LIBPI-BUN-NOTES.md`、`docs/POCKET-PI-NOTES.md` | 加「历史存档」横幅，指向 `backup/bun` |
+| `docs/PROGRESS.md` | 本轮 |
+
+顺带核对出：**`tauri-plugin-store` 目前没有任何读写方**（D13 的 store 键空间没落地，持久化实际
+都走 `{data_dir}/*.json`）。文档已按现状写；插件本身留待决定（落地或删除）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `cargo test` | ✅ 62（+3 ignored） |
+| `bash scripts/qjs-tests.sh` | ✅ 两个离线集成测试全过（boot 事件、Responses 端到端） |
+| `cargo fmt --check` | ✅ **0 diffs**（HEAD 39 —— 顺带把存量格式债清了，rust CI 的 fmt 门以后能过） |
+| clippy | 31（= 改动前；中途 97 是因为 orphan 死代码，删/allow 后回落） |
+| release APK | 重打（**不传任何运行时环境变量** —— 开关已删，默认就只剩 QuickJS） |
+
+### ⏭ 仍未做
+
+- **App 的 iOS 包在换引擎后还没真机复验**（引擎侧三端都验过，但 iOS 的 App 包自换引擎后没重打过）。
+- 传输家族：`openai-completions` 泛化（openrouter 333 模型）、`anthropic-messages`、
+  `google-generative-ai`、codex 的 OAuth。
+- 孤儿能力的工具壳（上面那张表）。
+
 ## 2026-09-20（第十四轮）— ✅ 真机第 4 处同类缺口：UI 侧命令的「workspace not configured」
 
 第十三轮那个 APK 装上后 booting 正常了，但**打开文件抽屉**报

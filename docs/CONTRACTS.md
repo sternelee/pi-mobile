@@ -1,142 +1,207 @@
 # pi-mobile 契约（CONTRACTS）
 
-> 状态：M2 现状（2026-09-05）。预构建 skal ABI 阶段，桥为 loopback HTTP；
-> 自有 `pi_entry.zig` 的 `pibun_*` C ABI 为后续形态（协议语义不变，仅换传输层）。
-> 任何变更须双侧测试同步通过。
+> 状态：**QuickJS 运行时**（2026-09-20，D18）。引擎由 `rquickjs` 静态编进 Rust 二进制，
+> agent（`pi-agent-core`）跑在进程内的 QuickJS guest 里；宿主能力经 `globalThis.host.*`
+> **进程内**调用，没有 HTTP 桥、没有 C ABI、没有外部 .so。
+>
+> 📦 本文档的 bun 路线形态（loopback HTTP hostcall + `pibun_*` C ABI + 脚本主体 token）
+> 已随 `backup/bun` 分支归档，末尾 §6 只留要点备查。
+>
+> 变更纪律：IPC / 宿主通道的任何改动都要**双侧同步**（UI 侧 `src/lib/events.ts` 的类型
+> 与 Rust emit 侧、JS `host.*` 调用点与 `qjs/guest.rs` 的挂载必须一起改）。
 
 ## 1. UI ↔ Rust IPC（Tauri commands / events）
 
-### 1.1 Commands（已实现）
+### 1.1 Commands（40 个，`src-tauri/src/lib.rs` 的 `generate_handler!`）
 
 | 命令 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `pi_bun_smoke` | `{}` | `{hello, smoke2}` | M1/M2 桥冒烟 |
-| `agent_init` | `{}` | `{}` | 加载 bundle；等 `__pi_ready` + `__pi_restored`（会话回放完成） |
+| `agent_init` | `{}` | `{}` | boot QuickJS guest：`boot()` → `restore()`（恢复最近会话）→ 热身 tick。**boot 期间的事件会转发给 UI**（`agent_ready` 就是靠这条解锁 composer 的） |
 | `agent_prompt` | `{ text }` | `"started"` | kick；回复经 `pi-agent-event` 流回 |
-| `agent_status` | `{}` | `{busy,lastError,queued}` | 轮询 |
-| `agent_stop` | `{}` | `{}` | M3：中止当前运行（bundle `agent.abort()`） |
-| `agent_history` | `{}` | `{sessionId,messages[]}` | boot 时从最新 JSONL 会话回放的历史 |
-| `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（creds.rs） |
-| `has_creds` | `{ provider }` | `bool` | provider 选择流程：探测是否已配置 key（决定 UI 显示 key 输入还是直接拉模型列表） |
+| `agent_status` | `{}` | `{phase,busy,pendingApprovals,messages,contextTokens,…}` | 轮询 |
+| `agent_stop` | `{}` | `{}` | 中止当前运行（清队列，见 qjs `stop()`） |
+| `agent_history` | `{}` | `{sessionId,messages[]}` | 当前会话历史（boot 已 `restore()` 过，所以重启后仍在） |
+| `set_creds` | `{ provider, apiKey }` | `{}` | D4：桌面 keyring / Android 沙箱文件（`creds.rs`）。**按 UI provider id 存**（`google-gemini`），传输层查 key 时做 id 映射 |
+| `has_creds` | `{ provider }` | `bool` | provider 选择流程：决定 UI 显示 key 输入还是直接拉模型列表 |
 | `get_default_model` | `{}` | `{provider,modelId}` / `null`（JSON 串） | 默认模型选择回读（`{data_dir}/provider.json`） |
-| `set_default_model` | `{ provider, modelId }` | `{}` | 默认模型选择持久化（provider.json；agent_init 注入 `__PI_CONFIG.providerConfig`，boot 时 bundle 用 pi-ai 目录解析完整模型对象；provider 为空串清除） |
-| `approval_respond` | `{ requestId, decision }` | `{}` | M3 审批：decision ∈ allow/deny/always；唤醒阻塞中的 approval_request |
-| `ask_user_respond` | `{ requestId, answer }` | `{}` | 扩展 ask_user：answer = `{response:{kind:"selection",selections[],comment?} \| {kind:"freeform",text,comment?}}` 或 `{response:null,cancelled:true}` |
+| `set_default_model` | `{ provider, modelId }` | `{}` | 默认模型选择持久化。**下一轮 boot 由 Rust 用目录解析成完整模型对象**（不再经 `__PI_CONFIG` 注入）；provider 为空串清除 |
+| `approval_respond` | `{ requestId, decision }` | `{}` | 审批决策 ∈ allow/deny/always；回注到 guest 队列，唤醒等待中的工具调用 |
+| `approval_policy_get` / `approval_policy_set` | `{}` / `{ write }` | `{write}` / `{}` | 审批基线（`{data_dir}/policy.json`，write: ask→auto 由 "always" 持久化） |
+| `ask_user_respond` | `{ requestId, answer }` | `{}` | `answer = {response:{kind:"selection",selections[],comment?} \| {kind:"freeform",text,comment?}}` 或 `{response:null,cancelled:true}` |
+| `workspace_tree` | `{}` | `{path,kind,size,mtimeMs}[]` | M3 文件树（深度 ≤6 / 条目 ≤500） |
+| `workspace_read` | `{ path }` | `string` | M3 只读预览（≤256KB，jail 在 workspace 内） |
 | `workspace_revert` | `{ path }` | `u64`（字节数） | M3 回滚：恢复该文件最近一次覆盖写入前的内容（消费备份） |
 | `workspace_backup_info` | `{ path }` | `{millis}` / `null` | M3 回滚 UI：该路径是否还有可回滚备份 |
-| `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | M3 会话列表：`{id,createdAt,cwd,modifiedAt,entries,size}` |
-| `session_open` | `{ id }` | `{}` | M3 切换会话：kick `__pi_open_session`（同步返回 "started"）+ 轮询 `__pi_session_open_result`（禁止 eval 挂 I/O 的 Promise——waitForPromise 阻塞 VM 线程会桥死锁） |
-| `session_new` | `{}` | `{}` | M3 新建空白会话（下一个 prompt 落新 JSONL） |
-| `mcp_list` / `mcp_add` / `mcp_remove` | `{}` / `{ name, url }` / `{ name }` | `Server[]` / `{}` / `{}` | M4：MCP 服务器配置管理（重启后生效） |
-| `goal_set` / `goal_clear` | `{ objective }` / `{}` | `{}` | M4：持久目标设置/清除（存 goal.json） |
-| `pi_call_global` | `{ fnName, arg }` | `string` | 命令类插件后端：调用 bundle 全局（`__pi_plan_start` / `__pi_btw_start` / `__pi_goal_apply` / `__pi_skills_apply`，均为 kick 语义同步返回） |
-| `skills_list` | `{}` | `SkillMeta[]` | D12：技能包列表（`{id,name,description,source,version,checksum,enabled,installedAt}`） |
-| `skills_install` | `{ url }` | `SkillMeta` | D12：https 直链 SKILL.md 或 github.com/{owner}/{repo}[/tree/{ref}]（zipball）；网络操作，off main thread |
-| `skills_toggle` | `{ id, enabled }` | `{}` | D12：启停（禁用 = 不注入） |
-| `skills_remove` | `{ id }` | `{}` | D12：删除（连目录带 registry 项） |
-| `skills_reconnect` | `{}` | `{}` | D12：热生效——kick bundle `__pi_skills_apply` 重新注入 |
-| `workspace_tree` | `{}` | `{path,kind,size,mtimeMs}[]` | M3 文件树（深度 ≤6 / 条目 ≤500） |
-| `workspace_read` | `{ path }` | `string` | M3 只读预览（上限 256KB，jail 在 workspace 内） |
+| `session_list` | `{}` | `SessionMeta[]`（modifiedAt 倒序） | `{id,createdAt,cwd,modifiedAt,entries,size}` |
+| `session_open` | `{ id }` | `{}` | 切换会话：kick JS `openSession(id)` + 等 `session_opened`/`session_error`（**等待期间的事件照样转发给 UI**） |
+| `session_new` | `{}` | `{}` | 新建空白会话（下一个 prompt 落新 JSONL） |
+| `session_delete` | `{ id }` | `{}` | 删除会话文件 |
+| `mcp_list` / `mcp_add` / `mcp_remove` / `mcp_reconnect` | `{}` / `{name,url}` / `{name}` / `{}` | `Server[]` / `{}` | M4：MCP 服务器配置（`{data_dir}/mcp.json`）；`mcp_reconnect` 是热重连（kick） |
+| `goal_get` / `goal_set` / `goal_clear` | `{}` / `{objective}` / `{}` | `string` / `{}` | M4：持久目标（`{data_dir}/goal.json`）；boot 时注入 systemPrompt 的 "Current goal" 节 |
+| `pi_call_global` | `{ fnName, arg }` | `string` | 命令类插件后端。见 §1.3 —— 名字与语义是**契约**，UI 一行不用改 |
+| `skills_list` / `skills_install` / `skills_toggle` / `skills_remove` / `skills_reconnect` | … | `SkillMeta[]` / `SkillMeta` / `{}` | D12：技能包（https 直链 SKILL.md 或 github zipball）；`skills_reconnect` 热生效（kick `skillsApply`） |
+| `native_capabilities` / `native_request_permission` | `{}` / `{capability}` | `Value` | M6：系统原生能力清单 + 权限请求（见 §2.4） |
+| `preview_start` / `preview_targets` / `preview_open_external` | `{}` / `{}` / `{url}` | `u16` / `Value` / `{}` | D15：workspace 内 html/css/js 的本地预览（axum + WebView） |
+| `script_capabilities` | `{}` | `Value` | D14：脚本可授予能力清单（UI 展示用）。⚠️ 脚本沙箱本身尚未实现（见 §2.5） |
+| `greet` | `{ name }` | `string` | 脚手架残留 |
 
-### 1.2 Events（Rust → UI）
+### 1.2 Events（Rust → UI，单一通道 `pi-agent-event`）
+
+事件是 **pi-agent-core 的原始事件形状**（`message_start` / `message_update` / `message_end` /
+`turn_start` / `turn_end` / `tool_execution_start` / `tool_execution_end` / `agent_start` /
+`agent_end` …）**原样转发**，外加宿主与插件事件：
 
 | 事件 | Payload | 说明 |
 |------|---------|------|
-| `pi-agent-event` | agent 事件 JSON（透传） | 见 §2.4 事件类型；含 `agent_ready` / `session_restored` / `session_created` / `session_error` / `agent_error` / `boot_error` / `approval_required` / `todo_updated`（rpiv-todo 移动原生化：`{tasks, nextId}` 全量快照，成功变更即发；回放/切会话/新建同步发出；UI 据此渲染常驻面板，`/todos` 命令手动开关） |
+| `agent_ready` | `{type}` | guest boot 完成 —— **UI 靠它把 composer 从 "agent booting…" 解锁** |
+| `context_ready` | `{type}` | AGENTS.md / skills / MCP 都就绪（第一轮 prompt 的上下文完整） |
+| `session_restored` | `{found,sessionId,messages}` | 会话恢复完成（`found:0` = 没有历史）。⚠️ **只发一条**：另一条无字段的会让 UI 的 `setCurrentSession(ev.sessionId ?? null)` 把高亮清掉 |
+| `session_created` / `session_error` | `{sessionId}` / `{error}` | 落盘 |
+| `approval_request` / `approval_resolved` | `{id,tool,tier,summary}` | 审批卡（diff 在 `approval_required` 里，上限 16KB） |
+| `ask_user` | `{question,options}` | 提问卡（与 `pi-ask-user` 的 schema 对齐） |
+| `todo_updated` | `{tasks,nextId}` | 全量快照（回放/切会话/新建也会发）；UI 据此渲染常驻面板 |
+| `providers_listed` / `providers_error` | `{providers:[{id,name,models}]}` | provider + 模型目录（Rust 从 `assets/models.json` 生成） |
+| `models_listed` / `models_error` | `{provider,models}` / `{provider,error}` | 某个 provider 的模型列表（`__pi_models_refresh`） |
+| `model_applied` | `{provider,modelId,name}` | 模型热切换完成 |
+| `mcp_ready` / `mcp_error` / `mcp_tools_registered` | `{server,tools}` / `{error}` | MCP 连接与工具注册（`mcp__<server>__<tool>`） |
+| `skills_applied` / `agents_md_loaded` | `{count}` / `{bytes}` | 注入物变化（重装 systemPrompt） |
+| `compaction_start` / `compaction_done` | `{tokens,messages}` / `{summarized,kept}` | 自动压缩 |
+| `plan_drafted` / `plan_error`、`btw_thinking` / `btw_answer` / `btw_error` | … | `/plan` · `/btw` 的一次性嵌套 run |
+| `subagent_start` / `subagent_end` | `{name,task}` / `{name}` | 子代理（其工具调用同样走审批） |
+| `goal_auto_continue` / `goal_auto_done` / `goal_error` | … | pi-goal 自动续跑（上限 10 次 / 逐字 `GOAL_COMPLETE` 即停） |
+| `oauth_open_url` / `oauth_progress` / `oauth_done` | … | ⚠️ qjs 路线未接 OAuth，目前只会返回明确错误（见 §1.3） |
+| `boot_error` | `{error}` | boot 失败 / worker 中途死亡 |
 
-（原规划的 `agent:delta` 16ms 合并等随 M3 后续落地。）
+### 1.3 `pi_call_global` 的全局名（契约面）
 
-## 2. Rust ↔ bun 桥（C ABI：`src-tauri/pi_bun/include/pi_bun.h`）
+UI 调 8 个名字；qjs 侧分两类：**目录类**由 Rust 直接作答，**命令类**映射到 guest 的 `__spike.*`。
 
-### 2.1 生命周期
-`pibun_create_runtime(bundle_path, home_dir, tmp_dir, host_port)` → `pibun_start` → 消息循环 → `pibun_stop` / `pibun_destroy`。VM 在专用 worker 线程（skal 模型）。
+| 全局名 | 谁答 | 语义 |
+|--------|------|------|
+| `__pi_providers_list` | Rust | → `providers_listed`（8 家 UI provider + 模型；`google-gemini` 是目录 `google` 的别名） |
+| `__pi_models_refresh(providerId)` | Rust | → `models_listed` / `models_error`。**不联网**（目录是静态数据） |
+| `__pi_model_current()` | Rust | 当前生效模型的 JSON `{provider,id,name}`（provider 是 **UI id**） |
+| `__pi_model_select({provider,modelId})` | Rust → JS `setModel` | 查目录 → 查传输 → 热切换 → `model_applied`。没有传输的家族**明确报错**（不静默换一家） |
+| `__pi_commands()` | JS | 声明了 `command` 的技能 → `[{cmd,name,description}]` |
+| `__pi_skills_apply` | JS `skillsApply` | 重读 registry + 重装 systemPrompt |
+| `__pi_goal_apply` | JS `goalApply` | 重读 goal + 重装 systemPrompt |
+| `__pi_plan_start(obj)` / `__pi_btw_start(q)` | JS `draftPlan` / `askByTheWay` | 一次性只读嵌套 run → `plan_drafted` / `btw_answer` |
+| `__pi_oauth_login` | — | ⛔ 未接：返回明确错误（bun 路线的 OAuth 随之归档） |
 
-### 2.2 hostcall（bun → Rust，当前形态：`fetch http://127.0.0.1:<port>/hostcall`，`{ method, payload }`）
+> 未映射的名字一定返回 `qjs: 未实现的全局调用 <name>` —— 绝不静默成功（曾经的 bug 就是
+> 缺映射时 UI 只看到一句含糊的失败）。
 
-| method | 参数 | 应答 | 说明 |
-|--------|------|------|------|
-| `ping` | 任意 | `{pong, echo, ts}` | 连通性 |
-| `log` | `{ msg }` | `{ok}` | logcat（tag `pibun`） |
-| `tool` | `{ name, args }` | `{ text }` / `{ error }` | read/write/ls/grep/mkdir/edit，jail 到 `{dataDir}/workspace`，D6 无 exec |
-| `native` | `{ name, args }` | `{ text }` / `{ error }` | **M6 系统原生能力**（下表）。与 `tool` 分通道的原因：`tool` 是 workspace jail 内的文件操作，本通道读的是**真实用户数据**（剪贴板/位置/通知），两套信任模型不混。实现：`src-tauri/src/native/mod.rs`；能力↔权限单一真源是同文件的 `CAPABILITIES`。 |
-| `http` | `{ url, method?, headers?, body? }` | `{ status, contentType, body, truncated }` / `{ error }` | agent `fetch` 工具宿主侧（`http_tool.rs`）：reqwest blocking + rustls，30s 超时、响应体 256KB 上限、HTML 转纯文本；SSRF 防护——仅 http/https，拒 loopback/私网/链路本地/`*.local`（已知边界：无 DNS 解析级校验，白名单/审计留策略层） |
-| `creds_get` | `{ provider }` | `{ apiKey }` / `{ error }` | 凭证不出宿主内存，JS 仅注入运行时内存 |
-| `creds_set` | `{ provider, apiKey }` | `{ ok }` / `{ error }` | pi-ai CredentialStore.modify 的宿主后端（OAuth 刷新等写路径；空串即清除） |
-| `fs` | `{ op, path, … }` | `{ ok, value }` / `{ ok, error: { code, message } }` | pi `JsonlSessionRepo` 的 FileSystem 后端；jail 到 `{dataDir}/sessions`；JS 侧虚拟根 `/pi-sessions`（agent-main.js 与 loopback.rs 同款常量）；op ∈ readTextFile/readTextLines/writeFile/appendFile/renameFile/fileInfo/listDir/exists/createDir/remove |
-| `agent_event` | agent 事件 JSON | `{ok}` | Rust sink → `emit("pi-agent-event")` |
-| `approval_request` | `{ tool, args }` | `{ decision: allow }`（policy auto）或 `{ requestId, pending: true }` | M3：mutating 工具（write/edit/mkdir/bash）执行前调用；**kick+resolve 模式**（禁止长挂起 fetch——真机断连/SIGSEGV）：Rust policy 状态机（`{data_dir}/policy.json`，write: ask→auto 经 "always" 持久化）ask 时 emit `approval_required`（含 unified diff，上限 16KB）立即返回 pending；UI 决策经 `approval_respond` 命令 → skal_evaluate 调 `__pi_approval_resolve(id, decision)` 回注；bundle 侧 pending promise 120s 超时自动 deny |
-| `ask_user` | `{ question, context?, options?[{title,description?}], allowMultiple?, allowFreeform?, allowComment? }` | `{ response: {kind:"selection",selections} \| {kind:"freeform",text} \| null, reason?, cancelled? }`（阻塞至用户作答/跳过/超时 600s） | 扩展能力层 #1（pi-ask-user 移动原生化）：emit `ask_user` 事件 → 提问卡；schema 与 npm:pi-ask-user 对齐 |
-| `ask_user_register` | 同 `ask_user` | `{ id, state: "pending"/"cancelled" }`（立即返回） | ask_user 的 kick+事件注入形态（禁长挂起 fetch）；作答经 `ask_user_respond` → `__pi_ask_resolve` 注入 |
-| `mcp_config` | `{}` | `{ servers: [{name, url}] }` | M4：MCP 服务器配置（存 `{data_dir}/mcp.json`）；bundle boot 时逐个 streamable-http 连接，工具注册为 `mcp__<server>__<tool>`（默认 ask 审批） |
-| `goal_get` | `{}` | `{ objective: string \| null }` | 扩展能力层 #3（pi-goal 移动原生化）：boot 注入 systemPrompt "Current goal" 节；持久化 `{data_dir}/goal.json` |
-| `skills_config` | `{}` | `{ skills: [{id,name,description,content,command?}] }` | D12：启用中的技能全集（禁用已由宿主过滤）；bundle 注入 systemPrompt "# Skills" 节；总预算 64KB。frontmatter `command: <slug>` 声明自定义指令（pi TUI /commit-it 语义）：bundle `__pi_prompt` 将 `/slug args` 展开为按技能执行，`__pi_commands()` 供 UI 命令面板 |
-| `oauth_pkce` | `{}` | `{ verifier, challenge }` | OAuth 登录 PKCE 对（宿主生成，嵌入 JSC 的 crypto.subtle 不赌） |
-| `oauth_listen` | `{ port, path }` | `{ ok, port }`（port=0 由 OS 分配，同步 bind） | OAuth 回调捕获：宿主起一次性 HTTP server（127.0.0.1），等首个匹配 GET → 浏览器回成功页 → 完整回调 URL 经 evaluate_blocking 注入 `__pi_oauth_callback(url)`；10min 超时，捕获后自动关停 |
-| `creds_json_get` / `creds_json_set` | `{ provider }` / `{ provider, json }` | `{ json }` / `{ ok }` | OAuth 凭证（pi-ai Credential JSON）存取——`{provider}#oauth` 隔离条目，与 api key 同库不同键；空串即删除 |
+## 2. Rust ↔ agent 运行时（QuickJS）
 
-**Provider/model 目录（AI provider 选择流程）**：provider 注册、模型目录（compat/contextWindow/thinkingLevel）、动态列表刷新（OpenRouter）与凭证解析全部由 bundle 内 `@earendil-works/pi-ai` 的 `createModels` + 内置 provider 工厂承担。UI 可见 4 家：`openai`（openai-responses）/`openrouter`（openai-completions，动态目录）/`deepseek`（openai-completions）/`google-gemini`（openai-completions 兼容层——内置 google provider 驱动 @google/genai，其 node-builtin 导入在嵌入 JSC 上 SIGSEGV，故用 `createProvider` + pi-ai 自带 openai-completions 实现 + Gemini 官方 OpenAI 兼容端点，模型目录数据仍取自 pi-ai 生成的 google catalog）。bundle 全局：`__pi_providers_list`（→ `providers_listed` 事件）/ `__pi_models_refresh(providerId)`（动态 provider 走网络刷新 → `models_listed`/`models_error`）/ `__pi_model_select({provider,modelId})`（热切换主 agent，子 agent 取运行时快照跟随 → `model_applied`）/ `__pi_model_current()`（当前模型 JSON）。
+### 2.1 线程模型
 
-### 2.2.1 `native` 通道的工具集（M6 第一批）
+`Runtime` / `Context`（rquickjs）**不是 `Send`**，所以 guest 独占一个 worker 线程：
 
-实现选型纪律（承 `keepalive.rs` 两次真机事故）：**能用官方 Tauri 插件就用插件**
-—— 插件把 Android JNI / iOS ObjC 管线封在各自原生侧，Rust 只调
-`run_mobile_plugin`，不把宿主线程暴露给原生代码的崩溃。插件覆盖不到的
-（日历/通讯录/照片 → 后续批次）按正规 Tauri 插件形态补，不写裸 JNI。
+```
+Tauri 命令线程 ──mpsc(Job)──► worker 线程：处理命令 → tick（送队列事件 + 泵微任务）→ 投 pi-agent-event
+UI 决策（审批/提问）──► 共享队列（Arc<Mutex<Vec<Value>>>）──► worker 的 tick 经 host.poll() 取走
+```
+
+⚠️ **两条纪律**（各对应一次真机事故）：
+
+1. **绝不在 VM 线程上等 I/O**：审批/提问的决策来自别的线程，只能塞队列，不能直接碰 `Context`。
+2. **任何「边 tick 边等某个事件」的地方都必须转发事件**（`Guest::tick_and_emit`）：
+   自己拿着看而不转发，等于把 UI 正在等的东西吃掉 —— `agent_ready` 被吃掉就是永远停在
+   "agent booting…"，`approval_required` 被吃掉就是审批卡不弹、agent 干等。
+
+### 2.2 `globalThis.host.*`（guest → Rust，进程内直调既有服务）
+
+| 函数 | 参数 | 返回 | 说明 |
+|------|------|------|------|
+| `poll()` | — | `Value[]`（JSON 串） | 取走队列事件（模型增量、审批/提问决策）。**每拍调一次** |
+| `log(line)` | `string` | — | 落 `{data_dir}/pi-agent.log` |
+| `startModel(requestJson)` | `{model,context,options}` | `id` | 起一次模型请求（**异步**：结果经队列的 `model_progress` / `model_done` / `model_error` 回来）。每个 id 对应一个 promise 槽 |
+| `ensureApproval(callId,name,argsJson)` | … | `requestId` | 审批握手第一步：按 `approval.rs` 的分档判定 —— `auto` 档当场放行；`ask` 档 emit `approval_required`（含 diff）并挂起 |
+| `callTool(callId,name,argsJson)` | … | `{text,isError,details?}` | **工具执行的唯一入口**：该 `callId` 必须先完成握手（授权记在 callId 上），与档位无关 —— JS 忘了问、或被改写后故意不问，一律执行不了 |
+| `fs(op, payloadJson)` | … | `{ok,value}` / `{ok,error}` | pi `JsonlSessionRepo` 的 FileSystem 后端（`pi_host_tools::fs_op`，与 bun 路线同一份），jail 到 `{dataDir}/sessions`；JS 侧虚拟根 `/pi-sessions` |
+| `http(payloadJson)` | `{url,method?,headers?,body?,readMode?}` | `{status,headers,contentType,body,truncated}` | 所有出网的宿主侧通道（rustls + 编译进来的 webpki 根；30s 超时、256KB 上限、HTML→文本）。**SSRF 防护**：拒 loopback/私网/链路本地，除非该源在**宿主从 `mcp.json` 读出的授权列表**里（fetch 工具没有授权源，私网照旧拒） |
+| `goalGet()` | — | `string` | 持久目标（`goal.json`，单一真源在 `goal.rs`） |
+| `skillsConfig()` | — | `{skills:[{id,name,description,content,command?}]}` | 启用中的技能全集（禁用已由宿主过滤）；总量预算 64KB |
+| `mcpConfig()` | — | `{servers:[{name,url}]}` | MCP 服务器配置（`mcp.json`） |
+| `creds`（经 Rust 内部服务） | — | — | 凭证**不出宿主内存**：JS 不读 key，模型请求由 Rust 侧带 key 发出 |
+
+### 2.3 guest 暴露的控制面（Rust → JS，`__spike.*`）
+
+`boot(configJson)` / `prompt(text)` / `tick()` / `drain()` / `restore()` / `setModel(json)` /
+`commands()` / `skillsApply()` / `goalApply()` / `draftPlan(obj)` / `askByTheWay(q)` /
+`mcpReconnect()` / `openSession(id)` / `newSession()` / `listSessions()` / `setAutoContinue(b)` /
+`status()` / `toolNames()` / `history()` / `sessionInfo()`。
+
+事件流向是**单向**的：JS 把事件推进 outbox，`drain()` 交给 Rust，Rust emit 成 `pi-agent-event`。
+反向只有 `host.poll()` 取队列（模型结果 + 决策）。
+
+**异步 I/O 的结果不能靠返回值穿过桥**：`repo.list()` 之类是异步的，"started" 是立即返回的
+kick 值，结果走事件。这条形状是 rquickjs 逼出来的（`call::<String>` 不能把 Promise 转成
+String），与 bun 路线在真机上被迫采用的形状一致。
+
+### 2.4 `native` 能力（M6）
+
+实现纪律（承 `keepalive.rs` 两次真机事故）：**能用官方 Tauri 插件就用插件** —— 插件把
+Android JNI / iOS ObjC 管线封在各自原生侧，Rust 只调 `run_mobile_plugin`。
 
 | 工具 | args | 审批 | 实现 |
 |------|------|------|------|
-| `clipboard` | `{ op: "read"\|"write"\|"clear", text? }` | read 自动；write/clear **ask** | `tauri-plugin-clipboard-manager`（mobile 走 `write_text_with_label`，避免 iOS 每次写入弹「已粘贴自…」） |
-| `notify` | `{ title, body? }` | **ask**（可 "always" 记住） | `tauri-plugin-notification`；权限未授时返回可读错误而非静默失败。定时通知归后续「提醒事项」批次（iOS 用 EventKit、Android 用 AlarmManager，语义更贴用户预期） |
-| `location` | `{ highAccuracy? }` | 自动 | `tauri-plugin-geolocation`（`get_current_position`）；返回 JSON |
-| `weather` | `{ latitude?, longitude?, days? }` | 自动 | 无系统 API → Open-Meteo 公共接口（无需 key），纯 Rust HTTP；不给坐标则先取当前位置（隐式依赖定位权限）；WMO code 折成人话 + 紧凑文本（省 token） |
+| `clipboard` | `{op:"read"\|"write"\|"clear",text?}` | read 自动；write/clear **ask** | `tauri-plugin-clipboard-manager` |
+| `notify` | `{title,body?}` | **ask**（可 always） | `tauri-plugin-notification` |
+| `location` | `{highAccuracy?}` | 自动 | `tauri-plugin-geolocation` |
+| `weather` | `{latitude?,longitude?,days?}` | 自动 | 无系统 API → Open-Meteo（纯 Rust HTTP） |
 
-**无权限 API 可预请求的能力**（如剪贴板）在 `CAPABILITIES` 里标 `needs_permission: false`；
-UI 侧的命令：`native_capabilities`（能力清单+权限态）、`native_request_permission`。
+**状态**：能力层（`native::status` / `native::request` + UI 的 `native_capabilities` /
+`native_request_permission`）是活的；但**这 4 个工具还没接进 agent**（`native::tool` 目前无
+调用者）—— bun 路线靠 hostcall 调它，那条链已归档。接壳时把 `native/mod.rs` 的
+`allow(dead_code)` 去掉即可（见 §2.5）。
 
-**主体与授权（D14，2026-09-14 新增）**：hostcall 请求体可选带两个字段，用于区分两种**互斥**的主体——
+### 2.5 尚无线上的能力（"孤儿"清单）
 
-| 字段 | 主体 | 行为 |
-|------|------|------|
-| `__scriptToken` | 脚本（agent 自写的 JS，跑在独立 VM） | 走 `script::authorize` 能力表强制 |
-| `__hostToken` | agent | 校验是否本进程签发 |
-| 都不带 | —— | **现暂按 agent 处理**；`REQUIRE_HOST_TOKEN` 翻 true 后拒（见下） |
+删掉 bun 运行时后，以下实现**保留但暂无调用者**（原来只被 bun 的 hostcall 调），
+各模块用 `#![allow(dead_code)]` + 注释显式标出，接壳时去掉即可：
 
-**⚠️ 为什么 `/hostcall` 端点自身必须认证**：脚本 VM 是**完整 bun VM**，自带原生 `fetch`——它的 `__pi_hostcall` 不可达（spike 已证），但它可以不带 token 直接 POST 到 loopback，而 dispatch 会把「无 token」当作 agent 主体，整套授权就被绕过了。
+| 能力 | 位置 | 缺什么 |
+|------|------|--------|
+| git 工具 6 个（status/diff/log/clone/pull/commit） | `git.rs` | JS 工具壳 |
+| native 4 个工具 | `native/mod.rs` | 同上 |
+| D14 脚本沙箱（授权边界） | `script.rs` | 隔离 runner（bun 的整 VM 隔离随路线归档；qjs 需要一个新方案） |
+| OAuth 订阅登录 | `oauth.rs` | 未接（`__pi_oauth_login` 明确报错） |
 
-**分阶段落地**：`script.rs::REQUIRE_HOST_TOKEN` 现为 `false`（bundle 侧尚未带 `__hostToken`，现在打开会立刻打断现有 agent/probe）。**Phase 3 翻 flag 时必须与 bundle wrapper 改动同一次落地**；在那之前脚本 runner 也不存在，故此洞当前不可利用。
+## 3. 持久化（都在 `{data_dir}/` 下）
 
-**脚本能力清单（唯一真源：`script.rs::GRANTABLE` / `NEVER_GRANTABLE`）**：可授予 `fs:read` `fs:write` `net` `native:{contacts,photos,photos:write,calendar:read,calendar:write,location,clipboard,clipboard:write,notify,weather}`；**永不可授予**（拿到即能冒充 agent 或窃取凭证）`agent_event` `approval_request` `ask_user_register` `creds_*` `oauth_*` `mcp_config` `goal_get` `skills_config` `native_capabilities`，另加 `ping`/`log`（脚本无正当理由）。映射用**白名单**：表外的 method 自动被拒在脚本之外。
+| 路径 | 内容 | 读写方 |
+|------|------|--------|
+| `provider.json` | 默认模型选择 `{provider,modelId}` | `get/set_default_model` → boot 时解析成模型对象 |
+| `policy.json` | 审批基线（`write: ask\|auto`） | `approval.rs` |
+| `mcp.json` | MCP 服务器列表 | `mcp.rs` |
+| `goal.json` | 持久目标 | `goal.rs` |
+| `sessions/*.jsonl` | pi-v4 会话（与 bun 路线同一格式，互通） | `sessions_fs` + pi 的 `JsonlSessionRepo` |
+| `workspace/` | agent 的 jail 根 | `pi-host-tools` |
+| `backups/` | 覆盖写入前的备份（供回滚） | `pi-host-tools` |
+| `pi-agent.log` | 日志（真机排障唯一可靠通道） | `logcat.rs` |
+| `creds`（keyring 或沙箱文件） | provider 凭证 / OAuth JSON | `creds.rs`（JS 不可见） |
 
-### 2.3 事件（Rust → bun，`pibun_post_event`）
-
-| type | Payload | 说明 |
-|------|---------|------|
-| `user_message` | `{ sessionId, text }` | 新用户输入 |
-| `approval_result` | `{ requestId, decision }` | 审批结果回传 |
-| `abort` | `{ sessionId }` | AbortController 语义 |
-| `command` | `{ name, args }` | 模型切换/上下文压缩/新会话 |
-
-### 2.4 bun → Rust 事件（worker 线程异步上报，与 hostcall 分离）
-
-| type | Payload | 说明 |
-|------|---------|------|
-| `agent:delta` / `agent:tool` / `agent:done` | 同 §1.2 | Rust 转手 emit 给 UI |
-| `runtime:log` | `{ level, msg }` | logcat/统一日志 |
-
-## 3. store 键空间（tauri-plugin-store，D13）
-
-| key | 类型 | 默认 | 说明 |
-|-----|------|------|------|
-| `settings.version` | `int` | `1` | 迁移版本字段 |
-| `settings.theme` | `"system"\|"light"\|"dark"` | `"system"` | |
-| `settings.language` | `string` | `"zh-CN"` | |
-| `settings.defaultProvider` / `settings.defaultModel` | `string` | — | 已由 `{data_dir}/provider.json`（`get_default_model`/`set_default_model`）承接，store 键留作迁移兼容 |
-| `policy.default.write` | `"ask"` | `"ask"` | 审批基线（read=auto 固定） |
-| `policy.default.bash` | `"deny"` | `"deny"` | Android 起步为 ask（M4） |
-| `onboarding.completed` | `bool` | `false` | |
+> ⚠️ **`tauri-plugin-store` 目前没有任何读写方**（D13 的 store 键空间没落地，持久化实际都走了
+> 上面的 JSON 文件）。要么落地要么把插件删掉 —— 见 docs/PROGRESS.md 第十五轮。
 
 ## 4. 变更纪律
 
-- C ABI：头文件为唯一真源；`build-libpi-bun.sh` 的符号守卫从头文件解析期望集（skal 实践，防静默缺导出）。
-- IPC/桥：schema 漂移由 `tests/contract` 双侧 fixture 卡死。
-- store：新增 key 必须先登记再使用；结构变更走 `settings.version` 迁移表。
+- **IPC / 宿主通道**：改一侧必须同时改另一侧并同步本文档；`src/lib/events.ts` 是事件类型的
+  单一真源（判别联合，字段与 emit 侧逐项核对过）。
+- **安全边界只在 Rust**：审批分档、jail、SSRF、执行权（callId 握手）都在宿主侧；JS 侧的同名
+  检查只算 UX。判据永远用「真正持有权限的那一侧」。
+- **文档**：架构或运行时变化要更新 README 的架构图 + 本文档的通道表 + PROGRESS 的进展条目。
+
+## 5. 历史（bun 路线，已归档到 `backup/bun`）
+
+换引擎前的桥是 **loopback HTTP**：guest 是完整 bun VM，自带原生 `fetch`，所以宿主能力得开一个
+`127.0.0.1:<随机端口>/hostcall` 端点，JS 用 fetch 打进来；Rust → JS 用 `skal_evaluate` 注入。
+由此派生出两块只在那个形态下成立的东西：
+
+- **`pibun_*` C ABI**（`pi_bun.h`：create_runtime / start / evaluate / free_string / run_script），
+  以及 `build-libpi-bun.sh` 的符号守卫（防静默缺导出）。
+- **D14 的主体与授权**：请求体带 `__scriptToken`（脚本主体，走 `script::authorize` 能力表）或
+  `__hostToken`（agent 主体）。⚠️ 当时那条「**`/hostcall` 端点自身必须认证**」的结论仍然成立，
+  只是对象换成了「谁能在进程内调到 `host.*`」：qjs 路线里 guest 是自己人、脚本 runner 尚未实现，
+  所以当前不可利用 —— **将来实现脚本沙箱时，这条必须先回答**（`script.rs` 的策略层因此保留）。

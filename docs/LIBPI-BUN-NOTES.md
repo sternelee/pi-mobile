@@ -1,5 +1,12 @@
 # libpi-bun 工程笔记（M1 输入，源自 skal 源码研究）
 
+> 📦 **历史存档（2026-09-20）**：本文档记录的是**嵌入式 bun（libskal）路线**的工艺与结论。
+> 运行时已换成 **QuickJS**（见 [PLAN.md](PLAN.md) D18 与 [README](../README.md)），
+> bun 路线的代码完整保留在 `backup/bun` 分支 —— 需要复现那条路时**请切到那个分支**，
+> main 上已无 libskal / WebKit / JSC 相关脚本与产物。
+> 仍然有效的部分：与引擎无关的 iOS 经验（沙箱约束、日志拉取、签名）与「为什么自建引擎很贵」的账。
+
+
 > 2026-09-04 调研记录：直接读取 [skal](https://github.com/skal-multiplatform/skal) 的 `patches/skal_entry.zig`（72KB 入口实现）与 `scripts/skal-link.sh` 总结出的可复刻工艺。M1 执行时以本笔记为起点。
 
 ## 1. 入口形态（skal_entry.zig → 我们的 pi_entry.zig）

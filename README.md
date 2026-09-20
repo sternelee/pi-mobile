@@ -2,49 +2,77 @@
 
 > 把 Pi Coding Agent 装进口袋 —— 手机本地运行的 AI 编程助手，带完整工具调用能力。
 
-Tauri 2 + 嵌入式 Bun (JavaScriptCore) + SolidJS 构建的移动端 Pi Coding Agent，支持 Android / iOS / 桌面三平台。Agent 运行时（`@earendil-works/pi-agent-core` + `pi-ai`）在设备本地的嵌入式 bun 内执行，不依赖远端服务器；工具调用（read / write / ls / grep）经 Rust 宿主 loopback 桥执行，沙箱隔离 + 路径越狱防护。
+Tauri 2 + **QuickJS** + SolidJS 构建的移动端 Pi Coding Agent，支持 Android / iOS / 桌面三平台。
+Agent 运行时（`@earendil-works/pi-agent-core`）在设备本地的 **QuickJS 引擎**内执行，不依赖远端服务器；
+引擎由 `rquickjs` 静态编进 Rust 二进制（**不需要任何外部 .so**）。工具调用（read / write / edit /
+ls / grep / mkdir / rm）由 Rust 实现（`pi-host-tools`），**进程内直接调用**，沙箱隔离 + 路径越狱防护。
+
+## 运行时：QuickJS（D18）
+
+| | 现在（QuickJS） | 曾经（嵌入式 bun） |
+|---|---|---|
+| 引擎 | `rquickjs`（QuickJS 纯 C 库，静态链进二进制） | libskal = zig 交叉编译的 bun + JavaScriptCore |
+| 额外产物 | 无 | **92 MB** `libskal.so`（Android）/ `.dylib`（iOS） |
+| 模型传输 | Rust 按 API 家族实现（见下） | pi-ai 的 JS provider 栈（4 家厂商 SDK） |
+| Agent JS 体积 | 385 KB | 1.4 MB（+ node 内建垫片） |
+| iOS | 不需要 WebKit / JSC / 关 JIT | 需从源码构建 WebKit（~13 GB 磁盘） |
+
+换引擎的原因与代价写在 [docs/PROGRESS.md](docs/PROGRESS.md) 2026-09-19（第十轮）与 2026-09-20
+（第十五轮，bun 运行时已从 main 删除）；**bun 路线完整保留在 `backup/bun` 分支**。
+[skal 工艺与研究笔记](docs/LIBPI-BUN-NOTES.md) 作为历史存档保留。
 
 ## 当前状态
 
 | 里程碑 | 状态 | 内容 |
 |--------|------|------|
 | **M0** 脚手架 | ✅ | Tauri 2 mobile 初始化、插件接线、CI、Android 真机跑通 |
-| **M1** 嵌入式 Bun | ✅ | 预构建 libskal（bun 1.3.14 + JSC）装入 jniLibs，真机验证完整 JS 执行链 |
-| **M2** Agent Bundle | ✅ | pi-agent-core 在嵌入式 bun 内 headless 启动；真机端到端 LLM 对话 + 工具调用 round-trip 验证通过 |
-| **M3** 审批与产品化 | 🔨 | 工具审批（ask/auto/diff/回滚）、会话列表、文件树预览已落地；命令面板、用量可视化进行中 |
-| **M4** MCP + Skills | 📋 | MCP streamable-http 接入、pi-subagents/pi-goal/pi-ask-user 插件能力层、Skills 安装器 |
-| **M5** iOS + 桌面 | 🔄 | iOS 真机已跑通（自测成功：agent boot + tools/skills/providers + 对话）；桌面待启动 |
+| **M1** 嵌入式运行时 | ✅ → 📦 | 原为嵌入 bun 的 libskal（真机跑通）；**已换成 QuickJS（D18）**，bun 路线归档在 `backup/bun` |
+| **M2** Agent 运行时 | ✅ | pi-agent-core 在 QuickJS 内启动；真机端到端 LLM 对话 + 工具调用 round-trip |
+| **M3** 审批与产品化 | 🔨 | 工具审批（ask/auto/diff/回滚）、会话列表与自动恢复、文件树已落地；命令面板、用量可视化进行中 |
+| **M4** MCP + Skills | ✅ | MCP streamable-http 双 transport、skills 注入、goal / todo / subagent / ask_user |
+| **M5** iOS + 桌面 | 🔄 | 引擎侧三端已验证（含 iOS 模拟器真执行）；**换引擎后 App 的 iOS 包尚未真机复验** |
 
-📖 **详细规划见 [docs/PLAN.md](docs/PLAN.md)** —— 架构、设计决策、里程碑路线图。
+📖 详细规划与决策记录见 [docs/PLAN.md](docs/PLAN.md)。
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      SolidJS UI (WebView)                │
-│   聊天流 · 工具审批 · 会话列表 · 文件树 · 命令面板         │
-├────────────────── Tauri IPC ─────────────────────────────┤
-│                    Rust 宿主 (src-tauri)                  │
-│  loopback HTTP · 工具执行 · 凭证 · 会话持久化 · 审批策略   │
-├─────────────────────────────────────────────────────────┤
-│              libpi-bun (嵌入式 bun + JSC)                 │
-│   pi-agent-core Agent · pi-ai streamSimple · host 桥工具  │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    SolidJS UI (WebView)                   │
+│  聊天流 · 工具审批卡 · 会话列表 · 文件树 · 命令面板 · 设置    │
+├───────────── Tauri IPC：39 命令 + pi-agent-event ──────────┤
+│                    Rust 宿主 (src-tauri)                   │
+│  凭证 · 审批策略 · 会话持久化 · 工具执行(pi-host-tools)      │
+│  workspace jail · MCP · skills · goal · native             │
+│  ┌────────────────────────────────────────────────────┐   │
+│  │ qjs/：QuickJS guest（worker 线程）                  │   │
+│  │   pi-agent-core Agent + 纯 JS 插件（385KB bundle）   │   │
+│  │   host.* 直接调上面那些服务（进程内，无 HTTP 桥）      │   │
+│  │   catalog.rs 目录 · openai_responses.rs 传输         │   │
+│  └────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-- **Agent 运行时**：`libpi-bun`（skal 工艺：zig 交叉编译 bun 为平台原生库），Android 用 `.so`（jniLibs dlopen），iOS 用 `.dylib`（Embed Frameworks + `@rpath` dlopen）
-- **JS↔Rust 桥**：bun 原生 fetch → loopback HTTP（127.0.0.1 随机端口）→ Rust hostcall 分发；Rust→JS 经 `skal_evaluate` 事件注入
-- **工具沙箱**：read / write / ls / grep 由 Rust 实现，路径越狱防护（jail 到 `app_data/workspace`），无 exec（D6 安全决策）
-- **LLM Provider**：经 `@earendil-works/pi-ai` 统一分发，支持 Anthropic / OpenAI / DeepSeek 等 OpenAI-compatible API
+- **JS↔Rust 桥**：guest 通过 `globalThis.host.*` **进程内**调用既有服务（审批走 `approval.rs`、
+  提问走 `ask_user.rs`、工具走 `pi_host_tools`、会话 fs 走同一份 `sessions_fs`）。事件由
+  pi-agent-core **原样转发**成 `pi-agent-event`，UI 认的就是那套形状。
+- **执行权在 Rust**：工具执行的唯一入口要求该 `callId` 先完成审批握手 —— JS 忘了问、或被改写后
+  故意不问，一律执行不了（审批分档与 diff 也在 Rust）。
+- **模型传输在 Rust**（换引擎的真实代价）：按 `model.api` 分派家族 ——
+  `openai-responses`（openai / xai / opencode…）与 `openai-completions`（目前仅 DeepSeek 的
+  compat 档案）。未实现的家族会**明确报错**，不会静默换一家去发。
+  provider / 模型目录是 pi-ai 的目录**当数据**搬进 `src-tauri/assets/models.json`，
+  事件面与传输层共用同一份。
+- **工具沙箱**：文件工具由 Rust 实现，jail 到 `app_data/workspace`，无 exec（D6）。
 
 ## 开发环境
 
 ### 前置依赖
 
-- [Bun](https://bun.sh) 1.3+ — JS 工具链 & 运行时
+- [Bun](https://bun.sh) 1.3+ — JS 工具链（构建 agent bundle、跑前端、Tauri CLI 入口）
 - [Rust](https://rustup.rs) — stable，附 `aarch64-linux-android` target
 - [Node.js](https://nodejs.org) 20+ — Tauri CLI 依赖
-- **Android**：Android Studio + NDK r28+ + platform-tools（adb）
+- **Android**：Android Studio + NDK r28 + platform-tools（adb）
 - **iOS**（可选）：Xcode 15+（完整安装，需 iPhoneOS SDK）
 - [biome](https://biomejs.dev) — 代码检查（已集成于 CI）
 
@@ -56,148 +84,121 @@ cd pi-mobile
 bun install
 ```
 
-### Android 真机开发
+### 构建 agent bundle（任何 cargo 构建之前都要先跑）
 
 ```bash
-# 1. 下载预构建 libskal（嵌入式 bun 运行时，~92MB）
-bun run scripts/fetch-libpi-bun.sh
+bun run bundle:build          # = bash pi-bundle/build.sh
+```
 
-# 2. 构建 agent bundle
-bash pi-bundle/build.sh
+产物 `pi-bundle/dist/agent-qjs.js` 是 **gitignore 的**，而 `src-tauri/src/qjs/guest.rs` 用
+`include_str!` 把它编进二进制 —— 文件不存在就编译不过。所以它被挂进 `tauri.conf.json` 的
+`beforeDevCommand` / `beforeBuildCommand`（本地开发不必记这条纪律），CI 的各 job 里也显式跑一次。
 
-# 3. 启动 dev（自动编译 Rust → Gradle 构建 APK → 安装到设备）
-#    ⚠️ 手机与电脑需同一 Wi-Fi（关闭 AP 隔离），tauri-cli 用 LAN IP 做 devUrl
+### Android
+
+```bash
+# 直接构建 release APK（不需要任何前置下载 —— 引擎是静态链接的 QuickJS）
+./scripts/android-build.sh --target aarch64
+# → src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk（~40 MB）
+
+# dev（自动编译 Rust → Gradle 打包 → 装到设备）
+# ⚠️ 手机与电脑需同一 Wi-Fi（关闭 AP 隔离），tauri-cli 用 LAN IP 做 devUrl
 TAURI_DEV_HOST=<your-lan-ip> bun tauri android dev
 ```
 
-> **网络注意**：Honor/部分路由器默认开启 AP 隔离，导致手机 ping 不通电脑。需关闭 AP 隔离或改用手机热点。打包 APK 模式（`bun tauri android build --debug`）无此依赖但 devUrl 仍会烘焙 LAN IP。
+> **必须走 `scripts/android-build.sh`**，不能裸 `bun tauri android build`：依赖树里有 vendored
+> OpenSSL，它调 `getentropy()`（API 28 才有），而 Tauri 传给 `cc` 的 API level 低于 minSdk。
+> 脚本从 `build.gradle.kts` 读 minSdk 来选 NDK 包装器 —— 两者不一致时会「编译过、运行挂」。
+> 同样地，**Android 上任何 cargo 命令都需要那组 NDK env**（脚本头部有四个 export）。
 
-### iOS 开发
+> **网络注意**：Honor/部分路由器默认开启 AP 隔离，导致手机 ping 不通电脑。需关闭 AP 隔离或改用手机热点。
 
-**真机（arm64 device）—— 已跑通**。三个脚本串起整条链：
+### iOS
 
 ```bash
-# 0. 前置：cmake + ninja + llvm@21（brew），完整 Xcode（需 iPhoneOS SDK）
-brew install cmake ninja llvm@21
-
-# 1. 克隆两个 fork（WebKit 自动走 gh-proxy 镜像；约 10 分钟）
-bun run scripts/setup-bun-fork.sh
-
-# 2. 构建 JSC for iOS → build/skal-jsc-ios/lib/libJavaScriptCore.a（~5 分钟）
-bash scripts/build-jsc-ios.sh
-
-# 3. 构建 bun iOS objects（~8 分钟；最后 link 步骤会失败，属预期）
-cd vendor/bun
-PATH="$HOME/.cargo/bin:$PATH" bun scripts/build.ts \
-    --profile=ios-release --build-dir=build/ios-release --configure-only
-PATH="$HOME/.cargo/bin:$PATH" ninja -C build/ios-release || true
-cd ../..
-
-# 4. 链接出 libskal.dylib（arm64-apple-ios16.0）
-bash scripts/link-skal-ios.sh
-
-# 5. 嵌入并出 ipa
 bun tauri ios build --debug
 # → src-tauri/gen/apple/build/arm64/pi-mobile.ipa
 ```
 
-> **为什么第 3 步的 link 会失败**：bun 自带的 `bun-profile` link 规则生成的
-> `bun-profile.rsp` 里没有 `-target`/`-isysroot`，会按 macOS 目标去链接 iOS
-> object（`building for 'macOS', but linking in object file built for 'iOS'`）。
-> 所有 `.o` 都是正确的，只有这最后一步不可用 —— 所以第 4 步用独立脚本取
-> `.o` 自己链接，这也是 skal 上游的做法。
-
-> **磁盘**：WebKit 源码 ~8GB（shallow）+ JSC 构建目录 ~3GB + bun 构建目录 ~2GB
-> ≈ 13GB。清理：`rm -rf vendor/WebKit build/skal-jsc-ios vendor/bun/build/ios-release`。
-
-> **iOS 无 JIT（合规硬约束）**：Apple 不允许第三方 app 拥有可写可执行内存。
-> JSC 的 `ExecutableAllocator` 在真机上拿不到 exec 页。我们在
-> `workerMain` 里于 `bun.jsc.initialize()` 之前
-> `setenv("JavaScriptCoreUseJIT", "0", 1)` —— WebKit 的
-> `VM::enableAssembler` 经 `getenv` 读这个变量，于是
-> `VM::computeCanUseJIT()` 得出 `canUseJIT=false`，
-> `Options::useJIT()` 被置 false，全程解释器执行。
->
-> 两个坑（已在 `patches/pi_entry.zig` 注释里详述）：① 必须用 `getenv`
-> 路径，`BUN_JSC_*` 前缀那套无效（Zig 的 `std.os.environ` 是启动时快照，
-> 而 `JSCInitialize` 读的正是它）；② 时序——`canUseAssembler()` 的结果
-> 被 `std::call_once` 缓存，必须在 `bun.jsc.initialize()` 前 setenv。
->
-> 编译期仍构建 JIT 代码（DOMJIT/DFG 类型依赖无法剥离），与 bun 的
-> Android 预构建同策略，不执行 —— React Native 同款先例，App Store 合规。
-
-> **iOS 网络（必读）**：bun 默认 DNS 后端选取只给 `.mac/.windows` 用系统
-> resolver，其余（含 `.ios`）落到 c-ares —— 但 c-ares 需要 `/etc/resolv.conf`，
-> iOS app 沙箱读不到，于是去连 `127.0.0.1:53` 并报
-> `DNSException: getaddrinfo ECONNREFUSED`（真机实测），所有外网请求全挂。
-> 修法在 `patches/bun-dns-ios-system.patch`（把 `.ios` 并入 `.system`），
-> 由 `scripts/setup-bun-fork.sh` 自动 `git apply`。**必须应用，否则构建出来的
-> 真机包无法访问任何 LLM API。**
-
-**模拟器**：走预构建 `libskal-iossim-arm64.dylib`（~63MB，无需编译 WebKit），
-存放于 `src-tauri/gen/apple/Externals/arm64/libskal.dylib` 即可。
-
-> **真机排障**：iOS 上 `println!` 进统一日志，但 `devicectl` 不转 stdout、
-> `idevicesyslog` 在 CoreDevice 隧道占用 uSMux 后也连不上设备。所以 `logcat`
-> 同时写 `<HOME>/Documents/pi-bun.log`（Zig 侧 `trace()` 也写同一文件），拉回：
-> ```bash
-> xcrun devicectl device copy from --device <UDID> \
->   --domain-type appDataContainer --domain-identifier com.sternelee.pi-mobile \
->   --source Documents/pi-bun.log --destination /tmp/pi-bun.log
-> ```
+引擎是 QuickJS，静态链接 —— **不需要构建 WebKit、不需要 libskal.dylib、也没有 JIT 要关**
+（iOS 的 W^X 限制对纯解释器天然满足）。Xcode 工程与 `project.yml` 里那条 libskal embed
+已随 bun 路线删除。
 
 > **签名**：`project.yml` 的 `DEVELOPMENT_TEAM` 必须匹配 Xcode 里已登录的账号
 > （查 `defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier`）。
-> 注意开发证书 CN 括号里的编号与证书 OU 可能不一致 —— 以 Xcode 账号列表为准。
-> `libskal.dylib` 无需手工签名，Xcode 的 Embed Frameworks 阶段会自动签。
 
-## 构建 agent bundle
+> **真机排障**：iOS 上 `println!` 进统一日志，但 `devicectl` 不转 stdout；Android 上部分 ROM
+> 会加密/丢弃 logcat。所以日志**同时写文件** `<data_dir>/pi-agent.log`，拉回：
+> ```bash
+> # iOS
+> xcrun devicectl device copy from --device <UDID> \
+>   --domain-type appDataContainer --domain-identifier com.sternelee.pi-mobile \
+>   --source Library/Application\ Support/com.sternelee.pi-mobile/pi-agent.log --destination /tmp/pi-agent.log
+> # Android（debug 包）
+> adb shell run-as com.sternelee.pi_mobile cat files/pi-agent.log
+> ```
 
-agent bundle 是嵌入 `include_str!` 的单文件 JS（~1.4MB），由 bun build 产出后经 build.sh 后处理（`import.meta` 补丁 + 静态 import 改写为 `__require` shim），确保在 skal 的 classic-script 求值模式下不报 SyntaxError。
+### 桌面（开发调试宿主）
 
 ```bash
-bash pi-bundle/build.sh
-# 验证：bun -e 'await import("./pi-bundle/dist/agent.js"); console.log(globalThis.__pi_ready)'
+bun tauri dev            # 或 bun tauri build --no-bundle
 ```
+
+## 测试
+
+```bash
+cd src-tauri && cargo test        # 单元测试
+bash scripts/qjs-tests.sh         # qjs 集成测试（离线；一个进程一个，见脚本头注释）
+QJS_LIVE=1 bash scripts/qjs-tests.sh   # 再加真 DeepSeek 一整轮（要 key）
+```
+
+> `cargo test` **不覆盖 qjs 的 boot 路径**：那几个集成测试都带 `#[ignore]`（`agent_init` 的
+> HOST/WORKER 是 `OnceLock`，一个进程只能 boot 一次）。而 qjs 出过的两个 bug（启动白等 30 s、
+> UI 永远停在 "agent booting…"）恰好只有它们能发现 —— 所以有 `scripts/qjs-tests.sh` 这条命令，
+> CI 也显式跑它。
 
 ## 项目结构
 
 ```
 pi-mobile/
-├── src/                      # SolidJS 前端（聊天 UI · 审批 · 文件树 · 命令面板）
+├── src/                       # SolidJS 前端（聊天 UI · 审批 · 文件树 · 命令面板）
 ├── src-tauri/
-│   ├── src/                  # Rust 宿主（pi_bun · loopback · approval · sessions · creds · mcp · skills）
-│   ├── gen/android/          # Tauri Android 工程
-│   └── gen/apple/            # Tauri iOS 工程
+│   ├── src/
+│   │   ├── qjs/               # QuickJS 运行时：mod（worker/命令面）· guest（host.* 挂载）
+│   │   │                      #   catalog.rs（provider/模型目录）· openai_responses.rs（传输）
+│   │   │                      #   deepseek.rs（openai-completions 的 DeepSeek compat 档案）
+│   │   ├── workspace.rs       # 宿主路径登记 + 越狱判定 + UI 侧文件操作
+│   │   ├── logcat.rs          # 日志汇（文件 + 平台通道）
+│   │   └── …                  # approval · sessions · creds · mcp · skills · goal · native · preview
+│   ├── assets/models.json     # pi-ai 目录（数据；由 scripts/gen-models-catalog.py 生成）
+│   ├── gen/android/           # Tauri Android 工程
+│   └── gen/apple/             # Tauri iOS 工程
 ├── pi-bundle/
-│   ├── agent-main.js         # Agent 入口（pi-agent-core + host 桥工具 + streamFn）
-│   ├── build.sh              # bun build + 后处理补丁管线
-│   └── dist/agent.js         # 构建产物（include_str! 嵌入 Rust）
+│   ├── agent-qjs.js           # Agent 入口（pi-agent-core + 纯 JS 插件 + host 桥工具）
+│   ├── build.sh               # bun build --format=iife（classic script，两道 grep 把关）
+│   └── dist/agent-qjs.js      # 构建产物（gitignored，include_str! 嵌入 Rust）
+├── crates/pi-host-tools/      # 工具实现 + jail + 会话 fs + fetch（宿主无关，可复用）
+├── spikes/quickjs-agent/      # 换引擎的 spike（QuickJS 路线从这里长出来）
 ├── scripts/
-│   ├── fetch-libpi-bun.sh    # 下载预构建 libskal（Android arm64，~92MB）
-│   ├── setup-bun-fork.sh     # vendor bun fork + WebKit（从源码构建用）
-│   └── build-libpi-bun.sh    # 从源码构建 libpi-bun（ICU + JSC + bun 交叉编译）
-├── docs/
-│   ├── PLAN.md               # 架构方案与里程碑路线图
-│   ├── PROGRESS.md           # 开发进度日志（倒序）
-│   ├── CONTRACTS.md          # UI↔Rust IPC 契约
-│   ├── LIBPI-BUN-NOTES.md    # skal 工艺研究笔记
-│   └── POCKET-PI-NOTES.md    # pocket-pi / PocketJS 调研笔记
-└── vendor/                   # gitignored：bun fork + WebKit 源码
+│   ├── android-build.sh       # NDK 工具链封装（Android 构建的唯一正确入口）
+│   ├── qjs-tests.sh           # qjs 集成测试（一个进程一个）
+│   └── gen-models-catalog.py  # 从 pi-ai 生成 assets/models.json
+└── docs/
 ```
 
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
-| [docs/PLAN.md](docs/PLAN.md) | 架构设计、技术决策、里程碑路线图（M0–M5） |
+| [docs/PLAN.md](docs/PLAN.md) | 架构设计、技术决策（D1–D18）、里程碑路线图 —— **含已作废的 D1 记录，现状见 D18** |
 | [docs/PROGRESS.md](docs/PROGRESS.md) | 开发进度日志（倒序，含真机调试踩坑记录） |
-| [docs/CONTRACTS.md](docs/CONTRACTS.md) | UI↔Rust IPC 契约（commands / events / hostcall） |
-| [docs/LIBPI-BUN-NOTES.md](docs/LIBPI-BUN-NOTES.md) | skal 工艺研究、JSC ABI、构建链接、iOS 合规路径 |
-| [docs/POCKET-PI-NOTES.md](docs/POCKET-PI-NOTES.md) | pocket-pi / PocketJS 调研：薄 JS + 厚原生运行时方案、移动端可行性（D1 再评估输入） |
+| [docs/CONTRACTS.md](docs/CONTRACTS.md) | UI↔Rust IPC 契约（commands / events / 宿主通道） |
+| [docs/LIBPI-BUN-NOTES.md](docs/LIBPI-BUN-NOTES.md) | 📦 历史存档：skal / JSC 工艺、构建链接、iOS 合规路径（bun 路线） |
+| [docs/POCKET-PI-NOTES.md](docs/POCKET-PI-NOTES.md) | 📦 历史存档：pocket-pi / PocketJS 调研（换引擎决策的输入） |
 
 ## 致谢
 
-- [skal-multiplatform/skal](https://github.com/skal-multiplatform/skal) — bun + JavaScriptCore 经 zig 交叉编译为原生库的工艺先驱
 - [earendil-works/pi](https://github.com/earendil-works/pi) — Pi Agent 核心（pi-ai 多 Provider LLM + pi-agent-core agent 运行时）
+- [QuickJS](https://bellard.org/quickjs/) / [rquickjs](https://github.com/DelSkayn/rquickjs) — 嵌入式 JS 引擎
 - [Tauri](https://tauri.app) — 跨平台原生 App 框架
+- [skal-multiplatform/skal](https://github.com/skal-multiplatform/skal) — 📦 曾经的运行时工艺来源（见 LIBPI-BUN-NOTES）
