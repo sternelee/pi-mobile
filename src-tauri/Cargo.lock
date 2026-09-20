@@ -3229,7 +3229,6 @@ dependencies = [
  "filetime",
  "git2",
  "keyring",
- "libloading 0.8.9",
  "pi-host-tools",
  "rand 0.10.2",
  "regex",

@@ -2,8 +2,8 @@ name: pi-mobile
 options:
   bundleIdPrefix: com.sternelee.pi-mobile
   deploymentTarget:
-    # 16.0: libskal.dylib（JSC 从源码构建）的 LC_BUILD_VERSION minos。
-    # 低于此版本链接器告警，且嵌入式运行时依赖 iOS 16 的 JSC/WTF 行为。
+    # 16.0：Tauri / WebKit 侧的基线（曾由 libskal.dylib 的 minos 决定，那个
+    # 嵌入式 bun 运行时已随 backup/bun 归档 —— 现在的引擎是 QuickJS，静态编进来）。
     iOS: 16.0
 fileGroups: [../../src]
 configs:
@@ -33,8 +33,8 @@ targets:
     sources:
       - path: Sources
       - path: Assets.xcassets
-      # Externals 只作为搜索路径（LIBRARY_SEARCH_PATHS）；libskal.dylib 必须
-      # 走 Frameworks 依赖的 Embed 阶段，不能被当普通资源拷贝。
+      # Externals 只作为搜索路径（LIBRARY_SEARCH_PATHS）。曾经这里还要 embed
+      # libskal.dylib（嵌入式 bun 运行时），已随 backup/bun 归档删除。
       - path: Externals
         excludes:
           - "**/*.dylib"
@@ -98,8 +98,6 @@ targets:
     dependencies:
       - framework: libapp.a
         embed: false
-      - framework: Externals/arm64/libskal.dylib
-        embed: true
       - sdk: CoreGraphics.framework
       - sdk: Metal.framework
       - sdk: MetalKit.framework

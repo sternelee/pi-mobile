@@ -1,4 +1,9 @@
-//! qjs —— **QuickJS 版 agent 运行时**（B 路线），与 `pi_bun`（bun/skal，A 路线）并存。
+//! qjs —— **agent 运行时**（QuickJS）。
+//!
+//! 曾经有第二条路线 `pi_bun`（bun/skal，靠 dlopen 92MB 的 libskal）：它已随
+//! `backup/bun` 分支归档并从 main 删除（见 docs/PROGRESS.md 第十五轮）。
+//! 所以这里不再有「运行时开关」：`PI_AGENT_RUNTIME` / `runtime.txt` /
+//! `PI_AGENT_RUNTIME_DEFAULT` 三个入口一并作废。
 //!
 //! 目的：把底层 JS 引擎从 bun 换成 QuickJS，**UI 与命令契约一行不改**。
 //! 分工：
@@ -43,46 +48,6 @@ pub struct Config {
 pub enum StreamEvent {
     Thinking(String),
     Text(String),
-}
-
-/// 开关：`PI_AGENT_RUNTIME` 环境变量 或 `{data_dir}/runtime.txt`（内容 `qjs`）。
-/// 默认 `bun` —— 迁移期保持默认不变，等 B 路线在真机上过了同样几轮再翻转。
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Runtime {
-    Bun,
-    QuickJs,
-}
-
-/// 由 `pi_bun::agent_init` 在启动时调用一次，决议本次运行用哪个后端。
-pub fn resolve_runtime(data_dir: &str) -> Runtime {
-    let raw = std::env::var("PI_AGENT_RUNTIME")
-        .ok()
-        .or_else(|| std::fs::read_to_string(format!("{data_dir}/runtime.txt")).ok())
-        .unwrap_or_default();
-    // 三级优先级：显式环境变量 / runtime.txt → 编译期默认 → bun。
-    // 编译期默认存在的意义：打一个「默认走 QuickJS」的包做真机验证
-    // （`PI_AGENT_RUNTIME_DEFAULT=qjs bun tauri android build`），
-    // 而不必把仓库默认值也翻过去 —— 迁移期两条路都还要能跑。
-    let effective = if raw.trim().is_empty() {
-        option_env!("PI_AGENT_RUNTIME_DEFAULT")
-            .unwrap_or("bun")
-            .to_string()
-    } else {
-        raw
-    };
-    let runtime = if effective.trim().eq_ignore_ascii_case("qjs") {
-        Runtime::QuickJs
-    } else {
-        Runtime::Bun
-    };
-    RUNTIME.set(runtime).ok();
-    runtime
-}
-
-pub fn is_quickjs() -> bool {
-    matches!(RUNTIME.get(), Some(Runtime::QuickJs))
 }
 
 /// 事件汇（与 loopback/approval/ask_user 同款：lib.rs 在 setup 里注册）。
@@ -148,9 +113,9 @@ where
         .map_err(|_| "qjs worker timeout".to_string())?
 }
 
-/// 由 `pi_bun::agent_init` 在选中 qjs 时调用。
+/// 由 lib.rs 的 `agent_init` 命令调用（进程内只调一次）。
 pub fn agent_init(data_dir: &str) -> Result<(), String> {
-    crate::pi_bun::set_log_dir(data_dir);
+    crate::logcat::set_log_dir(data_dir);
     crate::git::init_tls(data_dir);
 
     // ⚠️ 必须先登记宿主路径：`lib.rs` 里那些 **UI 侧命令**（workspace_tree /
@@ -158,7 +123,7 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     // OnceLock 的根目录，而 agent 自己的工具读的是下面 `Host.workspace`。两者都在，
     // 只登记其中一套时的症状很迷惑：**agent 读写正常、UI 报
     // 「workspace_tree failed: workspace not configured」**（真机上就是这么碰到的）。
-    // 所以建目录与登记都走 `pi_bun::configure_host_paths`（bun 路线也调同一个）。
+    // 所以建目录与登记都走 `workspace::configure_paths`（唯一入口）。
     crate::workspace::configure_paths(data_dir)?;
     let workspace = format!("{data_dir}/workspace");
     let sessions_root = format!("{data_dir}/sessions");
@@ -300,7 +265,7 @@ fn worker_main(
     }
 }
 
-// ── 与 pi_bun 同名的命令面（pi_bun 按运行时开关分派到这里）────────────────
+// ── 命令面（lib.rs 的 Tauri 命令直达这里）──────────────────────────────
 pub fn agent_prompt(text: &str) -> Result<String, String> {
     send(|reply| Job::Prompt(text.to_string(), reply))
 }

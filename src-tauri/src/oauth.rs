@@ -13,6 +13,13 @@
 //! 生命周期：`listen(port, path)` 阻塞等待一次回调（10 分钟超时），返回前
 //! 自动关停 server；重复 listen 同端口由 bind 失败自然拒绝。
 
+//! ⚠️ 本模块里**工具实现的那半目前没有消费者**（bun 的 hostcall 已随
+//! `backup/bun` 归档并从 main 删除，qjs 路线还没接这一类工具的 JS 壳）。
+//! 保留实现与测试是刻意的：它正是 docs/PROGRESS.md「qjs 还没接的」那张清单要用的东西
+//! （接上壳时把本文件的 `allow(dead_code)` 去掉即可，顺便就能看出还差哪几个）。
+//! 所以这里显式 allow 掉「暂时无人调用」，而不是删代码或留一堆 warn。
+#![allow(dead_code)]
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::Duration;

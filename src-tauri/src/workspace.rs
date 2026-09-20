@@ -51,11 +51,6 @@ pub(crate) fn workspace_dir() -> Option<String> {
     WORKSPACE_DIR.get().cloned()
 }
 
-/// sessions 根目录（sessions 索引的默认位置）。
-pub(crate) fn sessions_dir() -> Option<String> {
-    SESSIONS_DIR.get().cloned()
-}
-
 /// 路径越狱防护：限制在 workspace 内，拒绝绝对路径与 `..`。
 pub(crate) fn jail_path(p: &str) -> Result<std::path::PathBuf, String> {
     let root = WORKSPACE_DIR.get().ok_or("workspace not configured")?;

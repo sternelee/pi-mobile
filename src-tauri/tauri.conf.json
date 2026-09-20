@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.sternelee.pi-mobile",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run bundle:build && bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run bundle:build && bun run build",
     "frontendDist": "../dist"
   },
   "app": {

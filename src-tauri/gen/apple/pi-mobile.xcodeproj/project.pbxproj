@@ -13,13 +13,11 @@
 		38DDD0FF62CAFA81F44097EC /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = C1EC51D6975A605CB350B34A /* LaunchScreen.storyboard */; };
 		478DD5BBDFC46FAE04E2DBC9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9012364E631C3BA6C40FA97D /* Assets.xcassets */; };
 		6992EC7EBF03CF960A201BE6 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 30AB6E6287991F3C25BEF5A4 /* assets */; };
-		95EEC7C79EBCA48471227519 /* libskal.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 6C68CDE267E979A20D637DAF /* libskal.dylib */; };
 		A0E6B792E1EE1B66E1F79C7C /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DFE1DEC92CAB2543327812AC /* WebKit.framework */; };
 		A78F661C1F890AE5545121B6 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7B136146BB462464C2152FE5 /* Metal.framework */; };
 		AB45DBCA33CDB8E62F415909 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6B770851F644DE547BFC6315 /* QuartzCore.framework */; };
 		B6C7CA2C658E041790781680 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 7F84A84CF4784E4E27DC8612 /* main.mm */; };
 		BDA8F527E3DACEF2F8DCFD07 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C37C1EF8746291071E4017AA /* MetalKit.framework */; };
-		E64843A7B58F59195E9F7B11 /* libskal.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 6C68CDE267E979A20D637DAF /* libskal.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		F4C218F26ED018106C4C49B5 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3744460B6485D94C8CD7236F /* UIKit.framework */; };
 		F7A9E713E05D930018D0FC5F /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2C283D99734958118B0FC72B /* CoreGraphics.framework */; };
 /* End PBXBuildFile section */
@@ -31,7 +29,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				E64843A7B58F59195E9F7B11 /* libskal.dylib in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -49,7 +46,6 @@
 		3A51FE8649AD624FA958F832 /* keepalive.rs */ = {isa = PBXFileReference; path = keepalive.rs; sourceTree = "<group>"; };
 		59001809BE0FABB4526C70D2 /* mod.rs */ = {isa = PBXFileReference; path = mod.rs; sourceTree = "<group>"; };
 		6B770851F644DE547BFC6315 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
-		6C68CDE267E979A20D637DAF /* libskal.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libskal.dylib; path = Externals/arm64/libskal.dylib; sourceTree = "<group>"; };
 		79197D8FB78F1E753BAAA114 /* ask_user.rs */ = {isa = PBXFileReference; path = ask_user.rs; sourceTree = "<group>"; };
 		792227D572B7AE4C88B8FCB9 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
 		7B136146BB462464C2152FE5 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
@@ -80,7 +76,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				247A38395A1217EDA78C3D30 /* libapp.a in Frameworks */,
-				95EEC7C79EBCA48471227519 /* libskal.dylib in Frameworks */,
 				F7A9E713E05D930018D0FC5F /* CoreGraphics.framework in Frameworks */,
 				A78F661C1F890AE5545121B6 /* Metal.framework in Frameworks */,
 				BDA8F527E3DACEF2F8DCFD07 /* MetalKit.framework in Frameworks */,
@@ -210,7 +205,6 @@
 			children = (
 				2C283D99734958118B0FC72B /* CoreGraphics.framework */,
 				B1AEB3CB5C4CA9DB245C14AF /* libapp.a */,
-				6C68CDE267E979A20D637DAF /* libskal.dylib */,
 				7B136146BB462464C2152FE5 /* Metal.framework */,
 				C37C1EF8746291071E4017AA /* MetalKit.framework */,
 				6B770851F644DE547BFC6315 /* QuartzCore.framework */,

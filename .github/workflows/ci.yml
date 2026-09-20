@@ -28,6 +28,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # pi-bundle/dist/ 是 gitignore 的，而 guest.rs 用 include_str! 编它 ——
+      # 任何 cargo 步骤之前都必须先出 bundle，否则新 clone 直接编译失败。
+      - name: build agent bundle
+        run: bun run bundle:build
       - name: cargo fmt
         run: cargo fmt --check
         working-directory: src-tauri
@@ -37,6 +43,10 @@ jobs:
       - name: cargo test
         run: cargo test
         working-directory: src-tauri
+      - name: qjs integration (offline)
+        # 这三个测试都带 #[ignore]（agent_init 是 OnceLock：一个进程只能 boot 一次），
+        # 而 qjs 出过的两个 bug 恰好只能被它们发现 —— 所以必须显式跑（见脚本头注释）。
+        run: bash scripts/qjs-tests.sh
 
   android-cross-check:
     # M0 骨架：只做 aarch64-android 交叉编译检查（真机/模拟器 E2E 后续加）
@@ -49,6 +59,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # pi-bundle/dist/ 是 gitignore 的，而 guest.rs 用 include_str! 编它 ——
+      # 任何 cargo 步骤之前都必须先出 bundle，否则新 clone 直接编译失败。
+      - name: build agent bundle
+        run: bun run bundle:build
       - name: install NDK toolchain
         run: |
           ANDROID_HOME=$HOME/android-sdk
@@ -77,4 +93,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: bun install --frozen-lockfile
+      # beforeBuildCommand 里已经有 bundle:build；这里显式再跑一次是给
+      # 「构建失败时能一眼看出是 bundle 还是 tauri」用的（脚本幂等，0.1s）。
+      - run: bun run bundle:build
       - run: bun tauri build --no-bundle

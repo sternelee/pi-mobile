@@ -10,3 +10,7 @@ target/
 crates/*/Cargo.lock
 # macOS
 .DS_Store
+
+# pi CLI 在项目目录下写的本机状态（remote-pi 配对、默认模型选择等）——
+# 与本项目无关，且含机器相关的配对信息。曾经被 `git add -A` 误提交过一次。
+.pi/

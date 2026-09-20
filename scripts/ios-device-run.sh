@@ -2,9 +2,10 @@
 # ios-device-run.sh — 把已构建的 iOS app 装到真机并带控制台启动。
 #
 # 前置：
-#   1. bash scripts/build-jsc-ios.sh && bun … ios-release && bash scripts/link-skal-ios.sh
-#   2. bun tauri ios build --debug  → src-tauri/gen/apple/build/arm64/pi-mobile.ipa
-#   3. iPhone 用 USB 连接、解锁、信任本机（首次需在手机端点「信任」）
+#   1. bun tauri ios build --debug  → src-tauri/gen/apple/build/arm64/pi-mobile.ipa
+#      （引擎是 QuickJS，静态编进二进制 —— 不需要再准备 libskal.dylib；
+#        bun 路线的 build-jsc-ios.sh / link-skal-ios.sh 已随 backup/bun 归档）
+#   2. iPhone 用 USB 连接、解锁、信任本机（首次需在手机端点「信任」）
 #
 # 用法:
 #   scripts/ios-device-run.sh                 # 自动挑第一台可用设备

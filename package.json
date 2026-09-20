@@ -11,7 +11,8 @@
     "tauri": "tauri",
     "lint": "biome check src",
     "lint:fix": "biome check --write src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bundle:build": "bash pi-bundle/build.sh"
   },
   "license": "MIT",
   "dependencies": {

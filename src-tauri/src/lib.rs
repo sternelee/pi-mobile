@@ -10,7 +10,6 @@ mod logcat;
 mod mcp;
 mod native;
 mod oauth;
-mod pi_bun;
 mod preview;
 mod qjs;
 mod script;
@@ -21,16 +20,6 @@ mod workspace;
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
-/// M1 PoC：在嵌入式 bun 运行时内执行 pi-bundle/hello.js。
-/// skal_evaluate 是同步阻塞调用 —— 必须 off main thread。
-#[tauri::command]
-async fn pi_bun_smoke(app: tauri::AppHandle) -> Result<String, String> {
-    let data_dir = app_data_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || pi_bun::smoke(&data_dir))
-        .await
-        .map_err(|e| format!("join: {e}"))?
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<String, String> {
@@ -55,7 +44,7 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 async fn agent_init(app: tauri::AppHandle) -> Result<(), String> {
     let data_dir = app_data_dir(&app)?;
-    let r = tauri::async_runtime::spawn_blocking(move || pi_bun::agent_init(&data_dir))
+    let r = tauri::async_runtime::spawn_blocking(move || qjs::agent_init(&data_dir))
         .await
         .map_err(|e| format!("join: {e}"))?;
     // 失败要进设备日志（真机上只有设备日志可看，前端那条 status 文字
@@ -69,7 +58,7 @@ async fn agent_init(app: tauri::AppHandle) -> Result<(), String> {
 /// M2：提交 prompt（kick；回复经 `pi-agent-event` 事件流回 WebView）。
 #[tauri::command]
 async fn agent_prompt(text: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || pi_bun::agent_prompt(&text))
+    tauri::async_runtime::spawn_blocking(move || qjs::agent_prompt(&text))
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -77,7 +66,7 @@ async fn agent_prompt(text: String) -> Result<String, String> {
 /// M2：轮询 agent 状态。
 #[tauri::command]
 async fn agent_status() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(pi_bun::agent_status)
+    tauri::async_runtime::spawn_blocking(qjs::agent_status)
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -85,7 +74,7 @@ async fn agent_status() -> Result<String, String> {
 /// M3：中止当前 agent 运行。
 #[tauri::command]
 async fn agent_stop() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(pi_bun::agent_stop)
+    tauri::async_runtime::spawn_blocking(qjs::agent_stop)
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -93,7 +82,7 @@ async fn agent_stop() -> Result<(), String> {
 /// M2 收尾：重启恢复 —— 取 boot 时从最新 JSONL 会话回放的历史消息。
 #[tauri::command]
 async fn agent_history() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(pi_bun::agent_history)
+    tauri::async_runtime::spawn_blocking(qjs::agent_history)
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -208,7 +197,7 @@ fn skills_remove(app: tauri::AppHandle, id: String) -> Result<(), String> {
 /// D12：热生效——改完 registry 后重新注入（bundle `__pi_skills_apply` kick）。
 #[tauri::command]
 async fn skills_reconnect() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| pi_bun::call_string_global("__pi_skills_apply", ""))
+    tauri::async_runtime::spawn_blocking(|| qjs::call_string_global("__pi_skills_apply", ""))
         .await
         .map_err(|e| format!("join: {e}"))??;
     Ok(())
@@ -235,7 +224,7 @@ fn mcp_remove(app: tauri::AppHandle, name: String) -> Result<(), String> {
 /// M4：热重连 MCP 服务器（改配置后立即可用，无需重启）。
 #[tauri::command]
 async fn mcp_reconnect() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(pi_bun::mcp_reconnect)
+    tauri::async_runtime::spawn_blocking(qjs::mcp_reconnect)
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -250,7 +239,7 @@ fn goal_get(app: tauri::AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 async fn pi_call_global(fn_name: String, arg: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || pi_bun::call_string_global(&fn_name, &arg))
+    tauri::async_runtime::spawn_blocking(move || qjs::call_string_global(&fn_name, &arg))
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -267,7 +256,7 @@ async fn pi_call_global(fn_name: String, arg: String) -> Result<String, String> 
 // 同步命令占着主线程等回复、弹窗等主线程 → 死锁，实测「点 Allow 整屏卡死」。
 // CLLocationManager 在 .notDetermined 时还会把 invoke 挂起直到用户作答，
 // 阻塞窗口不是一个瞬间。
-// 这与 `pi_bun_smoke` 的纪律一致：任何同步阻塞调用都不得占主线程。
+// 这与 `agent_init` 的纪律一致：任何同步阻塞调用都不得占主线程。
 
 /// 能力清单 + 各自权限态（设置页展示用）。
 #[tauri::command]
@@ -395,7 +384,7 @@ fn session_list(app: tauri::AppHandle) -> Result<String, String> {
 /// M3：切换到指定会话。
 #[tauri::command]
 async fn session_open(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || pi_bun::session_open(&id))
+    tauri::async_runtime::spawn_blocking(move || qjs::session_open(&id))
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -403,7 +392,7 @@ async fn session_open(id: String) -> Result<(), String> {
 /// M3：新建空白会话。
 #[tauri::command]
 async fn session_new() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(pi_bun::session_new)
+    tauri::async_runtime::spawn_blocking(qjs::session_new)
         .await
         .map_err(|e| format!("join: {e}"))?
 }
@@ -476,7 +465,7 @@ pub fn run() {
                 for u in event.urls() {
                     let s = u.to_string();
                     let _ = tauri::async_runtime::spawn_blocking(move || {
-                        let _ = pi_bun::call_string_global("__pi_oauth_callback", &s);
+                        let _ = qjs::call_string_global("__pi_oauth_callback", &s);
                     });
                 }
             });
@@ -484,7 +473,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
-            pi_bun_smoke,
             agent_init,
             agent_prompt,
             agent_status,
