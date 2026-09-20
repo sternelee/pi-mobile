@@ -529,7 +529,10 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
         // 审批不在这里判：走 approval.rs 的工具名分档（pull 永远 ask、
         // commit 跟 write 基线、其余只读自动）。
         "git_status" | "git_diff" | "git_log" | "git_clone" | "git_pull" | "git_commit" => {
-            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let args = payload
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             let repo = args.get("repo").and_then(|v| v.as_str()).unwrap_or("");
             let res = match method {
                 "git_status" => crate::git::status(repo),
@@ -563,7 +566,10 @@ fn dispatch_inner(method: &str, payload: &serde_json::Value) -> serde_json::Valu
         // 不需要审批：它不改变任何东西（只展示工作区里已有的文件），而且用户
         // 当场就看到它发生。
         "preview_open" => {
-            let args = payload.get("args").cloned().unwrap_or(serde_json::json!({}));
+            let args = payload
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             match crate::preview::resolve_target(path) {
                 Err(e) => serde_json::json!({ "error": e }),
