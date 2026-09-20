@@ -1,7 +1,7 @@
 //! mcp —— MCP 服务器配置管理（D11）。存 `{data_dir}/mcp.json`：
 //! `{"servers":[{"name":"...","url":"https://..."}]}`。
 //! 连接与工具发现由 bundle 内的最小 streamable-http 客户端完成（pi-mcp-adapter
-//! 的移动原生化，见 agent-main.js）；此处只负责配置的增删查。
+//! 的移动原生化，见 pi-bundle/agent-qjs.js）；此处只负责配置的增删查。
 
 use std::path::Path;
 

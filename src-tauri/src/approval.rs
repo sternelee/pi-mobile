@@ -7,8 +7,8 @@
 //!    本模块查 policy：`auto` 直接放行；`ask` 则 emit `approval_required`
 //!    事件给 UI（带统一 diff），**立即返回 pending**
 //! 2. bundle 工具在 pending promise 上等（120s 超时自动 deny）
-//! 3. 用户决策 → `approval_respond` 命令 → resolver（pi_bun 注入的
-//!    skal_evaluate 调 `__pi_approval_resolve(id, decision)`）反向解析
+//! 3. 用户决策 → `approval_respond` 命令 → resolver（`qjs::agent_init` 注入的：
+//!    把决策推进 guest 队列，worker 下一拍经 `host.poll()` 反向解析 pending promise）
 //!
 //! policy 持久化在 `{data_dir}/policy.json`（M3 基线只有 write 一档；
 //! 后续按会话/工具粒度扩展，键空间见 CONTRACTS §3）。
@@ -40,12 +40,12 @@ static POLICY: OnceLock<Mutex<Policy>> = OnceLock::new();
 static DATA_DIR: OnceLock<String> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 注册 UI 事件转发（与 loopback 事件同一 `pi-agent-event` 通道）。
+/// 注册 UI 事件转发（与 agent 事件同一 `pi-agent-event` 通道）。
 pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     EVENT_SINK.set(Box::new(f)).ok();
 }
 
-/// pi_bun 在 agent_init 时注入：把决策经 skal_evaluate 打回运行时。
+/// 由 `qjs::agent_init` 注入：把决策推进 guest 队列（worker 经 `host.poll()` 取走）。
 pub fn set_resolver(f: impl Fn(&str, &str) + Send + Sync + 'static) {
     RESOLVER.set(Box::new(f)).ok();
 }
@@ -129,8 +129,8 @@ fn truncate_card_text(text: &str) -> String {
     format!("{}\n… (truncated)", &text[..cut])
 }
 
-/// 审批请求入口（loopback dispatch 调用）。非阻塞：ask 时 emit 事件并立即
-/// 返回 pending，决策经 `__pi_approval_resolve` 注入（kick+resolve 模式）。
+/// 审批请求入口（guest 的 `host.ensureApproval` 调用）。非阻塞：ask 时 emit 事件并
+/// 立即返回 pending，决策经 guest 队列注入（kick+resolve 模式）。
 pub fn request(payload: &serde_json::Value) -> serde_json::Value {
     let tool = payload.get("tool").and_then(|v| v.as_str()).unwrap_or("");
     // D11：MCP 工具（mcp__<server>__<tool>）默认全部 ask，不受 write 基线

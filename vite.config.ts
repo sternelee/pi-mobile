@@ -16,8 +16,7 @@ export default defineConfig(async () => ({
     },
   },
 
-  // 依赖扫描只看应用入口（vendor/ 里有 bun fork 的上千个 html/js，
-  // 会被 dev 模式的扫描器误爬并报语法错误）
+  // 依赖扫描只看应用入口（默认会顺带爬 node_modules 里的样例文件）
   optimizeDeps: {
     entries: ["index.html", "src/**/*.{js,ts,tsx}"],
   },

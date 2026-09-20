@@ -12,8 +12,9 @@
 #   scripts/ios-device-run.sh <UDID>          # 指定设备
 #   scripts/ios-device-run.sh --install-only  # 只装不启动
 #
-# 说明：iOS 侧 pi_bun 的日志走 println!（stdout），所以用
-# `devicectl device process launch --console` 直接吃到，无需 idevicesyslog。
+# 说明：iOS 侧日志走 println!（stdout）**并且**同时落文件（`<data_dir>/pi-agent.log`），
+# 所以这里用 `devicectl device process launch --console` 直接吃 stdout；
+# 进程外排障才需要去拉那个日志文件（命令见 README）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

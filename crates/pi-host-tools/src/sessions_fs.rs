@@ -1,6 +1,7 @@
 //! 会话 fs 通道 —— pi 的 `JsonlSessionRepo` 背后那 12 个 fs 方法的宿主实现。
 //!
-//! 从 `src-tauri/src/pi_bun/loopback.rs` 原样抽出（2026-09-19，spike/quickjs-agent），
+//! 从 `src-tauri` 的会话 fs 通道原样抽出（2026-09-19；那张皮现在在
+//! `src-tauri/src/workspace.rs` 与 qjs 的 `host.fs`，bun 时代的 loopback 已删），
 //! 与 `lib.rs` 的 workspace 工具是**两个不同的 jail 根**：
 //!   · 这里：jail 到 sessions 根（`{data}/sessions`），路径带 `/pi-sessions` 虚拟前缀；
 //!   · `lib.rs`：jail 到 workspace 根。
@@ -11,7 +12,7 @@
 
 use std::time::UNIX_EPOCH;
 
-/// 会话目录的 JS 侧虚拟根（agent-main.js 里的同款常量）。
+/// 会话目录的 JS 侧虚拟根（`pi-bundle/agent-qjs.js` 里的同款常量）。
 pub const SESSIONS_VIRTUAL_ROOT: &str = "/pi-sessions";
 
 fn fs_ok(value: serde_json::Value) -> serde_json::Value {

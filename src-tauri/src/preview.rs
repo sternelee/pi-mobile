@@ -12,9 +12,11 @@
 //! ## 为什么是**独立端口**
 //!
 //! 预览跑的是 **agent（LLM）写出来的 JS**，所以「它与谁能同源」是承载性的：
-//! 与 `/hostcall`（`pi_bun::loopback`）**不同源**是纵深防御；真正的防线仍是
-//! `script::REQUIRE_HOST_TOKEN`（预览页拿不到 host token，自己去打也是拒，
-//! 已在真机验证）。两层不重复：换端口挡「意外可达」，token 挡「故意可达」。
+//! 宿主的 agent 通道（bun 时代是 `/hostcall` 端点；现在是 QuickJS guest 的
+//! `globalThis.host.*`，**进程内**、不监听端口）与预览的 HTTP 服务是**两套东西**
+//! —— 预览页只能拿到 workspace 里的文件，够不到 agent 的能力。
+//! ⚠️ 将来实现脚本沙箱（D14）时这条要重新审视：脚本若也能碰 `host.*`，
+//! 同源/跨源就不再是边界，能力授予（`script.rs`）才是。
 //!
 //! ## 为什么用 axum + ServeDir 而不是手写 HTTP
 //!

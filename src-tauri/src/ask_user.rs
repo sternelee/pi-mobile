@@ -1,17 +1,17 @@
 //! ask_user —— pi-ask-user 插件的移动原生化（扩展能力层 #1）。
 //!
 //! 原 npm:pi-ask-user 的交互层是 pi-tui 终端 UI，无法在嵌入式 WebView 环境
-//! 运行；这里保持工具语义（schema 见 agent-main.js，对齐上游）并把提问 UI
+//! 运行；这里保持工具语义（schema 见 `pi-bundle/agent-qjs.js`，对齐上游）并把提问 UI
 //! 换成宿主事件 → WebView 提问卡。模型视角与桌面 pi 一致：调用 ask_user →
 //! 用户作答 → 工具结果返回回答文本。
 //!
 //! 通信为 kick+事件注入模式（真机实测：长挂起 fetch + AbortSignal 会触发
 //! 嵌入 bun 的 HeapHelper 线程 SIGSEGV，禁止长阻塞 hostcall）：
-//! 1. bundle 工具 execute → `ask_user_register` hostcall（立即返回 id）
+//! 1. guest 工具 execute → `host.askUser(payload)`（立即返回 id）
 //! 2. 本模块 emit `ask_user` 事件 → WebView 提问卡
-//! 3. 用户作答 → `ask_user_respond` 命令 → resolver（pi_bun 注入的
-//!    skal_evaluate 调 `__pi_ask_resolve(id, answer)`）反向解析 pending
-//!    promise → 工具 continuation 由 waitForPromise 泵动
+//! 3. 用户作答 → `ask_user_respond` 命令 → resolver（`qjs::agent_init` 注入的：
+//!    推 guest 队列，worker 经 `host.poll()` 反向解析 pending promise →
+//!    工具 continuation 由 tick 泵动微任务队列
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +27,7 @@ pub fn set_event_sink(f: impl Fn(&str) + Send + Sync + 'static) {
     EVENT_SINK.set(Box::new(f)).ok();
 }
 
-/// pi_bun 在 agent_init 时注入：把答案经 skal_evaluate 打回运行时。
+/// 由 `qjs::agent_init` 注入：把答案推进 guest 队列（worker 经 `host.poll()` 取走）。
 pub fn set_resolver(f: impl Fn(&str, &str) + Send + Sync + 'static) {
     RESOLVER.set(Box::new(f)).ok();
 }

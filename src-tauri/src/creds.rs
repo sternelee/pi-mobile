@@ -6,7 +6,7 @@
 //! tauri 插件走 JNI，落 M3（PLAN 风险表已记录）。
 //!
 //! 安全边界：JS 侧永不落盘明文 —— API key 仅经 loopback `creds_get`
-//! hostcall 注入嵌入式运行时内存（agent-main.js getApiKey）。
+//! 只注入到模型请求的那一次调用里（qjs 路线的 key 永远不出宿主内存）。
 
 #[cfg(not(target_os = "android"))]
 mod imp {

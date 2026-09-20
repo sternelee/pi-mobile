@@ -1,24 +1,11 @@
-// pi-mobile 的 **QuickJS 版 agent 入口**（B 路线）。与 agent-main.js（bun 版）并存：
-// 两者跑同一套 pi-agent-core + 同一套 UI，区别只在「谁提供宿主能力」——
-//   · agent-main.js 经 loopback HTTP hostcall 打回 Rust（bun/skal 路线）
-//   · 本文件经**进程内** host.* 调用 Rust（QuickJS 路线，见 src-tauri/src/qjs/）
-// 工具/插件/会话这些能力的**实现**都在 Rust 共享（pi-host-tools + src-tauri 各服务），
-// 这里只保留「工具的定义与壳」以及纯 JS 的那几个（todo/subagent）。
+// pi-mobile 的 **agent 入口**（QuickJS）。现在是唯一的一份：
+//   · 引擎：rquickjs 静态编进 Rust 二进制（不需要外部 .so）
+//   · 宿主能力：`globalThis.host.*` 进程内调用（无 HTTP hostcall）
+//   · 事件：pi-agent-core 的原始形状 → outbox → 宿主 emit 成 pi-agent-event
 //
-// ⚠️ 事件名必须与 src/lib/events.ts 对齐 —— UI 一行不改是本路线的前提。
-//
-// 原始版本：spikes/quickjs-agent/js/entry.js（CLI spike，功能点已对齐 agent-main.js）
-//
-// 与 `pi-bundle/agent-main.js`（bun 路线）的关键差别：
-//   · 这里**没有 pi-ai 的 provider 栈**，streamFn 直接把请求交给 Rust；
-//   · 这里**没有 fs / 网络 / 定时器**，工具调用是一次同步的 host.callTool；
-//   · 循环由宿主驱动：Rust 反复调 tick() 并泵微任务队列，guest 不自己等时钟。
-//
-// 结构对照 pocket-stack/pocket-pi 的 crates/pocket-pi-embedded/js/src/entry.ts
-// （MIT，2026-09 的同类实现）——同一套「宿主 start* → 事件批量 poll」形态；
-// 本文件按 pi-mobile 的 host 面（callTool 同步返回）与 pi-agent-core 0.84 重写。
-//
-// 打包含义见 js/build.sh；Rust 侧见 src/guest.rs。
+// 原始版本：spikes/quickjs-agent/js/entry.js（CLI spike）。
+// 曾经的 bun 版入口 `pi-bundle/agent-main.js` 已随 backup/bun 分支归档 ——
+// 下文注释里凡是写「移植自 agent-main.js」的地方，都是**出处**（语义来源），不是依赖。
 
 import { Agent } from "../node_modules/@earendil-works/pi-agent-core/dist/agent.js";
 import { JsonlSessionRepo } from "../node_modules/@earendil-works/pi-agent-core/dist/harness/session/jsonl/repo.js";

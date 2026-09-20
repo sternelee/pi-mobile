@@ -1,8 +1,9 @@
 //! pi-host-tools —— agent 工具的本机实现（workspace 越狱保护 + 写前备份/回滚）。
 //!
-//! 从 `src-tauri/src/pi_bun/loopback.rs` 原样抽出（2026-09-19，spike/quickjs-agent）：
+//! 从 `src-tauri` 的宿主工具层原样抽出（2026-09-19；那张皮现在在
+//! `src-tauri/src/workspace.rs`，bun 时代的 `pi_bun/loopback.rs` 已删）：
 //! 每个函数都把根目录**显式传入**，不再读模块级 `OnceLock`，这样同一份实现既能被
-//! Tauri 宿主用（`loopback.rs` 保留同名薄包装，行为不变），也能被桌面/移动端的
+//! Tauri 宿主用（`workspace.rs` 保留同名薄包装，行为不变），也能被桌面/移动端的
 //! 其他宿主直接复用（见 `spikes/quickjs-agent`）。
 //!
 //! 抽出的动机来自 `docs/POCKET-PI-NOTES.md` 的结论：工具实现在「薄 JS + 厚原生」
@@ -448,7 +449,7 @@ fn run_tool(
 
 /// 一个 workspace（+ 备份根）上的工具集。
 ///
-/// 薄封装：真正的实现是上面的自由函数，根目录显式传入。宿主（Tauri `loopback.rs`、
+/// 薄封装：真正的实现是上面的自由函数，根目录显式传入。宿主（Tauri `workspace.rs`、
 /// spike 的 QuickJS 宿主）各自持有自己的实例，避免全局 `OnceLock` 让这份代码
 /// 只能被一个进程配置一次。
 #[derive(Clone, Debug)]
@@ -521,7 +522,7 @@ impl HostTools {
 ///
 /// 为什么定义要在这里而不是 JS 里：名字必须与 `run_tool` 的 dispatch 是同一份真源，
 /// 否则「模型看到的工具」与「宿主能执行的工具」会悄悄分叉（描述文案与
-/// `pi-bundle/agent-main.js` 保持一致，差异记在 docs/PROGRESS.md）。
+/// `pi-bundle/agent-qjs.js` 的工具描述保持一致，差异记在 docs/PROGRESS.md）。
 ///
 /// ⚠️ 新增工具必须同时改三处：`run_tool` 的 match、这里、以及审批分档
 /// （`approval.rs` 的 tier 表）。
@@ -616,7 +617,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 独立 host：workspace 与 data 同根（与 loopback 的测试布局一致）。
+    /// 独立 host：workspace 与 data 同根（与原 loopback 的测试布局一致）。
     fn host(dir: &Path) -> HostTools {
         HostTools::new(dir.join("workspace"), dir)
     }
@@ -636,7 +637,7 @@ mod tests {
         assert_eq!(jail_path_in(root, "").unwrap(), root);
     }
 
-    /// 移植自 loopback.rs 的串行往返测试（原测试用全局 OnceLock，这里改用显式根）。
+    /// 移植自宿主层的串行往返测试（原测试用全局 OnceLock，这里改用显式根）。
     #[test]
     fn write_backup_and_revert_roundtrip() {
         let dir = std::env::temp_dir().join(format!("pi-host-tools-test-{}", std::process::id()));

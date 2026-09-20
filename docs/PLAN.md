@@ -106,7 +106,7 @@ Pi Agent 本体来自 [earendil-works/pi](https://github.com/badlogic/pi-mono)�
 
 ---
 
-## 4. 目录结构规划（方案 C 形态）
+## 4. 目录结构规划（原方案 C 形态）　⛔ **已被 D18 取代，存档**（当前结构见 README）
 
 ```
 pi-mobile/
@@ -120,7 +120,7 @@ pi-mobile/
 │   ├── bridge.ts                # C ABI hostcall 绑定（凭证/审批/UI 事件）
 │   └── policy-hook.ts           # pi extension：把工具审批上报宿主（D2.1）
 ├── vendor/bun                   # bun fork（skal 式 patches，gitignored，setup 脚本拉取）
-├── patches/                     # bun 补丁集（platform-lib 入口、android/ios 链接）
+├── patches/                     # （已删）bun 补丁集：platform-lib 入口、android/ios 链接
 ├── scripts/
 │   ├── setup-bun-fork.sh        # clone bun fork + 应用 patches
 │   ├── build-libpi-bun.sh       # zig 交叉编译 → gen/android jniLibs / gen/ios

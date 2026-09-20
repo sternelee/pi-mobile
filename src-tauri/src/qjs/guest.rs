@@ -118,8 +118,8 @@ impl Guest {
             })
             .to_string();
             call::<()>(&ctx, "boot", (config,)).map_err(|e| format!("boot: {e}"))?;
-            // 与 bun 路线对齐：boot 后自动恢复**最近一次会话**（agent-main.js 顶部那句
-            // `restoreLatest()`）。不做的话重开 App 是空白对话，用户得自己去抽屉里点
+            // boot 后自动恢复**最近一次会话**（原 bun 入口顶部那句 `restoreLatest()`；
+            // 语义照搬，出处见 pi-bundle/agent-qjs.js 的 `restoreLatestSession()`）。不做的话重开 App 是空白对话，用户得自己去抽屉里点
             // 一下 —— 真机上就是这么发现的（会话文件都在，界面却空的）。
             // 恢复是异步的（结果经 `session_restored` 事件），下面的热身 tick 会推完。
             call::<()>(&ctx, "restore", ()).map_err(|e| format!("restore: {e}"))?;

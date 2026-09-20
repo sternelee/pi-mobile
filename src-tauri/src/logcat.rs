@@ -50,7 +50,9 @@ pub(crate) fn logcat(msg: &str) {
     }
     const INFO: i32 = 4;
     const ERROR: i32 = 5;
-    let tag = CString::new("pibun").unwrap();
+    // tag 里**不能有连字符**：Honor 等 ROM 会把带连字符的 tag 加密成 HKS/HKE 块丢给
+    // 分析平台（本仓库早期踩过）。所以用无连字符的 `piagent`，别改成 "pi-agent"。
+    let tag = CString::new("piagent").unwrap();
     let text = CString::new(msg.replace('\0', " ")).unwrap();
     unsafe {
         let prio = if msg.starts_with("ERROR") {

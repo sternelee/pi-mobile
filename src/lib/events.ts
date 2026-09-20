@@ -1,7 +1,7 @@
 // pi-agent-event 事件的 TypeScript 判别联合 —— 单一真源在 emit 侧：
 // - Rust（src-tauri/src/）：approval_required / ask_user / preview_open，
 //   经 lib.rs 的 `pi-agent-event` 通道转发；
-// - bundle（pi-bundle/agent-main.js）：业务事件，经 `agent_event` hostcall
+// - bundle（pi-bundle/agent-qjs.js）：业务事件，经 guest 的 outbox → pi-agent-event
 //   透传；
 // - pi-agent-core（Agent.subscribe 透传）：agent_start/agent_end/turn_*/
 //   message_*/tool_execution_*。
@@ -107,7 +107,7 @@ type MessageEvent = {
 };
 
 export type PiAgentEvent =
-  // ── pi-agent-core 透传（bundle agent-main.js 的 subscribe → emit）──
+  // ── pi-agent-core 透传（bundle agent-qjs.js 的 subscribe → outbox → emit）──
   | { type: "agent_start" }
   | { type: "agent_end"; messages: AgentHistoryMessage[] }
   | { type: "turn_start" }
