@@ -103,6 +103,25 @@ pub(crate) fn set_log_dir(data_dir: &str) {
     let _ = LOG_PATH.set(format!("{data_dir}/pi-bun.log"));
 }
 
+/// **宿主路径登记 —— 两条运行时路线都必须调。**
+///
+/// 建好标准子目录（workspace / sessions）并登记 `loopback` 那几个 OnceLock。
+/// 为什么必须抽成一处：`lib.rs` 里那些 **UI 侧命令**（`workspace_tree` /
+/// `workspace_read` / `workspace_revert` / `preview_*` / git）只认
+/// `loopback::configure` 写下的根目录，而 agent 自己的文件工具读的是
+/// `HostTools` 里的那份 —— 两套来源都在，漏登记其中一套时：
+/// **UI 报「workspace not configured」、agent 却读写正常**，很难联想到是路径没登记。
+/// bun 路线一直调着，qjs 路线曾经漏掉（真机上就是这么发现的），所以现在两条都从这里走。
+pub(crate) fn configure_host_paths(data_dir: &str) -> Result<(), String> {
+    let workspace = format!("{data_dir}/workspace");
+    let sessions = format!("{data_dir}/sessions");
+    for dir in [&workspace, &sessions] {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
+    }
+    loopback::configure(&workspace, data_dir);
+    Ok(())
+}
+
 /// 向日志文件追一行（两端共用；写失败不影响调用方）。
 fn log_to_file(line: &str) {
     use std::io::Write;
@@ -382,11 +401,8 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
         });
     }
 
-    let workspace = format!("{data_dir}/workspace");
-    std::fs::create_dir_all(&workspace).map_err(|e| format!("workspace: {e}"))?;
-    std::fs::create_dir_all(format!("{data_dir}/sessions"))
-        .map_err(|e| format!("sessions: {e}"))?;
-    loopback::configure(&workspace, data_dir);
+    // 标准子目录 + 宿主路径登记（**两条路线共用一处**，见函数注释）
+    configure_host_paths(data_dir)?;
     crate::approval::configure(data_dir);
     crate::ask_user::set_resolver(|id, answer| {
         let id_j = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".into());

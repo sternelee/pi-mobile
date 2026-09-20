@@ -2,6 +2,49 @@
 
 > 持续更新。倒序记录，每条含日期、状态与下一步。
 
+## 2026-09-20（第十四轮）— ✅ 真机第 4 处同类缺口：UI 侧命令的「workspace not configured」
+
+第十三轮那个 APK 装上后 booting 正常了，但**打开文件抽屉**报
+`workspace_tree failed: workspace not configured`。
+
+### 两套根目录来源，只登记了其中一套
+
+| 读谁 | 谁在用 | qjs 路线有没有喂 |
+|---|---|---|
+| `HostTools` 里的 root（`Host.workspace`） | agent 自己的文件工具（read/write/ls…） | ✅ 有 |
+| `loopback` 的 `WORKSPACE_DIR` / `DATA_DIR` / `SESSIONS_DIR` OnceLock | **lib.rs 里的 UI 侧命令**：`workspace_tree` / `workspace_read` / `workspace_revert` / `workspace_backup_info` / `preview_*` / git | ❌ **漏了** |
+
+而这两个 OnceLock 只有一个写入点：`loopback::configure()`，它**只在 `pi_bun::agent_init`
+（bun 路线）里被调用过**。所以症状极其迷惑：**agent 读写文件一切正常，UI 却说你没配
+workspace** —— 静态检查、单测、甚至「让 agent 建个文件」都验不出来。
+
+修法不是补一行调用：把「建标准目录 + 登记宿主路径」抽成
+`pi_bun::configure_host_paths(data_dir)`，**两条路线都从它走**（函数注释里写明为什么
+必须一处：两套来源并存时，漏登记其中一套的表现是「一半能用」）。
+
+### 顺手把两条 boot 路径的副作用对了一遍
+
+既然这是第 4 个同类问题，就别再等第 5 个。逐项比对 `pi_bun::agent_init` 与
+`qjs::agent_init` 的副作用清单：
+
+| 副作用 | bun | qjs |
+|---|---|---|
+| `set_log_dir` | ✅ | ✅ |
+| `git::init_tls` | ✅ | ✅ |
+| 标准目录 + `loopback::configure` | ✅ | ✅（本轮补上） |
+| `approval::configure` + resolver | ✅ | ✅ |
+| `ask_user::set_resolver` | ✅ | ✅ |
+| bundle 装载 + 「等就绪」 | `__pi_ready` / `__pi_restored` | `boot()` / `restore()` + 热身 tick |
+| `loopback::start()`（HTTP 宿主） | ✅ | 不适用（qjs 是进程内调用） |
+
+### 验证
+
+- `qjs_globals_offline` 新增断言：**UI 侧 `workspace_tree()` 必须 Ok、`workspace_dir()`
+  必须 Some**。并且我**实测过它会红**：临时去掉 `configure_host_paths` 那行，测试
+  失败并报出与真机完全一致的文案（`workspace_tree 读不到根目录`）—— 一个不会失败的
+  断言等于没有断言。
+- 全套：src-tauri 65（62+3）/ qjs 集成 3 个全过 / clippy 31 / fmt 13（HEAD 39）
+
 ## 2026-09-20（第十三轮）— ✅ 真机：「配置完 key 一直停在 agent booting…」——qjs 把 boot 事件吃掉了
 
 真机装上前一轮那个 release APK（`PI_AGENT_RUNTIME_DEFAULT=qjs`，40MB，无 libskal），

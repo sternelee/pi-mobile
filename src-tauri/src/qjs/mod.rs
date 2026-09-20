@@ -153,11 +153,15 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     crate::pi_bun::set_log_dir(data_dir);
     crate::git::init_tls(data_dir);
 
+    // ⚠️ 必须先登记宿主路径：`lib.rs` 里那些 **UI 侧命令**（workspace_tree /
+    // workspace_read / workspace_revert / preview / git）读的是 `loopback` 里
+    // OnceLock 的根目录，而 agent 自己的工具读的是下面 `Host.workspace`。两者都在，
+    // 只登记其中一套时的症状很迷惑：**agent 读写正常、UI 报
+    // 「workspace_tree failed: workspace not configured」**（真机上就是这么碰到的）。
+    // 所以建目录与登记都走 `pi_bun::configure_host_paths`（bun 路线也调同一个）。
+    crate::pi_bun::configure_host_paths(data_dir)?;
     let workspace = format!("{data_dir}/workspace");
     let sessions_root = format!("{data_dir}/sessions");
-    for dir in [&workspace, &sessions_root] {
-        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
-    }
 
     // 复用既有服务：workspace 工具 + 审批 + 提问 + 会话 fs
     crate::approval::configure(data_dir);
@@ -680,6 +684,18 @@ mod tests {
         let restored = take("session_restored");
         assert_eq!(restored.len(), 1, "boot 没触发会话恢复：{restored:?}");
         assert_eq!(restored[0]["found"], 0, "干净的临时目录里不该有会话");
+
+        // ⓞ② UI 侧命令的根目录必须已登记 —— 它们读的是 `loopback` 里 OnceLock 的那份，
+        //    与 agent 工具用的 `Host.workspace` 是两套。qjs 路线曾经只喂了后者，症状是
+        //    UI 抽屉报 `workspace_tree failed: workspace not configured`（agent 却正常）。
+        assert!(
+            crate::pi_bun::loopback::workspace_tree().is_ok(),
+            "UI 侧 workspace_tree 读不到根目录：loopback 没登记路径"
+        );
+        assert!(
+            crate::pi_bun::loopback::workspace_dir().is_some(),
+            "preview / git 靠 workspace_dir()，也得登记"
+        );
 
         // ① providers_listed：8 家、顺序与 UI 的静态清单一致、展示名用 UI 的名字
         assert_eq!(
