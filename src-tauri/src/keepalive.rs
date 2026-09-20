@@ -18,7 +18,7 @@
 
 #[cfg(target_os = "android")]
 pub fn on_agent_start() {
-    crate::pi_bun::logcat("keepalive: no-op (disabled after JNI crashes)");
+    crate::logcat::logcat("keepalive: no-op (disabled after JNI crashes)");
 }
 
 #[cfg(target_os = "android")]

@@ -34,7 +34,7 @@
 
 use std::path::PathBuf;
 
-use crate::pi_bun::loopback::jail_path_in;
+use crate::workspace::jail_path_in;
 
 /// 仓库参数解析结果：workspace 内的仓库根 + 可用于日志的相对路径。
 pub struct RepoRef {
@@ -44,7 +44,7 @@ pub struct RepoRef {
 }
 
 fn workspace_root() -> Result<PathBuf, String> {
-    crate::pi_bun::loopback::workspace_dir()
+    crate::workspace::workspace_dir()
         .map(PathBuf::from)
         .ok_or_else(|| "workspace not configured".to_string())
 }
@@ -58,7 +58,8 @@ pub fn resolve_repo(rel: &str) -> Result<RepoRef, String> {
     if rel.is_empty() {
         return Err("git: empty repository path (give a workspace-relative directory)".into());
     }
-    let path = jail_path_in(&root, rel).map_err(|_| format!("git: '{rel}' is outside the workspace"))?;
+    let path =
+        jail_path_in(&root, rel).map_err(|_| format!("git: '{rel}' is outside the workspace"))?;
     Ok(RepoRef {
         rel: rel.to_string(),
         path,
@@ -95,7 +96,7 @@ fn host_of(url: &str) -> String {
 /// 用户名是**协议细节而非机密**：GitHub 的 PAT 走 `x-access-token`，GitLab 走
 /// `oauth2`。两者都支持「token 当密码」。没有凭证时返回 None（公开仓库照常可用）。
 fn credentials_for(url: &str) -> Option<(String, String)> {
-    let data_dir = crate::pi_bun::loopback::data_dir()?;
+    let data_dir = crate::workspace::data_dir()?;
     let host = host_of(url);
     let token = crate::creds::get(&data_dir, &format!("git:{host}"))?;
     let user = if host.contains("github") {
@@ -189,14 +190,16 @@ pub fn init_tls(data_dir: &str) {
         "/system/etc/security/cacerts",        // 传统位置（实测两者内容一致）
     ];
     let Some(src) = dirs.iter().find(|d| std::path::Path::new(d).is_dir()) else {
-        crate::pi_bun::logcat("[git] WARN: no Android CA store found; https will fail");
+        crate::logcat::logcat("[git] WARN: no Android CA store found; https will fail");
         return;
     };
 
     // 文件名带 `v2`：上一版拼的是「整份文件」（含 END 之后的指纹文本），
     // 那份 bundle 是坏的。换名字强制重建，否则会沿用旧文件继续失败。
     let bundle = std::path::Path::new(data_dir).join("cacerts-v2.pem");
-    let need_build = std::fs::metadata(&bundle).map(|m| m.len() == 0).unwrap_or(true);
+    let need_build = std::fs::metadata(&bundle)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
     if need_build {
         let mut out = String::new();
         let mut n = 0usize;
@@ -214,7 +217,9 @@ pub fn init_tls(data_dir: &str) {
                     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
                     const END: &str = "-----END CERTIFICATE-----";
                     let Some(b) = text.find(BEGIN) else { continue };
-                    let Some(e_rel) = text[b..].find(END) else { continue };
+                    let Some(e_rel) = text[b..].find(END) else {
+                        continue;
+                    };
                     let block = &text[b..b + e_rel + END.len()];
                     out.push_str(block);
                     out.push('\n');
@@ -223,10 +228,13 @@ pub fn init_tls(data_dir: &str) {
             }
         }
         if n == 0 || std::fs::write(&bundle, &out).is_err() {
-            crate::pi_bun::logcat(&format!("[git] WARN: failed to build CA bundle from {src}"));
+            crate::logcat::logcat(&format!("[git] WARN: failed to build CA bundle from {src}"));
             return;
         }
-        crate::pi_bun::logcat(&format!("[git] built CA bundle: {n} certs → {}", bundle.display()));
+        crate::logcat::logcat(&format!(
+            "[git] built CA bundle: {n} certs → {}",
+            bundle.display()
+        ));
     }
 
     // ── 主路径：走 libgit2 自己的证书配置，而不是指望 OpenSSL 读环境变量 ──
@@ -247,12 +255,12 @@ pub fn init_tls(data_dir: &str) {
     // 能正常解析同一份 bundle，已实测）。所以先分清是「文件不可读」还是
     // 「路径没传对」，别再猜格式。
     match std::fs::File::open(&bundle) {
-        Ok(_) => crate::pi_bun::logcat(&format!(
+        Ok(_) => crate::logcat::logcat(&format!(
             "[git] CA bundle readable: {} ({} bytes)",
             bundle.display(),
             std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0)
         )),
-        Err(e) => crate::pi_bun::logcat(&format!(
+        Err(e) => crate::logcat::logcat(&format!(
             "[git] ERROR CA bundle NOT readable: {} → {e}",
             bundle.display()
         )),
@@ -261,12 +269,12 @@ pub fn init_tls(data_dir: &str) {
     let bundle_str = bundle.to_str().unwrap_or_default();
     let set = unsafe { git2::opts::set_ssl_cert_file(bundle_str) };
     match &set {
-        Ok(()) => crate::pi_bun::logcat(&format!(
+        Ok(()) => crate::logcat::logcat(&format!(
             "[git] libgit2 sslCAInfo={} ({} bytes)",
             bundle_str,
             std::fs::metadata(&bundle).map(|m| m.len()).unwrap_or(0)
         )),
-        Err(e) => crate::pi_bun::logcat(&format!("[git] ERROR set_ssl_cert_file: {e}")),
+        Err(e) => crate::logcat::logcat(&format!("[git] ERROR set_ssl_cert_file: {e}")),
     }
 
     // 环境变量作为**次要**路径保留（若 OpenSSL 也认，是多一条路，不冲突）。
@@ -287,7 +295,9 @@ pub fn status(repo_rel: &str) -> Result<String, String> {
     let repo = open(&resolve_repo(repo_rel)?)?;
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
-    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| scrub(&e.to_string()))?;
+    let statuses = repo
+        .statuses(Some(&mut opts))
+        .map_err(|e| scrub(&e.to_string()))?;
 
     let mut changed: Vec<String> = Vec::new();
     let mut untracked: Vec<String> = Vec::new();
@@ -468,10 +478,15 @@ pub fn commit(repo_rel: &str, message: &str) -> Result<String, String> {
     let repo = match git2::Repository::open(&r.path) {
         Ok(x) => x,
         // 目录存在但不是仓库 → 就地 init（「写文件然后提交」是很自然的流程）
-        Err(_) if r.path.is_dir() => {
-            git2::Repository::init(&r.path).map_err(|e| format!("git: init failed: {}", scrub(&e.to_string())))?
+        Err(_) if r.path.is_dir() => git2::Repository::init(&r.path)
+            .map_err(|e| format!("git: init failed: {}", scrub(&e.to_string())))?,
+        Err(e) => {
+            return Err(format!(
+                "git: cannot open '{}': {}",
+                r.rel,
+                scrub(&e.to_string())
+            ))
         }
-        Err(e) => return Err(format!("git: cannot open '{}': {}", r.rel, scrub(&e.to_string()))),
     };
     if message.trim().is_empty() {
         return Err("git: empty commit message".into());
@@ -535,7 +550,8 @@ mod tests {
     #[test]
     fn error_messages_do_not_leak_urls() {
         // 上报给模型前必须脱敏：URL 里可能嵌了 token
-        let s = scrub("failed to connect to https://x-access-token:SECRET@github.com/a/b.git\nmore");
+        let s =
+            scrub("failed to connect to https://x-access-token:SECRET@github.com/a/b.git\nmore");
         assert!(!s.contains("SECRET"), "{s}");
         assert!(s.contains("<remote>"), "{s}");
     }
@@ -555,7 +571,7 @@ mod tests {
         assert!(r.is_err() || r.is_ok());
         // 逃逸路径在任何情况下都不能解析成功成 workspace 内的路径
         if let Ok(rr) = resolve_repo("../../etc") {
-            let ws = crate::pi_bun::loopback::workspace_dir().unwrap_or_default();
+            let ws = crate::workspace::workspace_dir().unwrap_or_default();
             assert!(
                 !rr.path.to_string_lossy().contains("/etc"),
                 "逃逸被放行了: {:?}",

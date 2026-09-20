@@ -159,7 +159,7 @@ pub fn agent_init(data_dir: &str) -> Result<(), String> {
     // 只登记其中一套时的症状很迷惑：**agent 读写正常、UI 报
     // 「workspace_tree failed: workspace not configured」**（真机上就是这么碰到的）。
     // 所以建目录与登记都走 `pi_bun::configure_host_paths`（bun 路线也调同一个）。
-    crate::pi_bun::configure_host_paths(data_dir)?;
+    crate::workspace::configure_paths(data_dir)?;
     let workspace = format!("{data_dir}/workspace");
     let sessions_root = format!("{data_dir}/sessions");
 
@@ -336,7 +336,7 @@ pub fn call_string_global(fn_name: &str, arg: &str) -> Result<String, String> {
 }
 
 pub(crate) fn logcat(msg: &str) {
-    crate::pi_bun::logcat(msg);
+    crate::logcat::logcat(msg);
 }
 
 #[cfg(test)]
@@ -689,11 +689,11 @@ mod tests {
         //    与 agent 工具用的 `Host.workspace` 是两套。qjs 路线曾经只喂了后者，症状是
         //    UI 抽屉报 `workspace_tree failed: workspace not configured`（agent 却正常）。
         assert!(
-            crate::pi_bun::loopback::workspace_tree().is_ok(),
+            crate::workspace::workspace_tree().is_ok(),
             "UI 侧 workspace_tree 读不到根目录：loopback 没登记路径"
         );
         assert!(
-            crate::pi_bun::loopback::workspace_dir().is_some(),
+            crate::workspace::workspace_dir().is_some(),
             "preview / git 靠 workspace_dir()，也得登记"
         );
 

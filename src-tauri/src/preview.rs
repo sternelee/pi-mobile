@@ -54,7 +54,7 @@ pub fn start() -> Result<u16, String> {
     if let Some(p) = PORT.get() {
         return Ok(*p);
     }
-    let root = crate::pi_bun::loopback::workspace_dir().ok_or("workspace not configured")?;
+    let root = crate::workspace::workspace_dir().ok_or("workspace not configured")?;
 
     // 用 std 同步 bind：**端口必须在返回前确定**（UI 要拿它拼 iframe src）。
     let listener =
@@ -114,7 +114,7 @@ pub fn port() -> Option<u16> {
 }
 
 fn log(msg: &str) {
-    crate::pi_bun::logcat(&format!("[preview] {msg}"));
+    crate::logcat::logcat(&format!("[preview] {msg}"));
 }
 
 /// 路由。**只挂 GET/HEAD** —— 预览页永不该有能力写任何东西（其他方法由 axum
@@ -150,11 +150,7 @@ fn router(root: PathBuf, canon: PathBuf) -> Router {
 /// 这种符号链接能绕过纯字符串判定，而 ServeDir 会老老实实跟随它。
 type PreviewState = Arc<(PathBuf, PathBuf)>;
 
-async fn deny_escape(
-    State(state): State<PreviewState>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn deny_escape(State(state): State<PreviewState>, req: Request, next: Next) -> Response {
     let (_, canon) = &*state;
     let decoded = percent_decode(req.uri().path());
     let rel = decoded.trim_start_matches('/');
@@ -183,7 +179,7 @@ async fn deny_escape(
 /// 宁可当场把「工作区里到底有哪些 html」告诉它（错误信息可执行，同 CONTRACTS
 /// §2.2 的纪律）。
 pub fn resolve_target(path: &str) -> Result<String, String> {
-    let root = crate::pi_bun::loopback::workspace_dir().ok_or("workspace not configured")?;
+    let root = crate::workspace::workspace_dir().ok_or("workspace not configured")?;
     resolve_in(Path::new(&root), path)
 }
 
@@ -194,7 +190,7 @@ pub fn resolve_in(root: &Path, path: &str) -> Result<String, String> {
     if rel.is_empty() {
         return Err("preview: empty path".into());
     }
-    let full = crate::pi_bun::loopback::jail_path_in(root, rel)
+    let full = crate::workspace::jail_path_in(root, rel)
         .map_err(|_| format!("preview: '{rel}' is outside the workspace"))?;
     if !full.is_file() {
         let mut have: Vec<String> = Vec::new();
@@ -214,7 +210,7 @@ pub fn resolve_in(root: &Path, path: &str) -> Result<String, String> {
 /// 有界：限深度与条数，并跳过 node_modules 等。**不做全量遍历**——workspace 里
 /// 可能有 node_modules 之类（本仓库在无界遍历上吃过亏）。
 pub fn targets() -> serde_json::Value {
-    let root = match crate::pi_bun::loopback::workspace_dir() {
+    let root = match crate::workspace::workspace_dir() {
         Some(r) => r,
         None => return serde_json::json!([]),
     };
@@ -303,12 +299,7 @@ mod tests {
 
     async fn get(app: Router, target: &str) -> (StatusCode, String, String) {
         let res = app
-            .oneshot(
-                Request::builder()
-                    .uri(target)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(target).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = res.status();
@@ -347,7 +338,10 @@ mod tests {
     async fn refuses_escape_readonly_and_symlink() {
         let root = fixture("deny");
         // 逃逸诱饵：放在 root 之外
-        let bait = root.parent().unwrap().join(format!("pi-bait-{}.json", std::process::id()));
+        let bait = root
+            .parent()
+            .unwrap()
+            .join(format!("pi-bait-{}.json", std::process::id()));
         std::fs::write(&bait, b"SECRET").unwrap();
 
         // `..` 直接拒，且**不泄露内容**
@@ -469,7 +463,10 @@ mod tests {
         let root = fixture("resolve");
 
         // 存在 → 通过，且归一化掉前导斜杠
-        assert_eq!(resolve_in(&root, "/app/index.html").unwrap(), "app/index.html");
+        assert_eq!(
+            resolve_in(&root, "/app/index.html").unwrap(),
+            "app/index.html"
+        );
 
         // 不存在 → 报错里必须带上现有的 html，且提示先 write
         let e = resolve_in(&root, "gomoku/index.html").unwrap_err();

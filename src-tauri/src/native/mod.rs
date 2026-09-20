@@ -597,7 +597,7 @@ fn photos(op: &str, args: &Value) -> Result<String, String> {
     // 再把**绝对路径**交给原生侧 —— 原生侧不做任何路径判断，信任边界只有
     // 这一处。
     let dest_abs = if op == "save" {
-        let abs = crate::pi_bun::loopback::jail_path(&dest_rel)?;
+        let abs = crate::workspace::jail_path(&dest_rel)?;
         // 原生侧写文件不会自动建父目录，这里显式建（仍在校验过的路径内）
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("create dir for photo: {e}"))?;

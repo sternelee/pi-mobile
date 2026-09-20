@@ -6,15 +6,17 @@ mod git;
 mod goal;
 mod http_tool;
 mod keepalive;
+mod logcat;
 mod mcp;
 mod native;
 mod oauth;
 mod pi_bun;
-mod qjs;
 mod preview;
+mod qjs;
 mod script;
 mod sessions;
 mod skills;
+mod workspace;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -59,7 +61,7 @@ async fn agent_init(app: tauri::AppHandle) -> Result<(), String> {
     // 失败要进设备日志（真机上只有设备日志可看，前端那条 status 文字
     // 拿不出来）—— 错误串里带 JS 侧 boot_error，是定位根因的关键。
     if let Err(e) = &r {
-        pi_bun::logcat(&format!("agent_init failed: {e}"));
+        crate::logcat::logcat(&format!("agent_init failed: {e}"));
     }
     r
 }
@@ -309,10 +311,7 @@ async fn preview_open_external(
     path: String,
 ) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let url = format!(
-        "http://127.0.0.1:{port}/{}",
-        path.trim_start_matches('/')
-    );
+    let url = format!("http://127.0.0.1:{port}/{}", path.trim_start_matches('/'));
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| format!("open_url: {e}"))
@@ -362,13 +361,13 @@ async fn ask_user_respond(request_id: String, answer: String) -> Result<(), Stri
 /// M3：回滚 workspace 文件到上一次覆盖写入前（消费对应备份）。
 #[tauri::command]
 fn workspace_revert(path: String) -> Result<u64, String> {
-    pi_bun::loopback::revert_workspace_file(&path)
+    crate::workspace::revert_workspace_file(&path)
 }
 
 /// M3：查询某 workspace 文件的最新备份时间戳（null = 无备份）。
 #[tauri::command]
 fn workspace_backup_info(path: String) -> Result<String, String> {
-    match pi_bun::loopback::latest_backup_millis(&path) {
+    match crate::workspace::latest_backup_millis(&path) {
         Some(m) => Ok(format!("{{\"millis\":{m}}}")),
         None => Ok("null".into()),
     }
@@ -377,13 +376,13 @@ fn workspace_backup_info(path: String) -> Result<String, String> {
 /// M3：workspace 文件树（扁平列表，深度 ≤6 / 条目 ≤500）。
 #[tauri::command]
 fn workspace_tree() -> Result<String, String> {
-    pi_bun::loopback::workspace_tree()
+    crate::workspace::workspace_tree()
 }
 
 /// M3：workspace 文件只读预览（上限 256KB）。
 #[tauri::command]
 fn workspace_read(path: String) -> Result<String, String> {
-    pi_bun::loopback::workspace_read(&path)
+    crate::workspace::workspace_read(&path)
 }
 
 /// M3：会话索引（modifiedAt 倒序，供会话列表 UI）。
@@ -455,11 +454,11 @@ pub fn run() {
                 use tauri::Emitter;
                 let _ = handle.emit("pi-agent-event", json);
             };
-            pi_bun::loopback::set_event_sink(emit.clone());
-            // B 路线（QuickJS）的事件汇：agent 事件经它投成 pi-agent-event
+            // agent 事件（QuickJS 路线）→ pi-agent-event。事件形状是 pi-agent-core 的
+            // 原始形状，UI 认的就是那套（见 docs/CONTRACTS.md）。
             qjs::set_event_sink(emit.clone());
             // fetch 工具的日志汇（`pi-host-tools::http` 抽出去后不再直接依赖 logcat）
-            pi_host_tools::http::set_log_sink(pi_bun::logcat);
+            pi_host_tools::http::set_log_sink(crate::logcat::logcat);
             approval::set_event_sink(emit.clone());
             ask_user::set_event_sink(emit);
 

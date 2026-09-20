@@ -186,7 +186,7 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .into();
-        let old = crate::pi_bun::loopback::read_workspace_rel(&path);
+        let old = crate::workspace::read_workspace_rel(&path);
         match payload.get("tool").and_then(|v| v.as_str()) {
             Some("write") => {
                 if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
@@ -203,12 +203,9 @@ pub fn request(payload: &serde_json::Value) -> serde_json::Value {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     if let Some(content) = old {
-                        if let Ok(updated) = crate::pi_bun::loopback::apply_edit(
-                            &content,
-                            old_text,
-                            new_text,
-                            replace_all,
-                        ) {
+                        if let Ok(updated) =
+                            crate::workspace::apply_edit(&content, old_text, new_text, replace_all)
+                        {
                             diff = unified_diff(&path, &content, &updated);
                         }
                     }
